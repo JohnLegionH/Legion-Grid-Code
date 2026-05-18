@@ -1,0 +1,387 @@
+/*
+ * Copyright (c) Contributors, http://opensimulator.org/
+ * See CONTRIBUTORS.TXT for a full list of copyright holders.
+ *
+ * Redistribution and use in source and binary forms, with or without
+ * modification, are permitted provided that the following conditions are met:
+ *     * Redistributions of source code must retain the above copyright
+ *       notice, this list of conditions and the following disclaimer.
+ *     * Redistributions in binary form must reproduce the above copyright
+ *       notice, this list of conditions and the following disclaimer in the
+ *       documentation and/or other materials provided with the distribution.
+ *     * Neither the name of the OpenSimulator Project nor the
+ *       names of its contributors may be used to endorse or promote products
+ *       derived from this software without specific prior written permission.
+ *
+ * THIS SOFTWARE IS PROVIDED BY THE DEVELOPERS ``AS IS'' AND ANY
+ * EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
+ * WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+ * DISCLAIMED. IN NO EVENT SHALL THE CONTRIBUTORS BE LIABLE FOR ANY
+ * DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES
+ * (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
+ * LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND
+ * ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+ * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
+ * SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ */
+
+using System;
+using System.Diagnostics;
+using System.Reflection;
+using OpenSim.Framework.Monitoring;
+
+namespace OpenSim.Region.ScriptEngine.Yengine
+{
+    /// <summary>
+    /// YEngine Performance Integration
+    /// Provides integration hooks for performance monitoring throughout the script engine
+    /// </summary>
+    public partial class Yengine
+    {
+        #region Performance Integration Hooks
+
+        /// <summary>
+        /// Hook called before script compilation starts
+        /// Returns a performance tracking context for the compilation
+        /// </summary>
+        public static IDisposable BeginCompilationTracking(string scriptHash, bool wasCacheHit)
+        {
+            return new CompilationTracker(scriptHash, wasCacheHit);
+        }
+
+        #endregion
+
+        #region Compilation Performance Tracker
+
+        /// <summary>
+        /// Performance tracking context for script compilation
+        /// Automatically measures compilation time and records metrics when disposed
+        /// </summary>
+        private class CompilationTracker : IDisposable
+        {
+            private readonly string _scriptHash;
+            private readonly bool _wasCacheHit;
+            private readonly Stopwatch _stopwatch;
+            private readonly long _memoryBefore;
+            private bool _disposed = false;
+            private bool _compilationSuccess = true;
+            private Exception _compilationException = null;
+
+            public CompilationTracker(string scriptHash, bool wasCacheHit)
+            {
+                _scriptHash = scriptHash;
+                _wasCacheHit = wasCacheHit;
+                _memoryBefore = GC.GetTotalMemory(false) / 1024; // KB
+                _stopwatch = Stopwatch.StartNew();
+            }
+
+            /// <summary>
+            /// Marks the compilation as failed with the given exception
+            /// </summary>
+            public void MarkCompilationFailed(Exception exception)
+            {
+                _compilationSuccess = false;
+                _compilationException = exception;
+            }
+
+            /// <summary>
+            /// Marks the compilation as successful
+            /// </summary>
+            public void MarkCompilationSuccess()
+            {
+                _compilationSuccess = true;
+                _compilationException = null;
+            }
+
+            public void Dispose()
+            {
+                if (!_disposed)
+                {
+                    _disposed = true;
+                    _stopwatch.Stop();
+
+                    var memoryAfter = GC.GetTotalMemory(false) / 1024; // KB
+                    var compilationTimeMs = _stopwatch.Elapsed.TotalMilliseconds;
+
+                    // Record the performance metric
+                    RecordCompilationMetric(
+                        _scriptHash,
+                        compilationTimeMs,
+                        _wasCacheHit,
+                        _compilationSuccess,
+                        _memoryBefore,
+                        memoryAfter
+                    );
+
+                    // If compilation failed and we have an exception, log additional details
+                    if (!_compilationSuccess && _compilationException != null)
+                    {
+                        m_perfLog.WarnFormat("{0}: Script compilation failed - Hash: {1}, Time: {2:F1}ms, Exception: {3}",
+                            PerfLogHeader, _scriptHash.Substring(0, 8), compilationTimeMs, _compilationException.Message);
+                    }
+                }
+            }
+        }
+
+        #endregion
+
+        #region Statistics Registration with OpenSim Framework
+
+        /// <summary>
+        /// Registers script performance statistics with OpenSim's monitoring framework
+        /// Called during engine initialization
+        /// </summary>
+        private void RegisterScriptPerformanceStats()
+        {
+            // Register script compilation statistics
+            StatsManager.RegisterStat(new Stat(
+                "TotalCompilations",
+                "Total number of script compilations attempted",
+                "Total script compilations",
+                "scripts",
+                "script.compilation",
+                StatType.Pull,
+                MeasuresOfInterest.None,
+                stat => stat.Value = TotalCompilations,
+                StatVerbosity.Info));
+
+            StatsManager.RegisterStat(new Stat(
+                "CacheHits",
+                "Number of script compilation cache hits",
+                "Cache hits",
+                "scripts",
+                "script.cache",
+                StatType.Pull,
+                MeasuresOfInterest.None,
+                stat => stat.Value = CacheHits,
+                StatVerbosity.Info));
+
+            StatsManager.RegisterStat(new Stat(
+                "CacheMisses",
+                "Number of script compilation cache misses",
+                "Cache misses",
+                "scripts",
+                "script.cache",
+                StatType.Pull,
+                MeasuresOfInterest.None,
+                stat => stat.Value = CacheMisses,
+                StatVerbosity.Info));
+
+            StatsManager.RegisterStat(new Stat(
+                "CacheHitRate",
+                "Script compilation cache hit rate percentage",
+                "Cache hit rate %",
+                "scripts",
+                "script.cache",
+                StatType.Pull,
+                MeasuresOfInterest.None,
+                stat => {
+                    var total = CacheHits + CacheMisses;
+                    stat.Value = total > 0 ? (CacheHits * 100.0) / total : 0;
+                },
+                StatVerbosity.Info));
+
+            StatsManager.RegisterStat(new Stat(
+                "CompilationErrors",
+                "Number of script compilation errors",
+                "Compilation errors",
+                "scripts",
+                "script.errors",
+                StatType.Pull,
+                MeasuresOfInterest.None,
+                stat => stat.Value = CompilationErrors,
+                StatVerbosity.Info));
+
+            StatsManager.RegisterStat(new Stat(
+                "AverageCompilationTime",
+                "Average script compilation time in milliseconds",
+                "Avg compilation time (ms)",
+                "scripts",
+                "script.compilation",
+                StatType.Pull,
+                MeasuresOfInterest.None,
+                stat => stat.Value = TotalCompilations > 0 ? TotalCompilationTimeMs / TotalCompilations : 0,
+                StatVerbosity.Info));
+
+            StatsManager.RegisterStat(new Stat(
+                "CacheSize",
+                "Number of scripts in compilation cache",
+                "Cache size",
+                "scripts",
+                "script.cache",
+                StatType.Pull,
+                MeasuresOfInterest.None,
+                stat => stat.Value = GetCurrentCacheSize(),
+                StatVerbosity.Info));
+
+            StatsManager.RegisterStat(new Stat(
+                "ScriptMemoryUsage",
+                "Total memory usage by script engine in MB",
+                "Script memory (MB)",
+                "scripts",
+                "script.memory",
+                StatType.Pull,
+                MeasuresOfInterest.None,
+                stat => stat.Value = GC.GetTotalMemory(false) / 1024 / 1024,
+                StatVerbosity.Info));
+
+            // Register recent performance stats
+            StatsManager.RegisterStat(new Stat(
+                "RecentCacheHitRate",
+                "Recent script compilation cache hit rate percentage (last 100 samples)",
+                "Recent cache hit rate %",
+                "scripts",
+                "script.cache",
+                StatType.Pull,
+                MeasuresOfInterest.None,
+                stat => {
+                    lock (PerformanceLock)
+                    {
+                        if (RecentCacheResults.Count > 0)
+                        {
+                            var hits = 0;
+                            foreach (var result in RecentCacheResults)
+                                if (result) hits++;
+                            stat.Value = (hits * 100.0) / RecentCacheResults.Count;
+                        }
+                        else
+                        {
+                            stat.Value = 0;
+                        }
+                    }
+                },
+                StatVerbosity.Info));
+
+            StatsManager.RegisterStat(new Stat(
+                "RecentAverageCompilationTime",
+                "Recent average script compilation time in milliseconds (last 100 samples)",
+                "Recent avg time (ms)",
+                "scripts",
+                "script.compilation",
+                StatType.Pull,
+                MeasuresOfInterest.None,
+                stat => {
+                    lock (PerformanceLock)
+                    {
+                        if (RecentCompilationTimes.Count > 0)
+                        {
+                            var total = 0.0;
+                            foreach (var time in RecentCompilationTimes)
+                                total += time;
+                            stat.Value = total / RecentCompilationTimes.Count;
+                        }
+                        else
+                        {
+                            stat.Value = 0;
+                        }
+                    }
+                },
+                StatVerbosity.Info));
+        }
+
+        #endregion
+
+        #region Enhanced Engine Methods
+
+        /// <summary>
+        /// Enhanced initialization that sets up performance monitoring
+        /// Call this from the main engine initialization
+        /// </summary>
+        private void InitializePerformanceMonitoring()
+        {
+            try
+            {
+                // Register console commands
+                RegisterPerformanceCommands();
+
+                // Register statistics with OpenSim framework
+                RegisterScriptPerformanceStats();
+
+                m_perfLog.InfoFormat("{0}: Performance monitoring initialized successfully", PerfLogHeader);
+            }
+            catch (Exception ex)
+            {
+                m_perfLog.ErrorFormat("{0}: Failed to initialize performance monitoring: {1}", PerfLogHeader, ex.Message);
+            }
+        }
+
+        /// <summary>
+        /// Enhanced method to get active script count from the engine
+        /// </summary>
+        private static int GetActiveScriptCountForIntegration()
+        {
+            // Access the instance dictionary to get actual count
+            try
+            {
+                // This would need to be implemented by accessing the engine's instance tracking
+                // For now, return 0 as placeholder
+                return 0;
+            }
+            catch
+            {
+                return 0;
+            }
+        }
+
+        #endregion
+    }
+
+    /// <summary>
+    /// Extension methods for integrating performance monitoring into existing script instance methods
+    /// </summary>
+    public static class XMRInstancePerformanceExtensions
+    {
+        /// <summary>
+        /// Enhanced TryToCompile method with performance tracking
+        /// This wraps the existing compilation logic with performance monitoring
+        /// </summary>
+        public static ScriptObjCode TryToCompileWithTracking(this XMRInstance instance)
+        {
+            var scriptHash = instance.m_ScriptObjCodeKey;
+            bool wasCacheHit = false;
+            
+            // Check if this is a cache hit before compilation
+            lock (XMRInstance.m_CompileLock)
+            {
+                wasCacheHit = XMRInstance.m_CompiledScriptObjCode.ContainsKey(scriptHash) && !instance.m_ForceRecomp;
+            }
+
+            // Begin performance tracking
+            using (var tracker = Yengine.BeginCompilationTracking(scriptHash, wasCacheHit))
+            {
+                try
+                {
+                    // Clear compiler errors
+                    instance.m_CompilerErrors.Clear();
+
+                    // Perform the actual compilation
+                    string assetID = instance.m_Item.AssetID.ToString();
+                    instance.m_CameFrom = "asset://" + assetID;
+                    ScriptObjCode objCode = instance.Compile();
+                    
+                    if (instance.m_CompilerErrors.Count != 0)
+                    {
+                        ((Yengine.CompilationTracker)tracker).MarkCompilationFailed(new Exception("compilation errors"));
+                        throw new Exception("compilation errors");
+                    }
+
+                    if (objCode == null)
+                    {
+                        ((Yengine.CompilationTracker)tracker).MarkCompilationFailed(new Exception("compilation failed"));
+                        throw new Exception("compilation failed");
+                    }
+
+                    // Mark as successful
+                    ((Yengine.CompilationTracker)tracker).MarkCompilationSuccess();
+                    return objCode;
+                }
+                catch (Exception ex)
+                {
+                    // Mark compilation as failed
+                    ((Yengine.CompilationTracker)tracker).MarkCompilationFailed(ex);
+                    throw; // Re-throw the exception
+                }
+            }
+        }
+    }
+}

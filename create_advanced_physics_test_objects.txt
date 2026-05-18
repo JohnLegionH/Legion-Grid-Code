@@ -1,0 +1,102 @@
+// Console commands to create advanced physics test objects
+// Copy and paste these commands one by one into the OpenSim console
+
+// =============================================
+// 1. CREATE MAIN TEST CONTROLLER OBJECT
+// =============================================
+
+// Create the advanced physics test controller
+create prim AdvancedPhysicsTest
+edit prim AdvancedPhysicsTest position 128 128 25
+edit prim AdvancedPhysicsTest scale 1.5 1.5 1.5
+edit prim AdvancedPhysicsTest color 0.2 0.8 0.2
+edit prim AdvancedPhysicsTest text "ADVANCED PHYSICS\nTEST CONTROLLER\nTouch to test" 1 1 0 1
+
+// Add our test script to the controller
+// (You'll need to copy the script from test_advanced_physics_lsl.lsl into this object)
+
+// =============================================
+// 2. CREATE DESTRUCTIBLE TEST OBJECTS
+// =============================================
+
+// Glass object (for destructible testing)
+create prim GlassObject
+edit prim GlassObject position 135 125 25
+edit prim GlassObject scale 2 2 2
+edit prim GlassObject color 0.8 0.9 1.0
+edit prim GlassObject text "GLASS\nDESTRUCTIBLE" 0.8 0.9 1.0 1
+edit prim GlassObject physics true
+
+// Metal object (for material testing)
+create prim MetalObject
+edit prim MetalObject position 135 131 25
+edit prim MetalObject scale 2 2 2
+edit prim MetalObject color 0.7 0.7 0.8
+edit prim MetalObject text "METAL\nOBJECT" 0.7 0.7 0.8 1
+edit prim MetalObject physics true
+
+// Wood object (for material testing)
+create prim WoodObject
+edit prim WoodObject position 121 125 25
+edit prim WoodObject scale 2 2 2
+edit prim WoodObject color 0.6 0.4 0.2
+edit prim WoodObject text "WOOD\nOBJECT" 0.6 0.4 0.2 1
+edit prim WoodObject physics true
+
+// =============================================
+// 3. CREATE CCD TEST OBJECTS
+// =============================================
+
+// Fast moving projectile for CCD testing
+create prim FastProjectile
+edit prim FastProjectile position 120 128 26
+edit prim FastProjectile scale 0.2 0.2 0.2
+edit prim FastProjectile color 1 0.5 0
+edit prim FastProjectile text "FAST\nPROJECTILE" 1 0.5 0 1
+edit prim FastProjectile physics true
+
+// CCD Target
+create prim CCDTarget
+edit prim CCDTarget position 140 128 25
+edit prim CCDTarget scale 1 3 3
+edit prim CCDTarget color 1 0 0
+edit prim CCDTarget text "CCD\nTARGET" 1 0 0 1
+edit prim CCDTarget physics true
+
+// =============================================
+// 4. CREATE COLLISION TEST FLOOR
+// =============================================
+
+// Large floor for all tests
+create prim TestFloor
+edit prim TestFloor position 128 128 20
+edit prim TestFloor scale 20 20 0.5
+edit prim TestFloor color 0.5 0.5 0.5
+edit prim TestFloor text "TEST FLOOR" 0.5 0.5 0.5 1
+edit prim TestFloor physics true
+
+// =============================================
+// 5. CREATE COLLISION FORCE TEST OBJECTS
+// =============================================
+
+// Heavy object for collision force testing
+create prim HeavyObject
+edit prim HeavyObject position 125 135 28
+edit prim HeavyObject scale 1.5 1.5 1.5
+edit prim HeavyObject color 0.3 0.3 0.3
+edit prim HeavyObject text "HEAVY\nOBJECT" 0.3 0.3 0.3 1
+edit prim HeavyObject physics true
+
+// Light object for collision force testing
+create prim LightObject
+edit prim LightObject position 131 135 28
+edit prim LightObject scale 0.8 0.8 0.8
+edit prim LightObject color 0.9 0.9 0.9
+edit prim LightObject text "LIGHT\nOBJECT" 0.9 0.9 0.9 1
+edit prim LightObject physics true
+
+// =============================================
+// SETUP COMPLETE
+// =============================================
+// Now add the test script (test_advanced_physics_lsl.lsl) to AdvancedPhysicsTest object
+// Touch the AdvancedPhysicsTest object to run all advanced physics tests

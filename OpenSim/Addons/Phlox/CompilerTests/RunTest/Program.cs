@@ -1,0 +1,179 @@
+using System;
+using System.Collections.Generic;
+using InWorldz.Phlox.Glue;
+using InWorldz.Phlox.Types;
+
+class Program
+{
+    static int _passed = 0;
+    static int _failed = 0;
+
+    static void Main()
+    {
+        Test("Hello World", @"
+default {
+    state_entry() {
+        llSay(0, ""Hello"");
+    }
+}", expectSuccess: true);
+
+        Test("Global variable + arithmetic", @"
+integer g_count = 0;
+
+increment() {
+    g_count = g_count + 1;
+}
+
+default {
+    state_entry() {
+        increment();
+        llSay(0, (string)g_count);
+    }
+}", expectSuccess: true);
+
+        Test("If/else", @"
+default {
+    state_entry() {
+        integer x = 5;
+        if (x > 3) {
+            llSay(0, ""big"");
+        } else {
+            llSay(0, ""small"");
+        }
+    }
+}", expectSuccess: true);
+
+        Test("While loop", @"
+default {
+    state_entry() {
+        integer i = 0;
+        while (i < 10) {
+            i = i + 1;
+        }
+        llSay(0, (string)i);
+    }
+}", expectSuccess: true);
+
+        Test("For loop", @"
+default {
+    state_entry() {
+        integer i;
+        for (i = 0; i < 5; i++) {
+            llSay(0, (string)i);
+        }
+    }
+}", expectSuccess: true);
+
+        Test("String concatenation", @"
+default {
+    state_entry() {
+        string s = ""Hello"" + "" "" + ""World"";
+        llSay(0, s);
+    }
+}", expectSuccess: true);
+
+        Test("Vector literal", @"
+default {
+    state_entry() {
+        vector v = <1.0, 2.0, 3.0>;
+        llSay(0, (string)v);
+    }
+}", expectSuccess: true);
+
+        Test("Float promotion", @"
+integer intfunc() { return 0; }
+f() {
+    float x = 1;
+    float y = intfunc();
+}
+default { state_entry() {} }
+", expectSuccess: true);
+
+        Test("Labels and jumps", @"
+f() {
+    @myLabel;
+    jump myLabel;
+}
+default {
+    touch_start(integer n) {}
+}", expectSuccess: true);
+
+        Test("Multi-event state", @"
+default {
+    state_entry() {
+        llSay(0, ""ready"");
+    }
+    touch_start(integer num) {
+        llSay(0, ""touched"");
+    }
+    timer() {
+        llSay(0, ""tick"");
+    }
+}", expectSuccess: true);
+
+        Test("State change", @"
+default {
+    state_entry() {
+        state active;
+    }
+}
+state active {
+    state_entry() {
+        llSay(0, ""active"");
+    }
+}", expectSuccess: true);
+
+        Test("List literal", @"
+default {
+    state_entry() {
+        list l = [1, 2, 3];
+        llSay(0, (string)llGetListLength(l));
+    }
+}", expectSuccess: true);
+
+        Test("Return type check — missing return should error", @"
+integer f() {
+}
+default { state_entry() {} }
+", expectSuccess: false);
+
+        Console.WriteLine();
+        Console.WriteLine($"Results: {_passed} passed, {_failed} failed");
+    }
+
+    static void Test(string name, string lsl, bool expectSuccess)
+    {
+        var listener = new TestListener();
+        var fe = new CompilerFrontend(listener,
+            @"D:\legion-grid-source\OpenSim\Addons\Phlox\grammar", true);
+        var script = fe.Compile(lsl);
+
+        bool succeeded = !listener.HasErrors() && script != null;
+        bool pass = succeeded == expectSuccess;
+
+        if (pass)
+        {
+            _passed++;
+            Console.WriteLine($"  PASS  {name}");
+        }
+        else
+        {
+            _failed++;
+            Console.WriteLine($"  FAIL  {name}");
+            if (listener.Errors.Count > 0)
+                foreach (var e in listener.Errors)
+                    Console.WriteLine($"         {e}");
+            if (succeeded && !expectSuccess)
+                Console.WriteLine($"         (expected failure but succeeded)");
+        }
+    }
+}
+
+class TestListener : ILSLListener
+{
+    public List<string> Errors = new List<string>();
+    public void Error(string msg)         { Errors.Add(msg); }
+    public void Info(string msg)          { }
+    public bool HasErrors()               => Errors.Count > 0;
+    public void CompilationFinished()     { }
+}

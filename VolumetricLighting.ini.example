@@ -1,0 +1,500 @@
+;; Configuration for OpenSim Volumetric Lighting and Atmospheric Effects
+;; Provides god rays, volumetric fog, clouds, and atmospheric scattering
+;; Revolutionary visual upgrade matching AAA game engines
+
+[VolumetricLighting]
+    ;; Enable volumetric lighting system
+    ;; Default: true
+    Enabled = true
+
+    ;; Volumetric lighting intensity multiplier
+    ;; Range: 0.0 to 10.0
+    ;; Default: 1.0
+    VolumetricIntensity = 1.0
+
+    ;; Number of raymarch samples for volumetric calculations
+    ;; Higher values = better quality but lower performance
+    ;; Low: 32, Medium: 64, High: 128, Ultra: 256, Cinematic: 512
+    ;; Default: 64
+    SampleCount = 64
+
+    ;; Enable god rays (crepuscular rays)
+    ;; Creates dramatic light shafts through atmosphere
+    ;; Default: true
+    EnableGodRays = true
+
+    ;; God ray intensity
+    ;; Controls brightness of light shafts
+    ;; Range: 0.0 to 5.0
+    ;; Default: 1.0
+    GodRayIntensity = 1.0
+
+    ;; God ray decay factor
+    ;; Controls how rays fade with distance
+    ;; Range: 0.9 to 1.0
+    ;; Default: 0.96
+    GodRayDecay = 0.96
+
+    ;; God ray weight
+    ;; Blending factor for final image
+    ;; Range: 0.0 to 1.0
+    ;; Default: 0.4
+    GodRayWeight = 0.4
+
+    ;; God ray density
+    ;; Controls ray visibility threshold
+    ;; Range: 0.0 to 1.0
+    ;; Default: 0.8
+    GodRayDensity = 0.8
+
+    ;; Scattering coefficient
+    ;; Physical light scattering in atmosphere
+    ;; Range: 0.001 to 0.1
+    ;; Default: 0.05
+    ScatteringCoefficient = 0.05
+
+    ;; Absorption coefficient
+    ;; Light absorption by particles
+    ;; Range: 0.001 to 0.1
+    ;; Default: 0.01
+    AbsorptionCoefficient = 0.01
+
+    ;; Anisotropy factor for Mie scattering
+    ;; Controls directional scattering (forward/backward)
+    ;; Range: -1.0 to 1.0 (negative = backscatter, positive = forward scatter)
+    ;; Default: 0.8
+    Anisotropy = 0.8
+
+    ;; Maximum ray marching distance
+    ;; Range: 100.0 to 10000.0
+    ;; Default: 1000.0
+    MaxRayDistance = 1000.0
+
+    ;; Enable volumetric shadows
+    ;; Shadows affect volumetric lighting
+    ;; Default: true
+    EnableVolumetricShadows = true
+
+    ;; Shadow strength in volumes
+    ;; Range: 0.0 to 1.0
+    ;; Default: 0.8
+    VolumetricShadowStrength = 0.8
+
+[VolumetricFog]
+    ;; Enable volumetric fog
+    ;; Default: true
+    EnableFog = true
+
+    ;; Global fog density
+    ;; Range: 0.0 to 1.0
+    ;; Default: 0.01
+    FogDensity = 0.01
+
+    ;; Fog color (R,G,B)
+    ;; Default: 0.7,0.8,0.9 (light blue-gray)
+    FogColor = 0.7,0.8,0.9
+
+    ;; Fog start distance
+    ;; Distance where fog begins
+    ;; Default: 0.0
+    FogStartDistance = 0.0
+
+    ;; Fog maximum distance
+    ;; Distance where fog reaches maximum density
+    ;; Default: 1000.0
+    FogMaxDistance = 1000.0
+
+    ;; Height-based fog falloff
+    ;; How quickly fog dissipates with altitude
+    ;; Range: 0.0 to 1.0
+    ;; Default: 0.1
+    FogHeightFalloff = 0.1
+
+    ;; Base fog height
+    ;; Ground level for fog calculation
+    ;; Default: 0.0
+    FogBaseHeight = 0.0
+
+    ;; Maximum fog height
+    ;; Altitude where fog disappears
+    ;; Default: 500.0
+    FogMaxHeight = 500.0
+
+    ;; Enable noise in fog
+    ;; Adds realistic variation to fog density
+    ;; Default: true
+    EnableFogNoise = true
+
+    ;; Fog noise scale
+    ;; Size of noise patterns
+    ;; Range: 0.01 to 1.0
+    ;; Default: 0.1
+    FogNoiseScale = 0.1
+
+    ;; Fog noise intensity
+    ;; Strength of noise variation
+    ;; Range: 0.0 to 1.0
+    ;; Default: 0.3
+    FogNoiseIntensity = 0.3
+
+    ;; Wind direction for fog (X,Y,Z)
+    ;; Default: 1.0,0.0,0.0 (east)
+    FogWindDirection = 1.0,0.0,0.0
+
+    ;; Wind speed affecting fog
+    ;; Meters per second
+    ;; Default: 5.0
+    FogWindSpeed = 5.0
+
+    ;; Enable light scattering in fog
+    ;; Creates realistic light interaction
+    ;; Default: true
+    EnableFogLightScattering = true
+
+    ;; Fog scattering intensity
+    ;; Range: 0.0 to 2.0
+    ;; Default: 0.5
+    FogScatteringIntensity = 0.5
+
+[VolumetricClouds]
+    ;; Enable volumetric clouds
+    ;; Default: true
+    EnableClouds = true
+
+    ;; Cloud coverage
+    ;; 0.0 = clear sky, 1.0 = overcast
+    ;; Default: 0.5
+    CloudCoverage = 0.5
+
+    ;; Cloud density
+    ;; Opacity of cloud volumes
+    ;; Range: 0.0 to 1.0
+    ;; Default: 0.3
+    CloudDensity = 0.3
+
+    ;; Cloud altitude
+    ;; Base height of cloud layer in meters
+    ;; Default: 2000.0
+    CloudAltitude = 2000.0
+
+    ;; Cloud layer thickness
+    ;; Vertical extent of clouds in meters
+    ;; Default: 500.0
+    CloudThickness = 500.0
+
+    ;; Cloud scale
+    ;; Horizontal size of cloud features
+    ;; Default: 1000.0
+    CloudScale = 1000.0
+
+    ;; Cloud color (R,G,B)
+    ;; Default: 1.0,1.0,1.0 (white)
+    CloudColor = 1.0,1.0,1.0
+
+    ;; Cloud movement speed
+    ;; Meters per second
+    ;; Default: 10.0
+    CloudSpeed = 10.0
+
+    ;; Cloud movement direction (X,Y)
+    ;; Default: 1.0,0.0 (east)
+    CloudDirection = 1.0,0.0
+
+    ;; Enable cloud shadows
+    ;; Clouds cast shadows on ground
+    ;; Default: true
+    EnableCloudShadows = true
+
+    ;; Cloud shadow strength
+    ;; Range: 0.0 to 1.0
+    ;; Default: 0.6
+    CloudShadowStrength = 0.6
+
+    ;; Enable silver lining effect
+    ;; Bright edges on clouds near sun
+    ;; Default: true
+    EnableSilverLining = true
+
+    ;; Silver lining intensity
+    ;; Range: 0.0 to 1.0
+    ;; Default: 0.4
+    SilverLiningIntensity = 0.4
+
+    ;; Cloud noise type
+    ;; Options: Perlin, Worley, Simplex, Voronoi
+    ;; Default: Worley
+    CloudNoiseType = Worley
+
+    ;; Number of noise octaves
+    ;; More octaves = more detail
+    ;; Range: 1 to 8
+    ;; Default: 4
+    CloudNoiseOctaves = 4
+
+    ;; Noise lacunarity
+    ;; Frequency multiplier between octaves
+    ;; Default: 2.0
+    NoiseLacunarity = 2.0
+
+    ;; Noise gain
+    ;; Amplitude multiplier between octaves
+    ;; Default: 0.5
+    NoiseGain = 0.5
+
+    ;; Enable detail noise layer
+    ;; Adds fine detail to clouds
+    ;; Default: true
+    EnableDetailNoise = true
+
+    ;; Detail noise scale
+    ;; Default: 0.1
+    DetailNoiseScale = 0.1
+
+    ;; Detail noise intensity
+    ;; Default: 0.3
+    DetailNoiseIntensity = 0.3
+
+[AtmosphericScattering]
+    ;; Enable physically-based atmospheric scattering
+    ;; Default: true
+    EnableAtmosphericScattering = true
+
+    ;; Rayleigh scattering scale height
+    ;; Atmosphere density falloff
+    ;; Default: 8000.0
+    RayleighScaleHeight = 8000.0
+
+    ;; Rayleigh scattering coefficients (R,G,B)
+    ;; Creates blue sky effect
+    ;; Default: 5.8e-6,13.5e-6,33.1e-6
+    RayleighCoefficients = 5.8e-6,13.5e-6,33.1e-6
+
+    ;; Mie scattering scale height
+    ;; Aerosol density falloff
+    ;; Default: 1200.0
+    MieScaleHeight = 1200.0
+
+    ;; Mie scattering coefficient
+    ;; Creates haze and sun glow
+    ;; Default: 21e-6
+    MieCoefficient = 21e-6
+
+    ;; Mie anisotropy (g parameter)
+    ;; Forward scattering bias
+    ;; Range: -1.0 to 1.0
+    ;; Default: 0.758
+    MieAnisotropy = 0.758
+
+    ;; Sun intensity
+    ;; Brightness of sun disk
+    ;; Default: 20.0
+    SunIntensity = 20.0
+
+    ;; Planet radius in meters
+    ;; Default: 6371000.0 (Earth)
+    PlanetRadius = 6371000.0
+
+    ;; Atmosphere radius in meters
+    ;; Default: 6471000.0
+    AtmosphereRadius = 6471000.0
+
+    ;; Ground albedo (R,G,B)
+    ;; Surface reflectance
+    ;; Default: 0.3,0.3,0.3
+    GroundAlbedo = 0.3,0.3,0.3
+
+    ;; Enable ozone layer
+    ;; Adds ozone absorption
+    ;; Default: true
+    EnableOzone = true
+
+    ;; Ozone layer height in meters
+    ;; Default: 25000.0
+    OzoneLayerHeight = 25000.0
+
+    ;; Ozone layer thickness in meters
+    ;; Default: 15000.0
+    OzoneLayerThickness = 15000.0
+
+[WeatherEffects]
+    ;; Enable dynamic weather system
+    ;; Default: true
+    EnableWeather = true
+
+    ;; Initial temperature (Celsius)
+    ;; Default: 20.0
+    Temperature = 20.0
+
+    ;; Initial humidity (0.0 to 1.0)
+    ;; Default: 0.5
+    Humidity = 0.5
+
+    ;; Atmospheric pressure (hPa)
+    ;; Default: 1013.25
+    Pressure = 1013.25
+
+    ;; Enable storms
+    ;; Default: false
+    EnableStorms = false
+
+    ;; Lightning frequency (strikes per minute)
+    ;; Default: 0.0
+    LightningFrequency = 0.0
+
+    ;; Thunder delay (seconds after lightning)
+    ;; Default: 3.0
+    ThunderDelay = 3.0
+
+    ;; Enable precipitation
+    ;; Default: false
+    EnablePrecipitation = false
+
+    ;; Precipitation type
+    ;; Options: None, Rain, Snow, Sleet, Hail
+    ;; Default: None
+    PrecipitationType = None
+
+    ;; Precipitation intensity (mm/hour)
+    ;; Default: 0.0
+    PrecipitationIntensity = 0.0
+
+[SpecialEffects]
+    ;; Enable aurora borealis
+    ;; Northern lights effect
+    ;; Default: false
+    EnableAurora = false
+
+    ;; Aurora intensity
+    ;; Range: 0.0 to 2.0
+    ;; Default: 1.0
+    AuroraIntensity = 1.0
+
+    ;; Aurora altitude in meters
+    ;; Default: 100000.0
+    AuroraAltitude = 100000.0
+
+    ;; Aurora primary color (R,G,B)
+    ;; Default: 0.0,1.0,0.4 (green)
+    AuroraPrimaryColor = 0.0,1.0,0.4
+
+    ;; Aurora secondary color (R,G,B)
+    ;; Default: 1.0,0.0,0.3 (pink)
+    AuroraSecondaryColor = 1.0,0.0,0.3
+
+    ;; Aurora animation speed
+    ;; Default: 1.0
+    AuroraAnimationSpeed = 1.0
+
+    ;; Enable rainbow effect
+    ;; Default: false
+    EnableRainbow = false
+
+    ;; Rainbow intensity
+    ;; Range: 0.0 to 1.0
+    ;; Default: 1.0
+    RainbowIntensity = 1.0
+
+    ;; Rainbow radius in meters
+    ;; Default: 5000.0
+    RainbowRadius = 5000.0
+
+    ;; Enable secondary rainbow
+    ;; Default: true
+    EnableSecondaryRainbow = true
+
+[Performance]
+    ;; Rendering quality level
+    ;; Options: Low, Medium, High, Ultra, Cinematic
+    ;; Default: High
+    Quality = High
+
+    ;; Enable temporal upsampling
+    ;; Improves performance by reusing previous frames
+    ;; Default: false
+    EnableTemporalUpsampling = false
+
+    ;; Temporal blend factor
+    ;; How much to blend with previous frame
+    ;; Range: 0.0 to 1.0
+    ;; Default: 0.9
+    TemporalBlendFactor = 0.9
+
+    ;; Target framerate for auto-optimization
+    ;; System will adjust quality to maintain this FPS
+    ;; Default: 30.0
+    TargetFramerate = 30.0
+
+    ;; Enable auto quality adjustment
+    ;; Dynamically adjusts settings for performance
+    ;; Default: true
+    EnableAutoQuality = true
+
+    ;; Update frequency in milliseconds
+    ;; How often to update volumetric effects
+    ;; Default: 33 (30 FPS)
+    UpdateFrequency = 33
+
+;; Quality presets:
+;;
+;; [Low Quality]
+;; SampleCount = 32
+;; CloudNoiseOctaves = 2
+;; EnableDetailNoise = false
+;; EnableTemporalUpsampling = true
+;; UpdateFrequency = 66
+;;
+;; [Medium Quality]
+;; SampleCount = 64
+;; CloudNoiseOctaves = 3
+;; EnableDetailNoise = true
+;; EnableTemporalUpsampling = true
+;; UpdateFrequency = 50
+;;
+;; [High Quality]
+;; SampleCount = 128
+;; CloudNoiseOctaves = 4
+;; EnableDetailNoise = true
+;; EnableTemporalUpsampling = false
+;; UpdateFrequency = 33
+;;
+;; [Ultra Quality]
+;; SampleCount = 256
+;; CloudNoiseOctaves = 5
+;; EnableDetailNoise = true
+;; EnableTemporalUpsampling = false
+;; UpdateFrequency = 16
+;;
+;; [Cinematic Quality]
+;; SampleCount = 512
+;; CloudNoiseOctaves = 6
+;; EnableDetailNoise = true
+;; EnableTemporalUpsampling = false
+;; UpdateFrequency = 16
+
+;; Hardware recommendations:
+;;
+;; High-End (RTX 3080+):
+;; - Quality = Ultra or Cinematic
+;; - All effects enabled
+;; - No temporal upsampling needed
+;;
+;; Mid-Range (GTX 1660/RTX 2060):
+;; - Quality = High
+;; - Most effects enabled
+;; - Optional temporal upsampling
+;;
+;; Low-End (GTX 1050):
+;; - Quality = Low or Medium
+;; - Enable temporal upsampling
+;; - Disable some effects for performance
+
+;; Tips for best visual quality:
+;;
+;; 1. Enable god rays for dramatic lighting
+;; 2. Use volumetric fog for atmosphere
+;; 3. Enable cloud shadows for realism
+;; 4. Adjust fog density based on weather
+;; 5. Use atmospheric scattering for realistic skies
+;; 6. Enable silver lining for beautiful clouds
+;; 7. Add aurora for night scenes
+;; 8. Use weather effects for immersion

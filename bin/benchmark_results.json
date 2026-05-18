@@ -1,0 +1,99 @@
+{
+  "testStartTime": "2025-08-13T21:28:13.6068174Z",
+  "testEndTime": "2025-08-13T21:28:45.3578589Z",
+  "totalTestDuration": "00:00:31.7510415",
+  "sceneName": "Ebony",
+  "regionName": "Ebony",
+  "hasErrors": false,
+  "errorMessage": null,
+  "basicPerformance": {
+    "averageCrossingTime": 61.46809999999999,
+    "minCrossingTime": 32.8522,
+    "maxCrossingTime": 94.6361,
+    "standardDeviation": 14.468603361835076,
+    "memoryImpactMB": 0.04864501953125,
+    "gcGen0Collections": 1,
+    "gcGen1Collections": 1,
+    "gcGen2Collections": 1,
+    "successRate": 100
+  },
+  "loadTest": {
+    "totalCrossings": 50,
+    "averageCrossingTime": 61.456716,
+    "crossingsPerSecond": 6.089834980209437,
+    "maxConcurrentCrossings": 10,
+    "totalMemoryImpactMB": 0.8246078491210938,
+    "memoryPerCrossingKB": 16.88796875,
+    "testDuration": "00:00:08.2104031",
+    "p50CrossingTime": 63.76805,
+    "p95CrossingTime": 81.38539499999999,
+    "p99CrossingTime": 94.17766999999999
+  },
+  "concurrencyTest": {
+    "concurrencyResults": [
+      {
+        "concurrencyLevel": 1,
+        "averageCrossingTime": 43.6663,
+        "maxCrossingTime": 43.6663,
+        "totalWallClockTime": 43.9053,
+        "efficiencyRatio": 99.45564658480868
+      },
+      {
+        "concurrencyLevel": 3,
+        "averageCrossingTime": 68.82273333333335,
+        "maxCrossingTime": 74.0546,
+        "totalWallClockTime": 74.4114,
+        "efficiencyRatio": 277.4685061697536
+      },
+      {
+        "concurrencyLevel": 5,
+        "averageCrossingTime": 66.67558,
+        "maxCrossingTime": 78.8531,
+        "totalWallClockTime": 79.1081,
+        "efficiencyRatio": 421.4206889054345
+      },
+      {
+        "concurrencyLevel": 10,
+        "averageCrossingTime": 58.514700000000005,
+        "maxCrossingTime": 78.6167,
+        "totalWallClockTime": 78.9358,
+        "efficiencyRatio": 741.2948244016023
+      },
+      {
+        "concurrencyLevel": 15,
+        "averageCrossingTime": 67.21277333333332,
+        "maxCrossingTime": 90.6867,
+        "totalWallClockTime": 91.0559,
+        "efficiencyRatio": 1107.2227060519963
+      },
+      {
+        "concurrencyLevel": 20,
+        "averageCrossingTime": 62.36021999999999,
+        "maxCrossingTime": 82.0221,
+        "totalWallClockTime": 82.1376,
+        "efficiencyRatio": 1518.4329710144925
+      }
+    ],
+    "optimalConcurrencyLevel": 20
+  },
+  "memoryTest": {
+    "baselineMemoryMB": 29.642990112304688,
+    "finalMemoryMB": 30.273170471191406,
+    "memoryGrowthMB": 0.6301803588867188,
+    "averageMemoryPerCrossingKB": 12.90609375,
+    "peakMemoryMB": 30.62163543701172,
+    "gcGen0Collections": 2,
+    "gcGen1Collections": 2,
+    "gcGen2Collections": 2,
+    "potentialMemoryLeakMB": 0.300201416015625
+  },
+  "stressTest": null,
+  "regressionAnalysis": {
+    "hasBaseline": false,
+    "baselineDate": "0001-01-01T00:00:00",
+    "performanceChange": 0,
+    "isRegression": false,
+    "isImprovement": false,
+    "message": "No baseline available for regression analysis"
+  }
+}

@@ -1,0 +1,116 @@
+# Advanced Physics Console Commands for LSL Testing
+# Copy and paste these commands into the OpenSim console to create test objects
+
+# =============================================
+# CREATE MAIN TEST CONTROLLER OBJECT
+# =============================================
+
+# Create the main test controller (you'll add the comprehensive_physics_test.lsl script to this)
+physics advanced destructible create AdvancedPhysicsController metal 128 128 25 2 2 2 999
+
+# =============================================
+# CREATE DESTRUCTIBLE TEST OBJECTS
+# =============================================
+
+# Very fragile glass objects for destruction testing
+physics advanced destructible create FragileGlass1 glass 135 125 25 2 2 2 25
+physics advanced destructible create FragileGlass2 glass 135 127 25 2 2 2 30
+physics advanced destructible create FragileGlass3 glass 135 129 25 2 2 2 35
+
+# Medium strength metal objects
+physics advanced destructible create MetalTarget1 metal 135 131 25 2 2 2 75
+physics advanced destructible create MetalTarget2 metal 135 133 25 2 2 2 80
+
+# Strong concrete objects  
+physics advanced destructible create ConcreteWall1 concrete 140 128 25 3 1 4 120
+physics advanced destructible create ConcreteWall2 concrete 140 132 25 3 1 4 125
+
+# =============================================
+# CREATE PROJECTILES FOR TESTING
+# =============================================
+
+# Light projectiles for glass testing
+physics advanced destructible create LightHammer metal 120 125 26 0.5 0.5 1 200
+physics advanced destructible create LightBall metal 120 127 26 0.3 0.3 0.3 200
+
+# Medium projectiles for metal testing
+physics advanced destructible create MediumHammer metal 120 129 26 0.8 0.8 1.5 200
+physics advanced destructible create MediumBall metal 120 131 26 0.6 0.6 0.6 200
+
+# Heavy projectiles for concrete testing
+physics advanced destructible create HeavyHammer metal 120 133 26 1.2 1.2 2 200
+physics advanced destructible create HeavyBall metal 120 135 26 1 1 1 200
+
+# =============================================
+# CREATE CCD TEST OBJECTS
+# =============================================
+
+# Fast moving objects for CCD testing
+physics advanced destructible create CCDTarget glass 145 128 25 1 3 3 50
+physics advanced destructible create FastProjectile metal 115 128 26 0.2 0.2 0.2 200
+
+# =============================================
+# CREATE COLLISION FORCE TEST OBJECTS
+# =============================================
+
+# Objects specifically for collision impulse testing
+physics advanced destructible create ForceTest1 glass 125 135 25 1.5 1.5 1.5 60
+physics advanced destructible create ForceTest2 metal 127 135 25 1.5 1.5 1.5 90
+physics advanced destructible create ForceTest3 concrete 129 135 25 1.5 1.5 1.5 130
+
+# =============================================
+# CREATE MATERIAL TESTING OBJECTS
+# =============================================
+
+# Different materials for material property testing
+physics advanced destructible create GlassSample glass 125 140 25 2 2 2 40
+physics advanced destructible create MetalSample metal 127 140 25 2 2 2 80
+physics advanced destructible create ConcreteSample concrete 129 140 25 2 2 2 120
+
+# =============================================
+# CREATE ENVIRONMENT OBJECTS
+# =============================================
+
+# Floor for testing
+physics advanced destructible create TestFloor concrete 128 128 20 20 20 1 500
+
+# Walls for collision testing
+physics advanced destructible create TestWall1 concrete 150 128 25 1 10 5 200
+physics advanced destructible create TestWall2 concrete 106 128 25 1 10 5 200
+
+# =============================================
+# VERIFICATION COMMANDS
+# =============================================
+
+# List all created destructible objects
+physics advanced destructible list
+
+# Show detailed info about specific objects (replace with actual UUIDs after creation)
+# physics advanced destructible info <UUID>
+
+# =============================================
+# TESTING COMMANDS FOR EXISTING SYSTEMS
+# =============================================
+
+# Test the destruction system with existing objects
+# physics advanced destructible test <UUID1> <UUID2>
+
+# Adjust fracture stress for testing
+# physics advanced destructible setstress <UUID> <new_stress_value>
+
+# =============================================
+# SETUP COMPLETE
+# =============================================
+# After running these commands:
+# 1. Find the AdvancedPhysicsController object in-world
+# 2. Right-click it, Edit, Contents tab
+# 3. Add the comprehensive_physics_test.lsl script
+# 4. Touch the controller to run LSL advanced physics tests
+# 5. Use the other objects for collision and destruction testing
+
+# You can now test:
+# - LSL advanced physics functions (via the controller script)
+# - Existing destruction system (via collisions)
+# - Material properties (different object types)
+# - CCD and collision force measurement
+# - All combinations of the above!

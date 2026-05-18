@@ -1,0 +1,366 @@
+;; Configuration for OpenSim Material Conversion Tools
+;; Provides automatic migration from legacy FaceMaterials to modern PBR materials
+;; Includes GLTF import/export and batch processing capabilities
+
+[MaterialConverter]
+    ;; Enable the material converter module
+    ;; Default: true
+    Enabled = true
+
+    ;; Enable automatic conversion of legacy materials when detected
+    ;; Converts legacy FaceMaterials to PBR format automatically
+    ;; Default: true
+    EnableAutoConversion = true
+
+    ;; Enable batch processing for multiple material conversions
+    ;; Allows converting many materials simultaneously with progress tracking
+    ;; Default: true
+    EnableBatchProcessing = true
+
+    ;; Path for storing material libraries and collections
+    ;; Default: ./data/materials/
+    MaterialLibraryPath = ./data/materials/
+
+    ;; Maximum number of concurrent material conversions
+    ;; Higher values speed up batch operations but use more resources
+    ;; Default: 10
+    MaxConcurrentConversions = 10
+
+    ;; Conversion quality setting
+    ;; Conservative: Minimal changes, preserve original appearance
+    ;; Balanced: Good balance between quality and compatibility
+    ;; Aggressive: Maximum quality, may alter appearance for better PBR accuracy
+    ;; Default: Balanced
+    ConversionQuality = Balanced
+
+    ;; Enable texture processing during conversion
+    ;; Automatically optimizes textures for PBR workflow
+    ;; Default: true
+    EnableTextureProcessing = true
+
+    ;; Generate missing texture maps during conversion
+    ;; Creates normal maps from height maps, roughness from specular, etc.
+    ;; Default: true
+    GenerateMissingMaps = true
+
+    ;; Enable material validation during conversion
+    ;; Checks converted materials for PBR compliance
+    ;; Default: true
+    EnableMaterialValidation = true
+
+    ;; Log detailed conversion information
+    ;; Useful for debugging conversion issues
+    ;; Default: false
+    EnableDetailedLogging = false
+
+[TextureOptimization]
+    ;; Enable automatic texture optimization
+    ;; Improves texture quality and reduces memory usage
+    ;; Default: true
+    EnableOptimization = true
+
+    ;; Target resolution for optimized textures
+    ;; Larger textures will be downscaled to this resolution
+    ;; Values: 512, 1024, 2048, 4096
+    ;; Default: 1024
+    TargetResolution = 1024
+
+    ;; Apply gamma correction to textures
+    ;; Ensures proper color reproduction in PBR pipeline
+    ;; Default: true
+    ApplyGammaCorrection = true
+
+    ;; Gamma correction value
+    ;; Standard value for sRGB textures
+    ;; Default: 2.2
+    GammaValue = 2.2
+
+    ;; Enable texture compression
+    ;; Reduces memory usage while maintaining quality
+    ;; Default: true
+    EnableCompression = true
+
+    ;; Generate mipmaps for textures
+    ;; Improves rendering performance at distance
+    ;; Default: true
+    GenerateMipmaps = true
+
+    ;; Enable normal map generation from height maps
+    ;; Creates detailed surface normals from height information
+    ;; Default: true
+    EnableNormalMapGeneration = true
+
+    ;; Normal map generation intensity
+    ;; Controls the strength of generated normal details
+    ;; Range: 0.1 to 5.0
+    ;; Default: 1.0
+    NormalMapIntensity = 1.0
+
+    ;; Enable roughness map generation from specular maps
+    ;; Converts legacy specular workflow to modern roughness
+    ;; Default: true
+    EnableRoughnessMapGeneration = true
+
+    ;; Enable occlusion map enhancement
+    ;; Improves ambient occlusion quality in converted materials
+    ;; Default: true
+    EnableOcclusionEnhancement = true
+
+[ConversionRules]
+    ;; Rules for converting specific material types
+
+    ;; Metal material conversion
+    ;; How to handle materials identified as metallic
+    MetallicThreshold = 0.8
+    MetallicBaseColorAdjustment = 0.9
+    MetallicRoughnessMin = 0.04
+
+    ;; Glass material conversion
+    ;; Special handling for transparent materials
+    GlassTransmissionFactor = 0.9
+    GlassIORValue = 1.5
+    GlassRoughnessFactor = 0.1
+
+    ;; Fabric material conversion
+    ;; Settings for cloth and textile materials
+    FabricRoughnessBoost = 1.2
+    FabricMetallicSuppression = 0.0
+    EnableFabricFuzz = true
+
+    ;; Wood material conversion
+    ;; Natural material handling
+    WoodRoughnessVariation = 0.3
+    WoodMetallicFactor = 0.0
+    EnableWoodGrain = true
+
+    ;; Stone material conversion
+    ;; Rock and concrete material settings
+    StoneRoughnessBase = 0.7
+    StoneOcclusionBoost = 1.3
+    EnableStoneWeathering = true
+
+[GLTFIntegration]
+    ;; Enable GLTF 2.0 import/export functionality
+    ;; Allows importing materials from 3D modeling tools
+    ;; Default: true
+    EnableGLTFSupport = true
+
+    ;; GLTF material library directory
+    ;; Where imported GLTF materials are stored
+    ;; Default: ./data/materials/gltf/
+    GLTFLibraryPath = ./data/materials/gltf/
+
+    ;; Enable GLTF extension support
+    ;; Supports advanced GLTF material features
+    ;; Default: true
+    EnableGLTFExtensions = true
+
+    ;; Supported GLTF extensions
+    ;; Comma-separated list of extension names
+    SupportedExtensions = KHR_materials_clearcoat,KHR_materials_transmission,KHR_materials_ior,KHR_materials_emissive_strength
+
+    ;; Enable automatic texture embedding
+    ;; Embeds texture data directly in GLTF files
+    ;; Default: false (use external texture references)
+    EmbedTextures = false
+
+    ;; GLTF validation level
+    ;; Strict: Full GLTF 2.0 compliance checking
+    ;; Relaxed: Allow minor specification deviations
+    ;; Default: Relaxed
+    ValidationLevel = Relaxed
+
+    ;; Enable GLTF binary format support (.glb)
+    ;; Supports both JSON (.gltf) and binary (.glb) formats
+    ;; Default: true
+    EnableBinaryFormat = true
+
+[BatchProcessing]
+    ;; Enable batch conversion operations
+    ;; Allows processing multiple materials simultaneously
+    ;; Default: true
+    EnableBatchOperations = true
+
+    ;; Maximum batch size for single operation
+    ;; Limits memory usage during large conversions
+    ;; Default: 1000
+    MaxBatchSize = 1000
+
+    ;; Batch processing timeout in minutes
+    ;; Maximum time allowed for batch operations
+    ;; Default: 60
+    BatchTimeoutMinutes = 60
+
+    ;; Enable progress reporting for batch operations
+    ;; Provides real-time status updates
+    ;; Default: true
+    EnableProgressReporting = true
+
+    ;; Progress update interval in seconds
+    ;; How often to update batch operation progress
+    ;; Default: 5
+    ProgressUpdateInterval = 5
+
+    ;; Enable batch operation resumption
+    ;; Can resume interrupted batch operations
+    ;; Default: true
+    EnableBatchResumption = true
+
+    ;; Batch operation retry count
+    ;; Number of retries for failed conversions
+    ;; Default: 3
+    RetryCount = 3
+
+[QualityAssurance]
+    ;; Enable quality assurance checks
+    ;; Validates converted materials for quality and compliance
+    ;; Default: true
+    EnableQualityChecks = true
+
+    ;; Minimum quality score for acceptance
+    ;; Materials below this score are flagged for review
+    ;; Range: 0.0 to 1.0
+    ;; Default: 0.7
+    MinimumQualityScore = 0.7
+
+    ;; Enable visual comparison generation
+    ;; Creates before/after comparison images
+    ;; Default: false (performance impact)
+    EnableVisualComparison = false
+
+    ;; Enable material property validation
+    ;; Checks for valid PBR parameter ranges
+    ;; Default: true
+    EnablePropertyValidation = true
+
+    ;; Enable texture quality analysis
+    ;; Analyzes texture resolution, format, and quality
+    ;; Default: true
+    EnableTextureAnalysis = true
+
+    ;; Texture quality warning threshold
+    ;; Resolution below this value triggers warnings
+    ;; Default: 512
+    TextureQualityThreshold = 512
+
+[Performance]
+    ;; Performance optimization settings
+
+    ;; Enable conversion caching
+    ;; Caches conversion results to avoid reprocessing
+    ;; Default: true
+    EnableConversionCaching = true
+
+    ;; Conversion cache size
+    ;; Maximum number of cached conversion results
+    ;; Default: 1000
+    ConversionCacheSize = 1000
+
+    ;; Cache expiry time in hours
+    ;; How long cached results remain valid
+    ;; Default: 24
+    CacheExpiryHours = 24
+
+    ;; Enable texture processing cache
+    ;; Caches processed texture data
+    ;; Default: true
+    EnableTextureCache = true
+
+    ;; Texture cache memory limit in MB
+    ;; Maximum memory used for texture caching
+    ;; Default: 512
+    TextureCacheMemoryLimit = 512
+
+    ;; Enable parallel processing
+    ;; Uses multiple CPU cores for conversion operations
+    ;; Default: true
+    EnableParallelProcessing = true
+
+    ;; Maximum parallel threads
+    ;; Limits CPU usage during conversion
+    ;; Default: 4
+    MaxParallelThreads = 4
+
+;; Example material library configurations:
+
+[MaterialLibraries]
+    ;; Enable predefined material libraries
+    ;; Loads commonly used material collections
+    ;; Default: true
+    EnableLibraries = true
+
+    ;; Library auto-loading
+    ;; Automatically loads libraries on startup
+    ;; Default: true
+    AutoLoadLibraries = true
+
+    ;; Available material libraries:
+    ;; - BasicMaterials: Essential material collection
+    ;; - ArchitecturalMaterials: Building and construction materials
+    ;; - NaturalMaterials: Organic and natural surface materials
+    ;; - IndustrialMaterials: Metal, plastic, and manufactured materials
+    ;; - FabricMaterials: Clothing and textile materials
+
+;; Console command examples:
+;;
+;; Convert single legacy material:
+;; material convert 12345678-1234-1234-1234-123456789012 user-uuid
+;;
+;; Import GLTF material library:
+;; material library import ./materials/library.gltf user-uuid
+;;
+;; Export material library:
+;; material library export library-uuid ./export/materials.gltf
+;;
+;; List material libraries:
+;; material library list
+;;
+;; Start batch conversion:
+;; material batch-convert material-id1,material-id2,material-id3 user-uuid
+
+;; Migration recommendations:
+;;
+;; 1. Start with Conservative conversion quality for initial testing
+;; 2. Use Balanced quality for production conversions
+;; 3. Enable detailed logging during initial migration phases
+;; 4. Test converted materials in a staging environment first
+;; 5. Create backups of original materials before conversion
+;; 6. Use batch processing for large material collections
+;; 7. Monitor performance during batch operations
+;; 8. Validate converted materials with quality assurance tools
+
+;; Performance recommendations:
+;;
+;; High-volume servers:
+;; - MaxConcurrentConversions = 20
+;; - EnableConversionCaching = true
+;; - ConversionCacheSize = 5000
+;; - EnableParallelProcessing = true
+;; - MaxParallelThreads = 8
+;;
+;; Low-resource servers:
+;; - MaxConcurrentConversions = 5
+;; - TargetResolution = 512
+;; - EnableTextureCache = false
+;; - MaxParallelThreads = 2
+;; - BatchTimeoutMinutes = 30
+
+;; Common conversion scenarios:
+;;
+;; Legacy Second Life content:
+;; - ConversionQuality = Balanced
+;; - EnableAutoConversion = true
+;; - GenerateMissingMaps = true
+;; - EnableMaterialValidation = true
+;;
+;; Professional 3D content:
+;; - ConversionQuality = Conservative
+;; - EnableGLTFSupport = true
+;; - EnableGLTFExtensions = true
+;; - EnableQualityChecks = true
+;;
+;; User-generated content:
+;; - ConversionQuality = Aggressive
+;; - EnableTextureProcessing = true
+;; - EnableVisualComparison = true
+;; - MinimumQualityScore = 0.6

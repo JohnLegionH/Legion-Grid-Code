@@ -1,0 +1,366 @@
+;; Configuration for OpenSim PBR Material System
+;; This provides modern physically-based rendering materials with GLTF compatibility
+;; Compatible with Second Life 2025 PBR materials and surpasses most virtual world platforms
+;;
+;; Place this section in your OpenSim.ini or include it via Include-PBRMaterialSystem
+
+[PBRMaterialService]
+    ;; Enable the PBR material service
+    ;; Default: true
+    Enabled = true
+
+    ;; Database connection string for PBR materials
+    ;; Uses separate table structure optimized for PBR data
+    ;; Default: Uses main OpenSim database connection
+    ConnectionString = "Data Source=localhost;Database=opensim;User ID=opensim;Password=***;Old Guids=true;"
+
+    ;; Storage provider for PBR material data
+    ;; Default: MySQL provider (PostgreSQL and SQLite support planned)
+    StorageProvider = "OpenSim.Data.MySQL.dll:MySQLPBRMaterialData"
+
+    ;; Enable high-performance material caching
+    ;; Dramatically improves performance for frequently accessed materials
+    ;; Default: true
+    EnableCaching = true
+
+    ;; Maximum number of materials to cache in memory
+    ;; Higher values improve performance but use more memory
+    ;; Default: 10000
+    MaxCacheSize = 10000
+
+    ;; Cache expiry time in minutes
+    ;; How long materials remain in cache before being refreshed
+    ;; Default: 60 (1 hour)
+    CacheExpiryMinutes = 60
+
+    ;; Enable automatic migration of legacy FaceMaterials to PBR
+    ;; Converts existing materials to modern PBR format on startup
+    ;; Default: true
+    EnableAutoMigration = true
+
+    ;; Enable detailed performance tracking and metrics
+    ;; Provides statistics on cache hit rates, operation times, etc.
+    ;; Default: true
+    EnablePerformanceTracking = true
+
+    ;; Enable material collections/libraries feature
+    ;; Allows grouping materials into organized collections
+    ;; Default: true
+    EnableCollections = true
+
+    ;; Maximum materials per collection
+    ;; Prevents overly large collections that could impact performance
+    ;; Default: 1000
+    MaxMaterialsPerCollection = 1000
+
+[PBRRenderer]
+    ;; Enable PBR rendering pipeline
+    ;; Requires viewer support for PBR materials
+    ;; Default: true
+    EnablePBRRendering = true
+
+    ;; Enable Image-Based Lighting (IBL)
+    ;; Provides realistic environmental lighting using HDRI images
+    ;; Default: true
+    EnableIBL = true
+
+    ;; Default IBL environment map
+    ;; Path to HDRI image used for environmental lighting
+    ;; Default: ./data/environments/default_env.hdr
+    DefaultEnvironmentMap = ./data/environments/default_env.hdr
+
+    ;; Enable real-time reflection probes
+    ;; Automatically captures environmental reflections for materials
+    ;; Default: true
+    EnableReflectionProbes = true
+
+    ;; Reflection probe resolution
+    ;; Higher values provide better quality but use more memory
+    ;; Values: 64, 128, 256, 512, 1024
+    ;; Default: 256
+    ReflectionProbeResolution = 256
+
+    ;; Enable tone mapping for HDR rendering
+    ;; Provides better color reproduction and exposure control
+    ;; Options: ACES, Reinhard, Linear, Uncharted2
+    ;; Default: ACES
+    ToneMapping = ACES
+
+    ;; Enable Screen Space Ambient Occlusion (SSAO)
+    ;; Enhances depth perception and surface detail
+    ;; Default: true
+    EnableSSAO = true
+
+    ;; SSAO quality setting
+    ;; Values: Low, Medium, High, Ultra
+    ;; Default: Medium
+    SSAOQuality = Medium
+
+    ;; Enable anisotropic filtering for textures
+    ;; Improves texture quality at oblique viewing angles
+    ;; Values: 1, 2, 4, 8, 16
+    ;; Default: 8
+    AnisotropicFiltering = 8
+
+    ;; Maximum texture resolution for PBR materials
+    ;; Balances quality with performance and memory usage
+    ;; Values: 512, 1024, 2048, 4096
+    ;; Default: 2048
+    MaxTextureResolution = 2048
+
+    ;; Enable texture compression for PBR materials
+    ;; Reduces memory usage while maintaining visual quality
+    ;; Default: true
+    EnableTextureCompression = true
+
+    ;; PBR material LOD (Level of Detail) system
+    ;; Automatically reduces material complexity at distance
+    ;; Default: true
+    EnableMaterialLOD = true
+
+    ;; Distance thresholds for material LOD switching
+    ;; Format: distance1,distance2,distance3 (in meters)
+    ;; Default: 50,100,200
+    MaterialLODDistances = 50,100,200
+
+[PBRAssetPipeline]
+    ;; Enable automatic PBR asset processing
+    ;; Converts uploaded textures to optimal formats
+    ;; Default: true
+    EnableAssetProcessing = true
+
+    ;; Enable automatic normal map generation
+    ;; Creates normal maps from height maps when needed
+    ;; Default: true
+    EnableNormalMapGeneration = true
+
+    ;; Enable automatic roughness map generation
+    ;; Estimates roughness from specular maps for legacy compatibility
+    ;; Default: true
+    EnableRoughnessMapGeneration = true
+
+    ;; Enable texture atlas generation for performance
+    ;; Combines multiple textures into efficient atlases
+    ;; Default: false (experimental feature)
+    EnableTextureAtlasing = false
+
+    ;; Maximum atlas texture size
+    ;; Larger atlases improve performance but use more memory
+    ;; Values: 1024, 2048, 4096, 8192
+    ;; Default: 4096
+    MaxAtlasSize = 4096
+
+    ;; Enable GLTF import/export support
+    ;; Allows importing materials from external 3D tools
+    ;; Default: true
+    EnableGLTFSupport = true
+
+    ;; GLTF material library path
+    ;; Directory for storing imported GLTF materials
+    ;; Default: ./data/materials/gltf/
+    GLTFLibraryPath = ./data/materials/gltf/
+
+    ;; Enable texture format validation
+    ;; Ensures uploaded textures meet PBR requirements
+    ;; Default: true
+    EnableTextureValidation = true
+
+    ;; Supported texture formats for PBR materials
+    ;; Comma-separated list of allowed formats
+    ;; Default: PNG,JPG,JPEG,TGA,EXR,HDR
+    SupportedTextureFormats = PNG,JPG,JPEG,TGA,EXR,HDR
+
+[PBRCompatibility]
+    ;; Enable legacy material compatibility mode
+    ;; Maintains support for existing FaceMaterial-based content
+    ;; Default: true
+    EnableLegacyCompatibility = true
+
+    ;; Automatic conversion quality
+    ;; How aggressively to convert legacy materials to PBR
+    ;; Options: Conservative, Balanced, Aggressive
+    ;; Default: Balanced
+    ConversionQuality = Balanced
+
+    ;; Enable Second Life PBR compatibility
+    ;; Ensures materials work correctly with SL-compatible viewers
+    ;; Default: true
+    EnableSLCompatibility = true
+
+    ;; Enable Firestorm PBR extensions
+    ;; Supports additional PBR features in Firestorm viewer
+    ;; Default: true
+    EnableFirestormExtensions = true
+
+    ;; Material format versioning
+    ;; Maintains compatibility across different material format versions
+    ;; Default: 2 (GLTF 2.0 compatible)
+    MaterialFormatVersion = 2
+
+[PBRPerformance]
+    ;; Enable adaptive quality system
+    ;; Automatically adjusts material quality based on performance
+    ;; Default: true
+    EnableAdaptiveQuality = true
+
+    ;; Performance monitoring interval in seconds
+    ;; How often to check performance and adjust quality
+    ;; Default: 30
+    PerformanceMonitoringInterval = 30
+
+    ;; Target frame rate for adaptive quality
+    ;; System will reduce quality if frame rate drops below this
+    ;; Default: 30
+    TargetFrameRate = 30
+
+    ;; Maximum concurrent material updates
+    ;; Limits simultaneous material processing to prevent overload
+    ;; Default: 50
+    MaxConcurrentUpdates = 50
+
+    ;; Enable material streaming
+    ;; Loads high-resolution materials progressively
+    ;; Default: true
+    EnableMaterialStreaming = true
+
+    ;; Material streaming chunk size in KB
+    ;; Smaller chunks provide smoother loading but more overhead
+    ;; Default: 64
+    StreamingChunkSize = 64
+
+    ;; Enable GPU-based material processing
+    ;; Uses GPU compute shaders for material operations when available
+    ;; Default: true
+    EnableGPUProcessing = true
+
+    ;; GPU memory allocation for materials in MB
+    ;; Amount of GPU memory dedicated to material processing
+    ;; Default: 512
+    GPUMaterialMemory = 512
+
+[PBRDebugging]
+    ;; Enable PBR debug visualization
+    ;; Shows material properties visually for debugging
+    ;; Default: false
+    EnableDebugVisualization = false
+
+    ;; Debug visualization mode
+    ;; Options: Albedo, Normal, Metallic, Roughness, AO, Emissive
+    ;; Default: Albedo
+    DebugVisualizationMode = Albedo
+
+    ;; Enable material validation logging
+    ;; Logs detailed information about material validation
+    ;; Default: false
+    EnableValidationLogging = false
+
+    ;; Log level for PBR system
+    ;; Values: DEBUG, INFO, WARN, ERROR
+    ;; Default: INFO
+    LogLevel = INFO
+
+    ;; Enable performance profiling
+    ;; Detailed timing information for PBR operations
+    ;; Default: false (performance impact)
+    EnablePerformanceProfiling = false
+
+    ;; Enable memory usage tracking
+    ;; Monitors memory usage of PBR system components
+    ;; Default: false
+    EnableMemoryTracking = false
+
+;; Example material presets for common use cases:
+;;
+;; [PBRPresets]
+;;     ;; Enable predefined material presets
+;;     EnablePresets = true
+;;     
+;;     ;; Preset library path
+;;     PresetLibraryPath = ./data/materials/presets/
+;;     
+;;     ;; Available presets (automatically loaded)
+;;     ;; - Metal (gold, silver, copper, iron, aluminum)
+;;     ;; - Plastic (matte, glossy, transparent)
+;;     ;; - Glass (clear, frosted, colored)
+;;     ;; - Stone (marble, granite, concrete)
+;;     ;; - Wood (oak, pine, mahogany)
+;;     ;; - Fabric (cotton, silk, leather)
+;;     ;; - Organic (skin, leaves, bark)
+
+;; Performance recommendations by hardware tier:
+;;
+;; High-End Systems (RTX 3080+, 32GB+ RAM):
+;; - MaxCacheSize = 50000
+;; - MaxTextureResolution = 4096
+;; - ReflectionProbeResolution = 512
+;; - SSAOQuality = Ultra
+;; - AnisotropicFiltering = 16
+;; - EnableGPUProcessing = true
+;; - GPUMaterialMemory = 2048
+;;
+;; Mid-Range Systems (GTX 1660/RTX 2060, 16GB RAM):
+;; - MaxCacheSize = 20000
+;; - MaxTextureResolution = 2048
+;; - ReflectionProbeResolution = 256
+;; - SSAOQuality = Medium
+;; - AnisotropicFiltering = 8
+;; - EnableGPUProcessing = true
+;; - GPUMaterialMemory = 512
+;;
+;; Low-End Systems (GTX 1050/older, 8GB RAM):
+;; - MaxCacheSize = 5000
+;; - MaxTextureResolution = 1024
+;; - ReflectionProbeResolution = 128
+;; - SSAOQuality = Low
+;; - AnisotropicFiltering = 4
+;; - EnableGPUProcessing = false
+;; - EnableMaterialStreaming = true
+;; - EnableAdaptiveQuality = true
+
+;; GLTF compatibility notes:
+;;
+;; The PBR material system is fully compatible with GLTF 2.0 specification:
+;; - Supports all core PBR material properties
+;; - Compatible with Blender, Maya, 3ds Max, and other 3D tools
+;; - Maintains texture coordinate and transform information
+;; - Supports extensions for advanced features (clearcoat, subsurface)
+;;
+;; Texture channel mapping (GLTF standard):
+;; - Base Color: RGB channels for diffuse color, A channel for opacity
+;; - Metallic-Roughness: G channel for roughness, B channel for metallic
+;; - Normal Map: RGB channels for tangent space normals
+;; - Occlusion: R channel for ambient occlusion
+;; - Emissive: RGB channels for self-illumination
+;;
+;; Advanced features supported:
+;; - KHR_materials_clearcoat (automotive paint, varnish)
+;; - KHR_materials_transmission (glass, liquids)
+;; - KHR_materials_ior (realistic refraction)
+;; - KHR_materials_emissive_strength (HDR emission)
+
+;; Migration from legacy materials:
+;;
+;; The system automatically converts legacy FaceMaterials to PBR:
+;; - Normal maps are preserved with correct scaling
+;; - Specular maps are converted to metallic-roughness approximation
+;; - Environment intensity becomes emissive factor
+;; - Alpha modes are properly mapped
+;;
+;; Manual conversion recommendations:
+;; - Replace specular workflows with metallic-roughness
+;; - Use dedicated occlusion maps instead of diffuse ambient
+;; - Convert height maps to normal maps for better detail
+;; - Use HDR textures for emissive materials
+
+;; Viewer compatibility:
+;;
+;; Supported viewers for PBR materials:
+;; - Firestorm 6.6.5+ (full PBR support)
+;; - Second Life Official Viewer 6.5.3+ (full PBR support)
+;; - Kokua (PBR support in development)
+;; - Alchemy (PBR support planned)
+;;
+;; Legacy viewer fallback:
+;; - Older viewers receive converted FaceMaterial representation
+;; - Visual quality reduced but materials remain functional
+;; - Automatic detection and appropriate material serving

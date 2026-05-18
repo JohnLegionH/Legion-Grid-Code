@@ -1,0 +1,142 @@
+;; Configuration for the OpenSim Lua Script Engine
+;; This provides modern Lua scripting capabilities comparable to Second Life's SLua
+;; 
+;; Place this section in your OpenSim.ini or include it via Include-LuaEngine
+
+[LuaEngine]
+    ;; Enable the Lua script engine
+    ;; Default: false (disabled by default for gradual rollout)
+    Enabled = true
+
+    ;; Enable Lua coroutines for advanced scripting
+    ;; Coroutines allow scripts to yield execution and resume later
+    ;; This enables more sophisticated scripting patterns
+    ;; Default: true
+    EnableCoroutines = true
+
+    ;; Maximum memory usage per Lua script in megabytes
+    ;; This prevents runaway scripts from consuming too much memory
+    ;; Default: 64MB
+    MaxMemoryMB = 64
+
+    ;; Maximum execution time per event in milliseconds
+    ;; Scripts exceeding this time will be warned and may be terminated
+    ;; Default: 30000 (30 seconds)
+    MaxExecutionTimeMs = 30000
+
+    ;; Lua garbage collection step size
+    ;; Higher values = more aggressive GC, lower values = gentler GC
+    ;; Default: 100
+    LuaGCStepSize = 100
+
+    ;; Lua engine thread pool configuration
+    ;; Number of worker threads for script execution
+    ;; 0 = auto-detect based on CPU cores
+    ;; Default: 0
+    WorkerThreads = 0
+
+    ;; Enable advanced Lua features
+    ;; Includes enhanced debugging, profiling, and development tools
+    ;; Default: false
+    EnableAdvancedFeatures = false
+
+    ;; Enable LSL compatibility mode
+    ;; When enabled, provides full LSL function compatibility for existing scripts
+    ;; Default: true
+    EnableLSLCompatibility = true
+
+    ;; Enable OSSL function access from Lua scripts
+    ;; Requires OSSL to be enabled in the main configuration
+    ;; Default: true
+    EnableOSSLFunctions = true
+
+    ;; Script compilation timeout in milliseconds
+    ;; Maximum time to wait for script compilation
+    ;; Default: 10000 (10 seconds)
+    CompilationTimeoutMs = 10000
+
+    ;; Enable script state preservation during region crossings
+    ;; Integrates with the advanced state preservation system
+    ;; Default: true
+    EnableStatePreservation = true
+
+    ;; Lua script file extensions to recognize
+    ;; Scripts with these extensions will be handled by the Lua engine
+    ;; Default: .lua,.luac
+    ScriptExtensions = .lua,.luac
+
+    ;; Enable performance monitoring and statistics
+    ;; Provides detailed metrics on script performance
+    ;; Default: true
+    EnablePerformanceMonitoring = true
+
+    ;; Log level for Lua engine messages
+    ;; Values: DEBUG, INFO, WARN, ERROR
+    ;; Default: INFO
+    LogLevel = INFO
+
+    ;; Enable script sandboxing for security
+    ;; Restricts access to potentially dangerous Lua functions
+    ;; Default: true
+    EnableSandboxing = true
+
+    ;; Allowed Lua libraries for scripts
+    ;; Comma-separated list of Lua libraries that scripts can access
+    ;; Default: base,table,string,math,os.time,os.date
+    AllowedLibraries = base,table,string,math,os.time,os.date
+
+    ;; Lua package path for require() statements
+    ;; Additional paths where Lua modules can be loaded from
+    ;; Default: ./scripts/lua/?.lua;./scripts/lua/?/init.lua
+    LuaPackagePath = ./scripts/lua/?.lua;./scripts/lua/?/init.lua
+
+    ;; Enable JIT compilation (if supported by Lua implementation)
+    ;; Can significantly improve performance for computational scripts
+    ;; Default: true
+    EnableJIT = true
+
+    ;; Script startup timeout in milliseconds
+    ;; Maximum time to wait for script initialization
+    ;; Default: 5000 (5 seconds)
+    StartupTimeoutMs = 5000
+
+;; Example Lua script syntax supported:
+;;
+;; -- Modern Lua script with LSL compatibility
+;; function state_entry()
+;;     llOwnerSay("Hello from Lua!")
+;;     llSetText("Lua Script", {1.0, 1.0, 1.0}, 1.0)
+;;     
+;;     -- Advanced Lua features
+;;     local co = coroutine.create(function()
+;;         for i = 1, 10 do
+;;             llOwnerSay("Count: " .. i)
+;;             coroutine.yield()
+;;         end
+;;     end)
+;;     
+;;     luaScheduleEvent("resume_coroutine", 1.0, {coroutine = co})
+;; end
+;;
+;; function timer()
+;;     llOwnerSay("Timer event!")
+;;     luaLog("info", "Timer executed successfully")
+;; end
+;;
+;; function touch_start(num_detected)
+;;     for i = 0, num_detected - 1 do
+;;         local key = llDetectedKey(i)
+;;         llOwnerSay("Touched by: " .. key)
+;;     end
+;; end
+;;
+;; -- Custom Lua event
+;; function resume_coroutine(params)
+;;     local co = params.coroutine
+;;     if co and coroutine.status(co) ~= "dead" then
+;;         coroutine.resume(co)
+;;         if coroutine.status(co) ~= "dead" then
+;;             luaScheduleEvent("resume_coroutine", 1.0, {coroutine = co})
+;;         end
+;;     end
+;; end

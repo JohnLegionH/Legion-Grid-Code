@@ -1,0 +1,8 @@
+{
+  "createdDate": "2025-08-13T21:28:45.3607237Z",
+  "averageCrossingTime": 61.46809999999999,
+  "standardDeviation": 14.468603361835076,
+  "memoryImpactMB": 0.04864501953125,
+  "gcGen2Collections": 1,
+  "successRate": 100
+}

@@ -1,0 +1,474 @@
+;; Configuration for OpenSim GPU-Accelerated Particle System
+;; Provides compute shader-based particle simulation with millions of particles
+;; Advanced features include fluid simulation, swarms, trails, and collision detection
+
+[GPUParticleSystem]
+    ;; Enable GPU particle system
+    ;; Default: true
+    Enabled = true
+
+    ;; Maximum total particles across all emitters
+    ;; Higher values allow more particles but use more GPU memory
+    ;; Range: 1000 to 10,000,000
+    ;; Default: 1,000,000
+    MaxTotalParticles = 1000000
+
+    ;; Maximum particles per individual emitter
+    ;; Prevents single emitter from consuming all resources
+    ;; Default: 100,000
+    MaxParticlesPerEmitter = 100000
+
+    ;; Particle system update rate (updates per second)
+    ;; Higher rates = smoother animation, more CPU usage
+    ;; Range: 30 to 120
+    ;; Default: 60
+    UpdateRate = 60
+
+    ;; Quality level for particle system
+    ;; Options: VeryLow, Low, Medium, High, Ultra, Cinematic
+    ;; Default: High
+    Quality = High
+
+    ;; Enable GPU instancing for better performance
+    ;; Uses hardware instancing to render many particles efficiently
+    ;; Default: true
+    EnableGPUInstancing = true
+
+    ;; Enable compute shader particle simulation
+    ;; Uses GPU compute shaders for physics and behavior
+    ;; Default: true
+    EnableComputeShaders = true
+
+[ParticleRendering]
+    ;; Enable particle sorting for correct alpha blending
+    ;; Default: true
+    EnableSorting = true
+
+    ;; Particle sorting method
+    ;; Options: None, Distance, OldestFirst, YoungestFirst, Custom
+    ;; Default: Distance
+    SortingMode = Distance
+
+    ;; Enable soft particles to reduce hard edges
+    ;; Blends particles smoothly with scene geometry
+    ;; Default: true
+    EnableSoftParticles = true
+
+    ;; Soft particle fade distance
+    ;; Distance over which particles fade near geometry
+    ;; Default: 1.0
+    SoftParticleFadeDistance = 1.0
+
+    ;; Particle lighting mode
+    ;; Options: Unlit, Lit, SimpleLit, PBR
+    ;; Default: Unlit
+    LightingMode = Unlit
+
+    ;; Enable particles to receive shadows
+    ;; Default: false
+    ReceiveShadows = false
+
+    ;; Enable particles to cast shadows
+    ;; Performance impact, use sparingly
+    ;; Default: false
+    CastShadows = false
+
+    ;; Enable volumetric particles
+    ;; Creates 3D volume effects instead of flat sprites
+    ;; Default: false
+    EnableVolumetric = false
+
+    ;; Volumetric particle thickness
+    ;; Default: 1.0
+    VolumetricThickness = 1.0
+
+    ;; Enable motion vectors for motion blur
+    ;; Default: false
+    EnableMotionVectors = false
+
+    ;; Enable particle-based distortion effects
+    ;; Default: false
+    EnableDistortion = false
+
+    ;; Distortion strength
+    ;; Default: 0.1
+    DistortionStrength = 0.1
+
+    ;; Maximum particles visible on screen
+    ;; Culls distant particles for performance
+    ;; Default: 100,000
+    MaxParticlesOnScreen = 100000
+
+    ;; Enable frustum culling for particles
+    ;; Don't render particles outside camera view
+    ;; Default: true
+    EnableFrustumCulling = true
+
+    ;; Enable occlusion culling for particles
+    ;; Don't render particles behind geometry
+    ;; Performance impact, experimental
+    ;; Default: false
+    EnableOcclusionCulling = false
+
+[ParticlePhysics]
+    ;; Enable particle physics simulation
+    ;; Default: true
+    EnablePhysics = true
+
+    ;; Enable particle-particle collision detection
+    ;; Very expensive, use only when necessary
+    ;; Default: false
+    EnableParticleCollisions = false
+
+    ;; Enable particle-object collision detection
+    ;; Default: true
+    EnableObjectCollisions = true
+
+    ;; Collision detection accuracy
+    ;; Options: Low, Medium, High, Precise
+    ;; Default: Medium
+    CollisionAccuracy = Medium
+
+    ;; Enable gravity for particles
+    ;; Default: true
+    EnableGravity = true
+
+    ;; Global gravity vector (X,Y,Z)
+    ;; Default: 0,-9.81,0
+    GlobalGravity = 0,-9.81,0
+
+    ;; Enable air resistance/drag
+    ;; Default: true
+    EnableAirResistance = true
+
+    ;; Global air resistance coefficient
+    ;; Default: 0.01
+    AirResistanceCoefficient = 0.01
+
+    ;; Enable wind effects on particles
+    ;; Default: true
+    EnableWindEffects = true
+
+    ;; Global wind vector (X,Y,Z)
+    ;; Default: 0,0,0
+    GlobalWind = 0,0,0
+
+[AdvancedFeatures]
+    ;; Enable fluid simulation (SPH)
+    ;; Smoothed Particle Hydrodynamics for liquid effects
+    ;; Default: false
+    EnableFluidSimulation = false
+
+    ;; Maximum fluid particles
+    ;; Default: 10,000
+    MaxFluidParticles = 10000
+
+    ;; Enable particle swarm behaviors
+    ;; Flocking, schooling, and crowd behaviors
+    ;; Default: true
+    EnableSwarmBehaviors = true
+
+    ;; Enable particle trails
+    ;; Continuous trails following moving objects
+    ;; Default: true
+    EnableParticleTrails = true
+
+    ;; Maximum trail segments per trail
+    ;; Default: 50
+    MaxTrailSegments = 50
+
+    ;; Enable particle beams/lightning
+    ;; Continuous beams between points
+    ;; Default: true
+    EnableParticleBeams = true
+
+    ;; Enable particle text rendering
+    ;; Render text using particles
+    ;; Default: true
+    EnableParticleText = true
+
+    ;; Enable particle mesh emission
+    ;; Emit particles from mesh surfaces
+    ;; Default: true
+    EnableMeshEmission = true
+
+    ;; Enable custom compute shaders
+    ;; Allow user-defined particle behaviors
+    ;; Default: false
+    EnableCustomShaders = false
+
+[PerformanceOptimization]
+    ;; Enable Level of Detail (LOD) system
+    ;; Reduces particle quality at distance
+    ;; Default: true
+    EnableLOD = true
+
+    ;; LOD distances for quality reduction
+    ;; Format: distance1,distance2,distance3,distance4
+    ;; Default: 10,25,50,100
+    LODDistances = 10,25,50,100
+
+    ;; Particle scales at each LOD level
+    ;; Format: scale1,scale2,scale3,scale4
+    ;; Default: 1.0,0.75,0.5,0.25
+    LODScales = 1.0,0.75,0.5,0.25
+
+    ;; Maximum particles at each LOD level
+    ;; Format: max1,max2,max3,max4
+    ;; Default: 10000,5000,2500,1000
+    LODMaxParticles = 10000,5000,2500,1000
+
+    ;; Enable physics at each LOD level
+    ;; Format: true/false,true/false,true/false,true/false
+    ;; Default: true,true,false,false
+    LODEnablePhysics = true,true,false,false
+
+    ;; LOD transition time in seconds
+    ;; Smooth transitions between quality levels
+    ;; Default: 0.5
+    LODTransitionTime = 0.5
+
+    ;; Enable adaptive quality based on performance
+    ;; Automatically reduces quality if framerate drops
+    ;; Default: true
+    EnableAdaptiveQuality = true
+
+    ;; Target framerate for adaptive quality
+    ;; System reduces quality if FPS drops below this
+    ;; Default: 30
+    TargetFramerate = 30
+
+    ;; Performance monitoring interval in seconds
+    ;; How often to check performance
+    ;; Default: 1.0
+    PerformanceCheckInterval = 1.0
+
+    ;; Enable memory usage monitoring
+    ;; Track GPU memory consumption
+    ;; Default: true
+    EnableMemoryMonitoring = true
+
+    ;; GPU memory warning threshold in MB
+    ;; Warn when GPU memory usage exceeds this
+    ;; Default: 2048
+    GPUMemoryWarningThreshold = 2048
+
+[QualityPresets]
+    ;; Quality preset configurations
+    ;; Automatically applied when setting quality level
+
+    ;; Very Low Quality (mobile/low-end)
+    ;; VeryLow_MaxParticles = 1000
+    ;; VeryLow_EnableSoftParticles = false
+    ;; VeryLow_EnableLighting = false
+    ;; VeryLow_EnablePhysics = false
+    ;; VeryLow_EnableLOD = true
+
+    ;; Low Quality (integrated graphics)
+    ;; Low_MaxParticles = 5000
+    ;; Low_EnableSoftParticles = false
+    ;; Low_EnableLighting = false
+    ;; Low_EnablePhysics = true
+    ;; Low_EnableLOD = true
+
+    ;; Medium Quality (mid-range dedicated GPU)
+    ;; Medium_MaxParticles = 25000
+    ;; Medium_EnableSoftParticles = true
+    ;; Medium_EnableLighting = false
+    ;; Medium_EnablePhysics = true
+    ;; Medium_EnableLOD = true
+
+    ;; High Quality (high-end GPU)
+    ;; High_MaxParticles = 100000
+    ;; High_EnableSoftParticles = true
+    ;; High_EnableLighting = true
+    ;; High_EnablePhysics = true
+    ;; High_EnableLOD = true
+
+    ;; Ultra Quality (enthusiast GPU)
+    ;; Ultra_MaxParticles = 500000
+    ;; Ultra_EnableSoftParticles = true
+    ;; Ultra_EnableLighting = true
+    ;; Ultra_EnablePhysics = true
+    ;; Ultra_EnableVolumetric = true
+    ;; Ultra_EnableLOD = false
+
+    ;; Cinematic Quality (film/broadcast)
+    ;; Cinematic_MaxParticles = 1000000
+    ;; Cinematic_EnableSoftParticles = true
+    ;; Cinematic_EnableLighting = true
+    ;; Cinematic_EnablePhysics = true
+    ;; Cinematic_EnableVolumetric = true
+    ;; Cinematic_EnableMotionVectors = true
+    ;; Cinematic_EnableLOD = false
+
+[SpecialEffects]
+    ;; Enable special particle effects
+    
+    ;; Enable fire and explosion effects
+    ;; Default: true
+    EnableFireEffects = true
+    
+    ;; Fire particle density
+    ;; Default: 1000
+    FireParticleDensity = 1000
+    
+    ;; Enable smoke and vapor effects
+    ;; Default: true
+    EnableSmokeEffects = true
+    
+    ;; Smoke dissipation rate
+    ;; Default: 0.95
+    SmokeDissipationRate = 0.95
+    
+    ;; Enable water and liquid effects
+    ;; Default: true
+    EnableWaterEffects = true
+    
+    ;; Water surface tension (for droplets)
+    ;; Default: 0.0728
+    WaterSurfaceTension = 0.0728
+    
+    ;; Enable magical/fantasy effects
+    ;; Sparkles, energy effects, etc.
+    ;; Default: true
+    EnableMagicalEffects = true
+    
+    ;; Enable weather particle effects
+    ;; Rain, snow, hail integration
+    ;; Default: true
+    EnableWeatherEffects = true
+    
+    ;; Rain drop count per square meter
+    ;; Default: 1000
+    RainDropDensity = 1000
+    
+    ;; Snow flake count per cubic meter
+    ;; Default: 100
+    SnowFlakeDensity = 100
+
+[Integration]
+    ;; Integration with other rendering systems
+    
+    ;; Enable integration with volumetric lighting
+    ;; Particles interact with volumetric fog and god rays
+    ;; Default: true
+    IntegrateWithVolumetricLighting = true
+    
+    ;; Enable integration with water system
+    ;; Particles interact with water surfaces and underwater
+    ;; Default: true
+    IntegrateWithWaterSystem = true
+    
+    ;; Enable integration with PBR materials
+    ;; Use PBR materials for particle textures
+    ;; Default: true
+    IntegrateWithPBRMaterials = true
+    
+    ;; Enable integration with physics engine
+    ;; Particles interact with physics objects
+    ;; Default: true
+    IntegrateWithPhysics = true
+    
+    ;; Enable integration with sound system
+    ;; Generate sounds based on particle events
+    ;; Default: false
+    IntegrateWithSound = false
+
+[Debugging]
+    ;; Debugging and profiling options
+    
+    ;; Enable debug visualization
+    ;; Shows particle bounds, forces, etc.
+    ;; Default: false
+    EnableDebugVisualization = false
+    
+    ;; Debug visualization mode
+    ;; Options: Bounds, Forces, Velocities, Lifetime, All
+    ;; Default: All
+    DebugVisualizationMode = All
+    
+    ;; Enable performance profiling
+    ;; Detailed timing information
+    ;; Default: false
+    EnablePerformanceProfiling = false
+    
+    ;; Log particle events
+    ;; Logs creation, collision, death events
+    ;; Default: false
+    LogParticleEvents = false
+    
+    ;; Log performance warnings
+    ;; Logs when performance thresholds exceeded
+    ;; Default: true
+    LogPerformanceWarnings = true
+
+;; Hardware recommendations:
+;;
+;; Ultra High-End (RTX 4090/4080):
+;; - Quality = Cinematic
+;; - MaxTotalParticles = 2000000
+;; - EnableVolumetric = true
+;; - EnableFluidSimulation = true
+;;
+;; High-End (RTX 3080/4070):
+;; - Quality = Ultra
+;; - MaxTotalParticles = 1000000
+;; - EnableVolumetric = true
+;; - EnableFluidSimulation = false
+;;
+;; Mid-Range (RTX 3060/4060):
+;; - Quality = High
+;; - MaxTotalParticles = 500000
+;; - EnableVolumetric = false
+;; - EnableLOD = true
+;;
+;; Low-End (GTX 1660/RTX 2060):
+;; - Quality = Medium
+;; - MaxTotalParticles = 100000
+;; - EnableSoftParticles = true
+;; - EnableLOD = true
+;;
+;; Very Low-End (GTX 1050/integrated):
+;; - Quality = Low
+;; - MaxTotalParticles = 25000
+;; - EnableSoftParticles = false
+;; - EnableLOD = true
+
+;; Common particle system applications:
+;;
+;; Fire and Explosions:
+;; - Use directional emitters with gravity
+;; - Add heat distortion effects
+;; - Include smoke trails
+;;
+;; Water Effects:
+;; - Enable fluid simulation
+;; - Use collision detection with surfaces
+;; - Add splash and foam particles
+;;
+;; Weather Systems:
+;; - Rain: Many small particles with downward velocity
+;; - Snow: Fewer particles with wind effects
+;; - Storm: Lightning beams with thunder particles
+;;
+;; Magical Effects:
+;; - Use swarm behaviors for floating sparkles
+;; - Particle trails for spell casting
+;; - Energy beams for magical attacks
+;;
+;; Vehicle Effects:
+;; - Engine exhaust with heat distortion
+;; - Wheel dust clouds
+;; - Damage sparks and smoke
+
+;; Performance tips:
+;;
+;; 1. Use LOD system for outdoor scenes
+;; 2. Enable adaptive quality for dynamic performance
+;; 3. Limit collision detection to important particles
+;; 4. Use soft particles sparingly on low-end hardware
+;; 5. Batch similar particle effects together
+;; 6. Use instancing for repeated particle patterns
+;; 7. Enable frustum culling to reduce offscreen particles
+;; 8. Monitor GPU memory usage regularly

@@ -1,0 +1,739 @@
+;; Configuration for OpenSim Real-time Global Illumination
+;; Provides light probes, SSGI, voxel GI, and radiosity for realistic lighting
+;; Revolutionary lighting system matching AAA game engines
+
+[GlobalIllumination]
+    ;; Enable global illumination system
+    ;; Default: true
+    Enabled = true
+
+    ;; Global illumination quality level
+    ;; Options: Low, Medium, High, Ultra, Cinematic
+    ;; Default: High
+    GIQuality = High
+
+    ;; Enable adaptive quality adjustment
+    ;; Automatically adjusts quality based on performance
+    ;; Default: true
+    EnableAdaptiveQuality = true
+
+    ;; Target frame time in milliseconds
+    ;; System reduces quality if GI exceeds this time
+    ;; Default: 16.67 (60 FPS)
+    TargetFrametime = 16.67
+
+[LightProbes]
+    ;; Enable light probe system
+    ;; Provides indirect lighting through environment sampling
+    ;; Default: true
+    EnableLightProbes = true
+
+    ;; Light probe cubemap resolution
+    ;; Higher values = better quality, more memory
+    ;; Values: 16, 32, 64, 128, 256
+    ;; Default: 32
+    LightProbeResolution = 32
+
+    ;; Light probe update mode
+    ;; Options: Baked, Realtime, Mixed
+    ;; Default: Realtime
+    LightProbeMode = Realtime
+
+    ;; Update interval for realtime probes (seconds)
+    ;; Lower values = more responsive, higher CPU usage
+    ;; Default: 1.0
+    LightProbeUpdateInterval = 1.0
+
+    ;; Maximum number of light probes
+    ;; Prevents excessive memory usage
+    ;; Default: 1000
+    MaxLightProbes = 1000
+
+    ;; Automatic probe placement
+    ;; Places probes automatically based on scene geometry
+    ;; Default: true
+    AutoPlacement = true
+
+    ;; Probe spacing for auto-placement
+    ;; Distance between automatically placed probes
+    ;; Default: 4.0
+    ProbeSpacing = 4.0
+
+    ;; Enable temporal filtering
+    ;; Reduces flickering in dynamic lighting
+    ;; Default: true
+    EnableTemporalFiltering = true
+
+    ;; Temporal blend factor
+    ;; Higher values = more stability, less responsiveness
+    ;; Range: 0.0 to 1.0
+    ;; Default: 0.9
+    TemporalBlendFactor = 0.9
+
+    ;; Enable irradiance convolution
+    ;; Creates diffuse lighting component
+    ;; Default: true
+    EnableIrradianceConvolution = true
+
+    ;; Enable specular convolution
+    ;; Creates reflection component
+    ;; Default: true
+    EnableSpecularConvolution = true
+
+    ;; Specular mip levels
+    ;; Number of roughness levels for reflections
+    ;; Default: 6
+    SpecularMipLevels = 6
+
+[IrradianceVolumes]
+    ;; Enable irradiance volumes
+    ;; Provides volumetric indirect lighting
+    ;; Default: true
+    EnableIrradianceVolumes = true
+
+    ;; Default volume size
+    ;; Size of automatically created volumes
+    ;; Default: 20,20,20
+    DefaultVolumeSize = 20,20,20
+
+    ;; Default probe resolution within volumes
+    ;; Number of probes per axis (X,Y,Z)
+    ;; Default: 8,8,8
+    DefaultProbeResolution = 8,8,8
+
+    ;; Default probe spacing within volumes
+    ;; Distance between probes in volume
+    ;; Default: 2.0
+    DefaultProbeSpacing = 2.0
+
+    ;; Enable occlusion testing
+    ;; Tests for geometry blocking light paths
+    ;; Default: true
+    EnableOcclusion = true
+
+    ;; Occlusion bias
+    ;; Prevents self-occlusion artifacts
+    ;; Default: 0.05
+    OcclusionBias = 0.05
+
+    ;; Enable visibility testing
+    ;; More accurate but expensive occlusion
+    ;; Default: true
+    EnableVisibility = true
+
+    ;; Number of visibility rays per probe
+    ;; More rays = better accuracy, higher cost
+    ;; Default: 64
+    VisibilityRays = 64
+
+[ScreenSpaceGI]
+    ;; Enable Screen-Space Global Illumination
+    ;; Real-time GI using screen-space data
+    ;; Default: true
+    EnableSSGI = true
+
+    ;; SSGI quality level
+    ;; Options: Low, Medium, High, Ultra
+    ;; Default: High
+    SSGIQuality = High
+
+    ;; Number of rays per pixel
+    ;; More rays = better quality, higher cost
+    ;; Low: 2, Medium: 4, High: 8, Ultra: 16
+    ;; Default: 8
+    SSGIRayCount = 8
+
+    ;; Ray marching steps
+    ;; Number of steps along each ray
+    ;; Default: 16
+    SSGISteps = 16
+
+    ;; Maximum ray distance
+    ;; How far rays can travel
+    ;; Default: 50.0
+    SSGIMaxDistance = 50.0
+
+    ;; Surface thickness for intersection
+    ;; Prevents missing thin surfaces
+    ;; Default: 0.5
+    SSGIThickness = 0.5
+
+    ;; SSGI intensity multiplier
+    ;; Controls overall GI strength
+    ;; Default: 1.0
+    SSGIIntensity = 1.0
+
+    ;; Enable denoising
+    ;; Reduces noise in SSGI output
+    ;; Default: true
+    EnableSSGIDenoising = true
+
+    ;; Denoising method
+    ;; Options: None, Bilateral, Temporal, SpatioTemporal, NeuralNetwork
+    ;; Default: Bilateral
+    SSGIDenoisingType = Bilateral
+
+    ;; Enable temporal filtering
+    ;; Accumulates information across frames
+    ;; Default: true
+    EnableSSGITemporal = true
+
+    ;; Temporal blend factor
+    ;; Higher values = more stability
+    ;; Default: 0.9
+    SSGITemporalBlend = 0.9
+
+    ;; Enable half resolution rendering
+    ;; Renders SSGI at half resolution for performance
+    ;; Default: false
+    EnableSSGIHalfRes = false
+
+    ;; Enable ray jittering
+    ;; Reduces banding artifacts
+    ;; Default: true
+    EnableSSGIJittering = true
+
+    ;; Jitter amount
+    ;; Strength of ray jittering
+    ;; Default: 1.0
+    SSGIJitterAmount = 1.0
+
+    ;; Enable Fresnel term
+    ;; More realistic reflection behavior
+    ;; Default: true
+    EnableSSGIFresnel = true
+
+    ;; Fresnel power
+    ;; Controls Fresnel curve shape
+    ;; Default: 5.0
+    SSGIFresnelPower = 5.0
+
+[VoxelGI]
+    ;; Enable Voxel-based Global Illumination
+    ;; 3D voxel grid for dynamic GI
+    ;; Default: true
+    EnableVoxelGI = true
+
+    ;; Voxel grid resolution
+    ;; Higher values = better quality, more memory
+    ;; Values: 64, 128, 256, 512
+    ;; Default: 128
+    VoxelResolution = 128
+
+    ;; Voxel grid center position (X,Y,Z)
+    ;; Center of the voxel coverage area
+    ;; Default: 0,0,0
+    VoxelCenter = 0,0,0
+
+    ;; Voxel grid size (X,Y,Z)
+    ;; Physical size of voxel coverage in meters
+    ;; Default: 100,100,100
+    VoxelSize = 100,100,100
+
+    ;; Number of voxel cascades
+    ;; Multiple resolutions for large scenes
+    ;; Default: 3
+    VoxelCascades = 3
+
+    ;; Cascade scale factors
+    ;; Size multipliers for each cascade
+    ;; Default: 1.0,2.0,4.0
+    VoxelCascadeScales = 1.0,2.0,4.0
+
+    ;; Enable direct light injection
+    ;; Injects direct lighting into voxels
+    ;; Default: true
+    EnableDirectInjection = true
+
+    ;; Enable indirect light bounces
+    ;; Computes light bouncing between voxels
+    ;; Default: true
+    EnableIndirectBounces = true
+
+    ;; Maximum light bounces
+    ;; Number of light bounce iterations
+    ;; Default: 3
+    VoxelMaxBounces = 3
+
+    ;; Voxel GI intensity
+    ;; Overall strength of voxel GI
+    ;; Default: 1.0
+    VoxelGIIntensity = 1.0
+
+    ;; Enable temporal accumulation
+    ;; Accumulates voxel data over time
+    ;; Default: true
+    EnableVoxelTemporal = true
+
+    ;; Temporal blend factor
+    ;; How much to blend with previous frame
+    ;; Default: 0.95
+    VoxelTemporalBlend = 0.95
+
+    ;; Enable anisotropic voxels
+    ;; Stores directional lighting information
+    ;; Default: true
+    EnableAnisotropicVoxels = true
+
+    ;; Voxel filtering type
+    ;; Options: Box, Gaussian, Lanczos, Mitchell
+    ;; Default: Gaussian
+    VoxelFilterType = Gaussian
+
+    ;; Enable occlusion in voxels
+    ;; Prevents light leaking through walls
+    ;; Default: true
+    EnableVoxelOcclusion = true
+
+    ;; Voxel occlusion bias
+    ;; Prevents self-occlusion artifacts
+    ;; Default: 0.1
+    VoxelOcclusionBias = 0.1
+
+    ;; Enable emissive boost
+    ;; Amplifies emissive materials in GI
+    ;; Default: true
+    EnableEmissiveBoost = true
+
+    ;; Emissive boost factor
+    ;; Multiplier for emissive contributions
+    ;; Default: 2.0
+    EmissiveBoostFactor = 2.0
+
+    ;; Voxel update mode
+    ;; Options: Static, Dynamic, Adaptive
+    ;; Default: Dynamic
+    VoxelUpdateMode = Dynamic
+
+    ;; Voxel update interval (seconds)
+    ;; How often to update voxel grid
+    ;; Default: 0.1
+    VoxelUpdateInterval = 0.1
+
+[LightBouncing]
+    ;; Enable light bouncing calculation
+    ;; Simulates inter-reflection between surfaces
+    ;; Default: true
+    EnableLightBouncing = true
+
+    ;; Maximum number of light bounces
+    ;; More bounces = more realistic, higher cost
+    ;; Default: 3
+    MaxLightBounces = 3
+
+    ;; Light bounce falloff
+    ;; Energy loss per bounce
+    ;; Range: 0.0 to 1.0
+    ;; Default: 0.8
+    BounceFalloff = 0.8
+
+    ;; Color bleeding intensity
+    ;; How much colors affect each other
+    ;; Default: 1.0
+    ColorBleed = 1.0
+
+    ;; Enable specular bounces
+    ;; Bounces from reflective surfaces
+    ;; Default: true
+    EnableSpecularBounces = true
+
+    ;; Enable diffuse bounces
+    ;; Bounces from diffuse surfaces
+    ;; Default: true
+    EnableDiffuseBounces = true
+
+    ;; Bounce threshold
+    ;; Minimum energy to continue bouncing
+    ;; Default: 0.01
+    BounceThreshold = 0.01
+
+    ;; Rays per bounce calculation
+    ;; More rays = better quality
+    ;; Default: 64
+    RaysPerBounce = 64
+
+    ;; Enable importance sampling
+    ;; Focuses rays on important directions
+    ;; Default: true
+    EnableImportanceSampling = true
+
+    ;; Enable Russian roulette termination
+    ;; Probabilistic ray termination for efficiency
+    ;; Default: true
+    EnableRussianRoulette = true
+
+    ;; Russian roulette threshold
+    ;; Energy threshold for termination probability
+    ;; Default: 0.1
+    RussianRouletteThreshold = 0.1
+
+[Radiosity]
+    ;; Enable radiosity calculation
+    ;; Classic GI algorithm for static scenes
+    ;; Default: false
+    EnableRadiosity = false
+
+    ;; Radiosity patch resolution
+    ;; Subdivision level for surfaces
+    ;; Default: 64
+    RadiosityPatchResolution = 64
+
+    ;; Radiosity patch size
+    ;; Physical size of patches in meters
+    ;; Default: 1.0
+    RadiosityPatchSize = 1.0
+
+    ;; Maximum radiosity iterations
+    ;; Convergence iterations
+    ;; Default: 100
+    RadiosityMaxIterations = 100
+
+    ;; Convergence threshold
+    ;; When to stop iterating
+    ;; Default: 0.01
+    RadiosityConvergenceThreshold = 0.01
+
+    ;; Radiosity method
+    ;; Options: Classic, Progressive, Hierarchical
+    ;; Default: Progressive
+    RadiosityMethod = Progressive
+
+    ;; Enable adaptive subdivision
+    ;; Subdivides patches based on error
+    ;; Default: true
+    EnableAdaptiveSubdivision = true
+
+    ;; Subdivision threshold
+    ;; Error threshold for subdivision
+    ;; Default: 0.1
+    SubdivisionThreshold = 0.1
+
+    ;; Enable form factor caching
+    ;; Caches geometric relationships
+    ;; Default: true
+    EnableFormFactorCaching = true
+
+    ;; Enable hemicube method
+    ;; Alternative to ray casting for form factors
+    ;; Default: false
+    EnableHemicubeMethod = false
+
+    ;; Hemicube resolution
+    ;; Resolution for hemicube rendering
+    ;; Default: 64
+    HemicubeResolution = 64
+
+[AmbientLighting]
+    ;; Ambient lighting mode
+    ;; Options: Color, Trilight, Skybox, SphericalHarmonics
+    ;; Default: Trilight
+    AmbientMode = Trilight
+
+    ;; Ambient color (R,G,B)
+    ;; Base ambient light color
+    ;; Default: 0.2,0.2,0.25
+    AmbientColor = 0.2,0.2,0.25
+
+    ;; Ambient intensity
+    ;; Strength of ambient lighting
+    ;; Default: 1.0
+    AmbientIntensity = 1.0
+
+    ;; Sky color for trilight mode (R,G,B)
+    ;; Color from above
+    ;; Default: 0.5,0.7,1.0
+    SkyColor = 0.5,0.7,1.0
+
+    ;; Equator color for trilight mode (R,G,B)
+    ;; Color from sides
+    ;; Default: 0.4,0.4,0.4
+    EquatorColor = 0.4,0.4,0.4
+
+    ;; Ground color for trilight mode (R,G,B)
+    ;; Color from below
+    ;; Default: 0.2,0.2,0.2
+    GroundColor = 0.2,0.2,0.2
+
+    ;; Ambient cubemap intensity
+    ;; Strength of cubemap-based ambient
+    ;; Default: 1.0
+    CubemapIntensity = 1.0
+
+    ;; Enable specular IBL
+    ;; Image-based specular reflections
+    ;; Default: true
+    EnableSpecularIBL = true
+
+    ;; Enable diffuse IBL
+    ;; Image-based diffuse lighting
+    ;; Default: true
+    EnableDiffuseIBL = true
+
+    ;; IBL exposure adjustment
+    ;; Brightness adjustment for IBL
+    ;; Default: 1.0
+    IBLExposure = 1.0
+
+    ;; IBL rotation in degrees
+    ;; Rotates environment lighting
+    ;; Default: 0.0
+    IBLRotation = 0.0
+
+[SSAO]
+    ;; Enable Screen-Space Ambient Occlusion
+    ;; Enhances depth perception and contact shadows
+    ;; Default: true
+    EnableSSAO = true
+
+    ;; SSAO quality level
+    ;; Options: Low, Medium, High, Ultra
+    ;; Default: High
+    SSAOQuality = High
+
+    ;; SSAO radius
+    ;; Size of occlusion effect
+    ;; Default: 0.5
+    SSAORadius = 0.5
+
+    ;; SSAO intensity
+    ;; Strength of occlusion
+    ;; Default: 1.0
+    SSAOIntensity = 1.0
+
+    ;; SSAO bias
+    ;; Prevents self-occlusion
+    ;; Default: 0.05
+    SSAOBias = 0.05
+
+    ;; SSAO sample count
+    ;; Number of samples per pixel
+    ;; Low: 8, Medium: 16, High: 32, Ultra: 64
+    ;; Default: 16
+    SSAOSampleCount = 16
+
+    ;; Enable SSAO blur
+    ;; Smooths SSAO output
+    ;; Default: true
+    EnableSSAOBlur = true
+
+    ;; SSAO blur radius
+    ;; Size of blur kernel
+    ;; Default: 2.0
+    SSAOBlurRadius = 2.0
+
+    ;; Enable SSAO temporal filtering
+    ;; Reduces noise over time
+    ;; Default: true
+    EnableSSAOTemporal = true
+
+    ;; SSAO temporal blend factor
+    ;; Temporal accumulation strength
+    ;; Default: 0.9
+    SSAOTemporalBlend = 0.9
+
+    ;; Enable SSAO half resolution
+    ;; Renders SSAO at half resolution
+    ;; Default: false
+    EnableSSAOHalfRes = false
+
+    ;; SSAO falloff type
+    ;; Options: Linear, Quadratic, InverseQuadratic
+    ;; Default: Linear
+    SSAOFalloffType = Linear
+
+    ;; SSAO falloff distance
+    ;; Distance for falloff calculation
+    ;; Default: 1.0
+    SSAOFalloffDistance = 1.0
+
+[DynamicLights]
+    ;; Maximum dynamic lights
+    ;; Limits number of real-time lights
+    ;; Default: 64
+    MaxDynamicLights = 64
+
+    ;; Enable light culling
+    ;; Culls lights outside view or range
+    ;; Default: true
+    EnableLightCulling = true
+
+    ;; Light culling method
+    ;; Options: Forward, TiledDeferred, ClusteredDeferred, ClusteredForward
+    ;; Default: TiledDeferred
+    LightCullingMethod = TiledDeferred
+
+    ;; Tile size for tiled rendering
+    ;; Size of screen tiles for light culling
+    ;; Default: 16
+    TileSize = 16
+
+    ;; Enable clustered culling
+    ;; 3D clusters instead of 2D tiles
+    ;; Default: false
+    EnableClusteredCulling = false
+
+    ;; Number of cluster slices
+    ;; Z-slices for clustered culling
+    ;; Default: 16
+    ClusterSlices = 16
+
+    ;; Maximum lights per pixel
+    ;; Limits light complexity
+    ;; Default: 16
+    MaxLightsPerPixel = 16
+
+    ;; Maximum shadow-casting lights
+    ;; Limits expensive shadow rendering
+    ;; Default: 8
+    MaxShadowCasters = 8
+
+    ;; Light culling distance
+    ;; Maximum distance for light influence
+    ;; Default: 100.0
+    LightCullingDistance = 100.0
+
+    ;; Enable frustum culling
+    ;; Don't process lights outside view
+    ;; Default: true
+    EnableFrustumCulling = true
+
+    ;; Enable occlusion culling
+    ;; Don't process occluded lights
+    ;; Default: true
+    EnableOcclusionCulling = true
+
+[Performance]
+    ;; Performance monitoring interval (seconds)
+    ;; How often to check performance
+    ;; Default: 1.0
+    PerformanceCheckInterval = 1.0
+
+    ;; Enable performance warnings
+    ;; Log warnings when performance degrades
+    ;; Default: true
+    EnablePerformanceWarnings = true
+
+    ;; Frame time warning threshold (ms)
+    ;; Warn when GI frame time exceeds this
+    ;; Default: 33.33 (30 FPS)
+    FrameTimeWarningThreshold = 33.33
+
+    ;; GPU memory warning threshold (MB)
+    ;; Warn when GPU memory usage exceeds this
+    ;; Default: 2048
+    GPUMemoryWarningThreshold = 2048
+
+    ;; Enable memory monitoring
+    ;; Track GPU memory usage
+    ;; Default: true
+    EnableMemoryMonitoring = true
+
+    ;; Enable automatic optimization
+    ;; Automatically optimize for scene complexity
+    ;; Default: true
+    EnableAutoOptimization = true
+
+;; Quality preset configurations:
+;;
+;; [Low Quality] - Mobile/Integrated Graphics
+;; GIQuality = Low
+;; EnableLightProbes = true
+;; EnableSSGI = false
+;; EnableVoxelGI = false
+;; MaxLightBounces = 1
+;; SSAOQuality = Low
+;;
+;; [Medium Quality] - Mid-range GPU
+;; GIQuality = Medium
+;; EnableLightProbes = true
+;; EnableSSGI = true
+;; SSGIQuality = Medium
+;; EnableVoxelGI = false
+;; MaxLightBounces = 2
+;; SSAOQuality = Medium
+;;
+;; [High Quality] - High-end GPU
+;; GIQuality = High
+;; EnableLightProbes = true
+;; EnableSSGI = true
+;; SSGIQuality = High
+;; EnableVoxelGI = true
+;; VoxelResolution = 128
+;; MaxLightBounces = 3
+;; SSAOQuality = High
+;;
+;; [Ultra Quality] - Enthusiast GPU
+;; GIQuality = Ultra
+;; EnableLightProbes = true
+;; EnableSSGI = true
+;; SSGIQuality = Ultra
+;; EnableVoxelGI = true
+;; VoxelResolution = 256
+;; MaxLightBounces = 4
+;; SSAOQuality = Ultra
+;;
+;; [Cinematic Quality] - Workstation/Film
+;; GIQuality = Cinematic
+;; EnableLightProbes = true
+;; EnableSSGI = true
+;; SSGIQuality = Ultra
+;; EnableVoxelGI = true
+;; VoxelResolution = 512
+;; EnableRadiosity = true
+;; MaxLightBounces = 6
+;; SSAOQuality = Ultra
+
+;; Performance recommendations by hardware:
+;;
+;; RTX 4090/4080 (Ultra High-End):
+;; - GIQuality = Cinematic
+;; - VoxelResolution = 512
+;; - EnableRadiosity = true
+;; - MaxLightBounces = 6
+;;
+;; RTX 3080/4070 (High-End):
+;; - GIQuality = Ultra
+;; - VoxelResolution = 256
+;; - MaxLightBounces = 4
+;; - EnableVoxelGI = true
+;;
+;; RTX 3060/4060 (Mid-High):
+;; - GIQuality = High
+;; - VoxelResolution = 128
+;; - MaxLightBounces = 3
+;; - EnableSSGI = true
+;;
+;; GTX 1660/RTX 2060 (Mid-Range):
+;; - GIQuality = Medium
+;; - EnableSSGI = true
+;; - SSGIQuality = Medium
+;; - EnableVoxelGI = false
+;;
+;; GTX 1050/Integrated (Low-End):
+;; - GIQuality = Low
+;; - EnableSSGI = false
+;; - EnableVoxelGI = false
+;; - MaxLightBounces = 1
+
+;; Integration with other rendering systems:
+;;
+;; The Global Illumination system integrates with:
+;; - PBR Material System: Uses material properties for lighting
+;; - Volumetric Lighting: GI affects fog and atmospheric effects
+;; - Particle System: Particles receive and emit GI lighting
+;; - Water System: Underwater GI and caustics integration
+;;
+;; For best results, enable all rendering systems together
+
+;; Tips for optimal quality and performance:
+;;
+;; 1. Use adaptive quality for dynamic performance
+;; 2. Enable temporal filtering to reduce noise
+;; 3. Place light probes strategically in important areas
+;; 4. Use voxel GI for dynamic scenes with moving objects
+;; 5. Enable SSGI for fine detail indirect lighting
+;; 6. Combine multiple GI techniques for best results
+;; 7. Monitor GPU memory usage with complex scenes
+;; 8. Use lower voxel resolution for large outdoor areas
+;; 9. Enable light culling for scenes with many lights
+;; 10. Use radiosity only for static architectural scenes

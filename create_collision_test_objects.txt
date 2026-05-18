@@ -1,0 +1,48 @@
+// Console commands to create collision test objects
+// Copy and paste these commands one by one into the OpenSim console
+
+// Create the main test controller object
+create prim CollisionTester
+edit prim CollisionTester position 128 128 25
+edit prim CollisionTester scale 1 1 1
+edit prim CollisionTester color 0.2 0.8 0.2
+edit prim CollisionTester text "Touch to test collisions" 1 1 1 1
+
+// Create target object 
+create prim Target
+edit prim Target position 136 128 25
+edit prim Target scale 3 3 3
+edit prim Target color 1 0 0
+edit prim Target text "TARGET" 1 0 0 1
+edit prim Target physics true
+
+// Create projectile object
+create prim Projectile
+edit prim Projectile position 120 128 26
+edit prim Projectile scale 0.3 0.3 0.3
+edit prim Projectile color 0 1 0
+edit prim Projectile text "PROJECTILE" 0 1 0 1
+edit prim Projectile physics true
+
+// Create floor object for physics test
+create prim Floor
+edit prim Floor position 133 128 20
+edit prim Floor scale 4 4 0.5
+edit prim Floor color 0.8 0.8 0.8
+edit prim Floor text "FLOOR" 0.5 0.5 0.5 1
+edit prim Floor physics true
+
+// Create test balls
+create prim Ball1
+edit prim Ball1 position 133 128 28
+edit prim Ball1 scale 1 1 1
+edit prim Ball1 color 0 0 1
+edit prim Ball1 text "BALL 1" 0 0 1 1
+edit prim Ball1 physics true
+
+create prim Ball2
+edit prim Ball2 position 133 128 31
+edit prim Ball2 scale 1 1 1
+edit prim Ball2 color 0 0.5 1
+edit prim Ball2 text "BALL 2" 0 0.5 1 1
+edit prim Ball2 physics true

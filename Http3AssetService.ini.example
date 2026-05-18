@@ -1,0 +1,211 @@
+;; Configuration for OpenSim HTTP/3 Asset Service
+;; This provides modern asset delivery with QUIC protocol support for maximum performance
+;; 
+;; Place this section in your OpenSim.ini or include it via Include-Http3AssetService
+
+[Http3AssetService]
+    ;; Enable the HTTP/3 asset service alongside existing asset service
+    ;; Default: false (disabled by default for gradual rollout)
+    Enabled = true
+
+    ;; HTTP/3 asset server URL
+    ;; This is where the service will fetch assets using modern protocols
+    ;; Default: https://assets.opensim.local:8443
+    Http3AssetUrl = https://assets.opensim.local:8443
+
+    ;; Enable Brotli compression for asset delivery
+    ;; Provides better compression than gzip with faster decompression
+    ;; Default: true
+    EnableCompression = true
+
+    ;; Enable predictive asset preloading
+    ;; Automatically loads related assets to improve user experience
+    ;; Default: true
+    EnablePreloading = true
+
+    ;; Enable performance metrics collection
+    ;; Provides detailed statistics on asset service performance
+    ;; Default: true
+    EnableMetrics = true
+
+    ;; Maximum number of assets to cache in memory
+    ;; Higher values improve performance but use more memory
+    ;; Default: 10000
+    MaxCacheSize = 10000
+
+    ;; Maximum cache size in megabytes
+    ;; Prevents cache from consuming too much memory
+    ;; Default: 1024
+    MaxCacheSizeMB = 1024
+
+    ;; Cache expiry time in minutes
+    ;; How long assets remain in cache before being refreshed
+    ;; Default: 120 (2 hours)
+    CacheExpiryMinutes = 120
+
+[Http3AssetHandler]
+    ;; Enable Brotli compression for HTTP responses
+    ;; Reduces bandwidth usage, especially for text-based assets
+    ;; Default: true
+    EnableCompression = true
+
+    ;; Enable HTTP caching with proper cache headers
+    ;; Allows clients and CDNs to cache assets efficiently
+    ;; Default: true
+    EnableCaching = true
+
+    ;; Enable HTTP range requests for large assets
+    ;; Allows resumable downloads and partial content delivery
+    ;; Default: true
+    EnableRangeRequests = true
+
+    ;; Enable ETag header generation for cache validation
+    ;; Improves cache efficiency with conditional requests
+    ;; Default: true
+    EnableETag = true
+
+    ;; Cache control max-age in seconds
+    ;; How long clients should cache assets
+    ;; Default: 3600 (1 hour)
+    CacheMaxAge = 3600
+
+[Http3AssetServer]
+    ;; Port for HTTP/3 asset server
+    ;; Note: HTTP/3 requires HTTPS, so SSL configuration is mandatory
+    ;; Default: 8443
+    Port = 8443
+
+    ;; SSL certificate file path for HTTPS/HTTP3
+    ;; Required for HTTP/3 (QUIC) protocol support
+    ;; Example: /path/to/certificate.crt
+    SSLCertFile = 
+
+    ;; SSL private key file path
+    ;; Required for HTTPS/HTTP3 encryption
+    ;; Example: /path/to/private.key
+    SSLKeyFile = 
+
+    ;; Enable HTTP/2 fallback for older clients
+    ;; Provides compatibility when HTTP/3 is not supported
+    ;; Default: true
+    EnableHttp2Fallback = true
+
+    ;; Maximum concurrent connections
+    ;; Higher values support more simultaneous users
+    ;; Default: 1000
+    MaxConnections = 1000
+
+    ;; Connection timeout in seconds
+    ;; How long to wait for idle connections before closing
+    ;; Default: 30
+    ConnectionTimeout = 30
+
+    ;; Enable connection multiplexing
+    ;; Allows multiple requests over single connection for better performance
+    ;; Default: true
+    EnableMultiplexing = true
+
+    ;; Request timeout in seconds
+    ;; Maximum time to process individual asset requests
+    ;; Default: 60
+    RequestTimeout = 60
+
+    ;; Enable request/response logging for debugging
+    ;; Should be disabled in production for performance
+    ;; Default: false
+    EnableRequestLogging = false
+
+[AssetService]
+    ;; Use HTTP/3 asset service as primary with fallback
+    ;; This configuration uses the new service while maintaining compatibility
+    LocalServiceModule = "OpenSim.Services.AssetService.dll:Http3AssetService"
+
+    ;; Fallback asset service for compatibility
+    ;; This is used when HTTP/3 service is unavailable or for foreign assets
+    FallbackServiceModule = "OpenSim.Services.AssetService.dll:AssetService"
+
+    ;; Asset database connection string
+    ;; Used by fallback service for direct database access
+    ConnectionString = "Data Source=localhost;Database=opensim;User ID=opensim;Password=***;Old Guids=true;"
+
+    ;; Asset storage provider
+    ;; Default: OpenSim.Data.MySQL.dll:MySQLAssetData
+    StorageProvider = "OpenSim.Data.MySQL.dll:MySQLAssetData"
+
+;; Example usage patterns:
+;;
+;; High Performance Setup:
+;; - Enable all optimizations (compression, caching, preloading)
+;; - Increase cache sizes for high-memory servers
+;; - Use short cache expiry for frequently changing content
+;;
+;; [Http3AssetService]
+;;     MaxCacheSize = 50000
+;;     MaxCacheSizeMB = 4096
+;;     CacheExpiryMinutes = 60
+;;     EnableCompression = true
+;;     EnablePreloading = true
+;;
+;; Low Memory Setup:
+;; - Reduce cache sizes for memory-constrained servers
+;; - Increase cache expiry to reduce database load
+;; - Keep compression enabled to reduce bandwidth
+;;
+;; [Http3AssetService]
+;;     MaxCacheSize = 2000
+;;     MaxCacheSizeMB = 256
+;;     CacheExpiryMinutes = 240
+;;     EnableCompression = true
+;;     EnablePreloading = false
+;;
+;; Development/Testing Setup:
+;; - Enable detailed logging and metrics
+;; - Shorter cache times for faster testing iterations
+;; - Enable request logging for debugging
+;;
+;; [Http3AssetService]
+;;     EnableMetrics = true
+;;     CacheExpiryMinutes = 5
+;; [Http3AssetServer]
+;;     EnableRequestLogging = true
+;;
+;; CDN Integration:
+;; - Longer cache times for CDN efficiency
+;; - Enable all caching features
+;; - Optimize for bandwidth over latency
+;;
+;; [Http3AssetHandler]
+;;     EnableCaching = true
+;;     EnableETag = true
+;;     CacheMaxAge = 86400  ; 24 hours
+;;     EnableCompression = true
+;;     EnableRangeRequests = true
+
+;; Performance Tuning Notes:
+;;
+;; 1. HTTP/3 (QUIC) Benefits:
+;;    - Reduced connection establishment time
+;;    - Better performance over lossy networks
+;;    - Built-in multiplexing without head-of-line blocking
+;;    - 0-RTT connection resumption
+;;
+;; 2. Compression Recommendations:
+;;    - Brotli compression provides 15-25% better compression than gzip
+;;    - Most effective on text-based assets (scripts, notecards, XML)
+;;    - Not beneficial for already compressed formats (JPEG, PNG)
+;;
+;; 3. Caching Strategy:
+;;    - Larger caches reduce database load but increase memory usage
+;;    - Shorter expiry times ensure fresh content but increase database queries
+;;    - ETag support reduces bandwidth for unchanged assets
+;;
+;; 4. Security Considerations:
+;;    - HTTP/3 requires HTTPS with valid SSL certificates
+;;    - Consider rate limiting for public-facing asset servers
+;;    - Monitor for unusual access patterns that might indicate abuse
+;;
+;; 5. Monitoring and Metrics:
+;;    - Enable metrics collection to track performance improvements
+;;    - Monitor cache hit rates (should be >80% for good performance)
+;;    - Watch compression ratios and bandwidth savings
+;;    - Track HTTP/3 vs fallback usage patterns
