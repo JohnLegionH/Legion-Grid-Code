@@ -219,7 +219,18 @@ namespace Phlox.ScriptEngine
 
         private void OnChatFromClient(object sender, OSChatMessage chat)
         {
-            ListenManager?.DeliverChat(chat.Channel, chat.From, chat.SenderUUID, chat.Message);
+            // HandlerScriptDialogReply (LLClientView) sets chat.Sender but leaves
+            // chat.SenderUUID at its UUID.Zero default.  A key-filtered llListen
+            // (llListen(chan, "", ownerKey, "")) would never match because
+            // DeliverChat compares FilterKey against speakerKey == UUID.Zero.
+            // Fall back to the client's AgentId so dialog-button replies reach scripts.
+            UUID speakerKey = chat.SenderUUID;
+            if (speakerKey == UUID.Zero && chat.Sender != null)
+                speakerKey = chat.Sender.AgentId;
+            string speakerName = chat.From;
+            if (string.IsNullOrEmpty(speakerName) && chat.Sender != null)
+                speakerName = chat.Sender.Name;
+            ListenManager?.DeliverChat(chat.Channel, speakerName, speakerKey, chat.Message);
         }
 
         // ── Touch events ───────────────────────────────────────────────────────
