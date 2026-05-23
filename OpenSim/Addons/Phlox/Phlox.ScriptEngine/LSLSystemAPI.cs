@@ -1929,6 +1929,15 @@ namespace Phlox.ScriptEngine
             World.RequestTeleportLocation(targetSP.ControllingClient,
                 region, pos, lookAt, (uint)OpenMetaverse.TeleportFlags.ViaLocation);
         }
+        public void osTeleportAgent(string agent, string region, Vector3 pos, Vector3 lookAt)
+        {
+            // OSSL alias for iwTeleportAgent.
+            // OSSL semantics: region "" means same region.
+            // Auth check (owner / estate manager) is already enforced inside iwTeleportAgent
+            // via IsTeleportAuthorized().
+            iwTeleportAgent(agent, region, pos, lookAt);
+        }
+
         public void llTeleportAgent(string agent, string landmark, Vector3 pos, Vector3 lookAt)
         {
             // SL: teleport to landmark name or "" for same region
@@ -6405,6 +6414,28 @@ public void llRezObject(string inventory, Vector3 pos, Vector3 vel, Quaternion r
             }
             return new LSLList(result);
         }
+
+        public LSLList osGetAvatarList()
+        {
+            // OSSL: returns [uuid, position, name, uuid, position, name, ...]
+            // for every avatar in the region EXCEPT the script owner
+            // (matches the OpenSim XEngine OSSL behavior).
+            List<object> result = new List<object>();
+            List<ScenePresence> presences = World?.GetScenePresences();
+            if (presences == null) return new LSLList();
+
+            UUID ownerId = m_host.OwnerID;
+            foreach (ScenePresence sp in presences)
+            {
+                if (sp.IsChildAgent) continue;
+                if (sp.UUID == ownerId) continue;   // exclude script owner per OSSL spec
+                result.Add(sp.UUID.ToString());
+                result.Add(sp.AbsolutePosition);
+                result.Add(sp.Name);
+            }
+            return new LSLList(result);
+        }
+
         public int llReturnObjectsByOwner(string owner, int scope)
         {
             // Faithful port from Halcyon, adapted for Legion

@@ -401,6 +401,8 @@ namespace InWorldz.Phlox.Glue
         string iwGetLinkInventoryCreator(int linknumber, string item);
         string iwSHA256String(string src);
         void iwTeleportAgent(string agent, string region, Vector3 pos, Vector3 lookat);
+        void osTeleportAgent(string agent, string region, Vector3 pos, Vector3 lookat);
+        LSLList osGetAvatarList();
         string llAvatarOnLinkSitTarget(int linknumber);
         string iwGetLastOwner();
         void iwRemoveLinkInventory(int linknumber, string item);

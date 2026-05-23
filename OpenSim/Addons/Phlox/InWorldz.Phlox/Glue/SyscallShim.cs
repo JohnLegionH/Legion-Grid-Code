@@ -756,6 +756,8 @@ private static string ConvToString(object o)
 								Shim_botIsPersistent,           //669
 								Shim_botGetPersistentData,      //670
 								Shim_botSetPersistentData,      //671
+								Shim_osTeleportAgent,           //672
+								Shim_osGetAvatarList,           //673
         };
 
         public void SetScriptEventFlags()
@@ -6873,6 +6875,31 @@ private static string ConvToString(object o)
 
             int ret = self._systemAPI.botSetPersistentData(p0, p1, p2);
 
+            self._interpreter.SafeOperandsPush(ConvToLSLType(ret));
+        }
+
+        // OSSL: void osTeleportAgent(string agent, string region, vector pos, vector lookat)
+        // Mirrors Shim_iwTeleportAgent — same args, async dispatch.
+        static private void Shim_osTeleportAgent(SyscallShim self)
+        {
+            Vector3 lookat = ConvToVector(self._interpreter.ScriptState.Operands.Pop());
+            Vector3 pos = ConvToVector(self._interpreter.ScriptState.Operands.Pop());
+            string region = ConvToString(self._interpreter.ScriptState.Operands.Pop());
+            string agent = ConvToString(self._interpreter.ScriptState.Operands.Pop());
+
+            self._interpreter.ScriptState.RunState = VM.RuntimeState.Status.Syscall;
+
+            self._asyncCallDelegate(delegate()
+            {
+                self._systemAPI.osTeleportAgent(agent, region, pos, lookat);
+            });
+        }
+
+        // OSSL: list osGetAvatarList()
+        // Synchronous region-local enumeration; no params, returns LSLList.
+        static private void Shim_osGetAvatarList(SyscallShim self)
+        {
+            LSLList ret = self._systemAPI.osGetAvatarList();
             self._interpreter.SafeOperandsPush(ConvToLSLType(ret));
         }
     }

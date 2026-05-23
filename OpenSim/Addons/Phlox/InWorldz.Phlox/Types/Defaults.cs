@@ -4730,6 +4730,20 @@ namespace InWorldz.Phlox.Types
                 ParamNames = new string[] { "botID", "key", "value" },
                 TableIndex = 671
             }},
+            {"osTeleportAgent", new FunctionSig {
+                FunctionName = "osTeleportAgent",
+                ReturnType = VarType.Void,
+                ParamTypes = new VarType[] { VarType.String, VarType.String, VarType.Vector, VarType.Vector },
+                ParamNames = new string[] { "agent", "region", "pos", "lookat" },
+                TableIndex = 672
+            }},
+            {"osGetAvatarList", new FunctionSig {
+                FunctionName = "osGetAvatarList",
+                ReturnType = VarType.List,
+                ParamTypes = new VarType[] { },
+                ParamNames = new string[] { },
+                TableIndex = 673
+            }},
          };
         }
 }
