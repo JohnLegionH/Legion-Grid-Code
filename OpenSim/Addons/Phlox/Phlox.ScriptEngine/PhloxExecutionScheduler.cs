@@ -564,40 +564,52 @@ namespace Phlox.ScriptEngine
 
         private void ProcessEnableDisable()
         {
-            EnableDisableReq req;
+            // Drain the entire queue in one pass — the previous one-per-pass
+            // behaviour caused multi-script prims to take many DoWork cycles
+            // before all their scripts entered the run queue, which compounded
+            // with master-scheduler wakeup gaps to produce minute-long delays
+            // between script state_entry events.
+            List<EnableDisableReq> batch;
             lock (m_EnableDisableQueue)
             {
                 if (m_EnableDisableQueue.Count == 0) return;
-                req = m_EnableDisableQueue.Dequeue();
+                batch = new List<EnableDisableReq>(m_EnableDisableQueue);
+                m_EnableDisableQueue.Clear();
             }
 
-            Interpreter script;
-            if (!m_AllScripts.TryGetValue(req.ItemId, out script)) return;
+            foreach (var req in batch)
+            {
+                Interpreter script;
+                if (!m_AllScripts.TryGetValue(req.ItemId, out script)) continue;
 
-            if (req.Enable)
-            {
-                script.ScriptState.GeneralEnable = true;
-                if (!m_RunIndex.ContainsKey(req.ItemId))
-                    AddToRunQueue(script);
+                if (req.Enable)
+                {
+                    script.ScriptState.GeneralEnable = true;
+                    if (!m_RunIndex.ContainsKey(req.ItemId))
+                        AddToRunQueue(script);
+                }
+                else
+                {
+                    script.ScriptState.GeneralEnable = false;
+                    RemoveFromRunQueue(req.ItemId);
+                    UnregisterFromNotifications(script);
+                }
+                script.SetScriptEventFlags();
             }
-            else
-            {
-                script.ScriptState.GeneralEnable = false;
-                RemoveFromRunQueue(req.ItemId);
-                UnregisterFromNotifications(script);
-            }
-            script.SetScriptEventFlags();
         }
 
         private void ProcessResets()
         {
-            UUID id;
+            // Drain the entire queue in one pass (see ProcessEnableDisable note).
+            List<UUID> batch;
             lock (m_PendingResets)
             {
                 if (m_PendingResets.Count == 0) return;
-                id = m_PendingResets.Dequeue();
+                batch = new List<UUID>(m_PendingResets);
+                m_PendingResets.Clear();
             }
-            ResetNow(id);
+            foreach (var id in batch)
+                ResetNow(id);
         }
 
         private void ProcessSyscallReturns()

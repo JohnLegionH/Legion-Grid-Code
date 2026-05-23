@@ -67,27 +67,43 @@ namespace Phlox.ScriptEngine
                 {
                     while (!m_Stop)
                     {
+                        // Lost-wakeup-safe pattern:
+                        //   1. Reset the signal BEFORE checking work.
+                        //   2. Do all available work.
+                        //   3. If still no work, wait.
+                        //   4. If a Set() arrived between (1) and (3), WaitOne returns immediately.
+                        //
+                        // The OLD pattern (Reset AFTER WaitOne returns) lost any Set() calls
+                        // that arrived while we were processing — leading to scripts'
+                        // state_entry events sitting in the queue until the NEXT Set() arrived,
+                        // which could be 60+ seconds later if nothing else was happening.
+                        m_ActionEvent.Reset();
+
                         WorkStatus exeStatus = m_ExeScheduler.DoWork();
                         WorkStatus loadStatus = m_ScriptLoader.DoWork();
 
-                        if (!exeStatus.WorkIsPending && !loadStatus.WorkIsPending)
-                        {
-                            ulong wakeAt = Math.Min(exeStatus.NextWakeUpTime, loadStatus.NextWakeUpTime);
+                        // If either has work pending, loop immediately without waiting.
+                        if (exeStatus.WorkIsPending || loadStatus.WorkIsPending)
+                            continue;
 
-                            if (wakeAt != ulong.MaxValue)
-                            {
-                                long waitMs = (long)wakeAt - (long)(ulong)Util.EnvironmentTickCount();
-                                if (waitMs > 0)
-                                {
-                                    m_ActionEvent.WaitOne((int)Math.Min(waitMs, int.MaxValue));
-                                    m_ActionEvent.Reset();
-                                }
-                            }
-                            else
-                            {
-                                m_ActionEvent.WaitOne();
-                                m_ActionEvent.Reset();
-                            }
+                        ulong wakeAt = Math.Min(exeStatus.NextWakeUpTime, loadStatus.NextWakeUpTime);
+
+                        if (wakeAt != ulong.MaxValue)
+                        {
+                            // Both wakeAt and EnvironmentTickCount are based on the same
+                            // 30-bit masked tick value (see OpenSim.Framework.Util).
+                            // Cast Int32 to long directly — the value is always non-negative
+                            // (masked to 0x3FFFFFFF), so this is safe.
+                            long now = (long)(uint)Util.EnvironmentTickCount();
+                            long waitMs = (long)wakeAt - now;
+                            if (waitMs > 0)
+                                m_ActionEvent.WaitOne((int)Math.Min(waitMs, int.MaxValue));
+                            // If waitMs <= 0, the wake time has already passed; loop immediately.
+                        }
+                        else
+                        {
+                            // No timed wake-up — wait indefinitely for a Set() signal.
+                            m_ActionEvent.WaitOne();
                         }
                     }
                 }
