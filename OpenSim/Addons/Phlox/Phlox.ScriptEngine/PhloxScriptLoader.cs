@@ -515,11 +515,15 @@ namespace Phlox.ScriptEngine
     {
         private static readonly ILog m_log = LogManager.GetLogger(typeof(LogOutputListener));
         private readonly UUID m_ItemId;
+        private int m_ErrorCount;
 
         public LogOutputListener(UUID itemId) { m_ItemId = itemId; }
 
         public void Error(string message)
-            => m_log.ErrorFormat("[PhloxCompile]: {0}: {1}", m_ItemId, message);
+        {
+            m_ErrorCount++;
+            m_log.ErrorFormat("[PhloxCompile]: {0}: {1}", m_ItemId, message);
+        }
 
         public void Info(string message)
             => m_log.InfoFormat("[PhloxCompile]: {0}: {1}", m_ItemId, message);
@@ -527,6 +531,6 @@ namespace Phlox.ScriptEngine
         public void CompilationFinished()
             => m_log.DebugFormat("[PhloxCompile]: Finished {0}", m_ItemId);
 
-        public bool HasErrors() => false;
+        public bool HasErrors() => m_ErrorCount > 0;
     }
 }
