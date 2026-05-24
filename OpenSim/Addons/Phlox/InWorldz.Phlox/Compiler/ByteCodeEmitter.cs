@@ -279,7 +279,7 @@ namespace InWorldz.Phlox.Compiler
                 // Boolean
                 case "boolor":  return $"{lexpr}\n{rexpr}\nilor";
                 case "booland": return $"{lexpr}\n{rexpr}\niland";
-                default: return $"{lexpr}\n{rexpr}\n; unknown op: {subtemplate}";
+                default: return $"{lexpr}\n{rexpr}\nUNKNOWN_BINARY_OP";
             }
         }
 
@@ -288,6 +288,7 @@ namespace InWorldz.Phlox.Compiler
         public static string CompoundAssignOp(string subtemplate, bool isGlobal, int index,
             string subIndex, string expr, bool pushFinal)
         {
+            if (subtemplate == null) return string.Empty;
             string load  = subIndex != null
                 ? (isGlobal ? $"gload.sub {index},{subIndex}" : $"load.sub {index},{subIndex}")
                 : (isGlobal ? $"gload {index}" : $"load {index}");
@@ -347,7 +348,7 @@ namespace InWorldz.Phlox.Compiler
                 case "vvmodassign": op = "vcross"; return;
                 case "iilsa": op = "ilsh"; return;
                 case "iirsa": op = "irsh"; return;
-                default:      op = $"; unknown compound op: {subtemplate}"; return;
+                default:      op = "UNKNOWN_COMPOUND_OP"; return;
             }
         }
 

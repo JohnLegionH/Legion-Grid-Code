@@ -54,6 +54,11 @@ namespace InWorldz.Phlox.VM
         public C5.LinkedList<PostedEvent> EventQueue;
 
         /// <summary>
+        /// Guards EventQueue against concurrent access between executor and serialization threads
+        /// </summary>
+        public readonly object EventQueueLock = new object();
+
+        /// <summary>
         /// The runtime state of a script
         /// </summary>
         public enum Status
@@ -334,9 +339,10 @@ namespace InWorldz.Phlox.VM
         /// <param name="postedEvent"></param>
         public void QueueEvent(PostedEvent postedEvent)
         {
-            if (EventQueue.Count < MAX_EVENT_QUEUE_SIZE || AllowOverflow(postedEvent))
+            lock (EventQueueLock)
             {
-                EventQueue.Enqueue(postedEvent);
+                if (EventQueue.Count < MAX_EVENT_QUEUE_SIZE || AllowOverflow(postedEvent))
+                    EventQueue.Enqueue(postedEvent);
             }
         }
 

@@ -305,6 +305,10 @@ namespace InWorldz.Phlox.Compiler
             string op = context.op?.Text ?? "=";
             string rhsCode = GenExpression(context.expression());
             VariableSymbol varSym = ResolveLhsSymbol(context.lhs(), out string subIdx);
+            // The grammar puts ('.' subscript=ID) OUTSIDE the lhs() rule, so ResolveLhsSymbol
+            // never sees it.  Pick it up from the labeled token on the statement context.
+            if (subIdx == null && context.subscript != null)
+                subIdx = CalcSubIndex(context.subscript.Text);
             if (varSym == null) { Error("Invalid assignment target"); return string.Empty; }
 
             if (op == "=")
@@ -910,8 +914,12 @@ namespace InWorldz.Phlox.Compiler
             int li = Idx(lhs), ri = Idx(rhs);
             switch (op)
             {
-                case "+=":  return TemplateMapping.AddAssign[li, ri];
-                case "-=":  return TemplateMapping.SubtractAssign[li, ri];
+                case "+=":  return subIdx != null
+                    ? TemplateMapping.AddAssign[(int)Types.VarType.Float, ri]
+                    : TemplateMapping.AddAssign[li, ri];
+                case "-=":  return subIdx != null
+                    ? TemplateMapping.SubtractAssign[(int)Types.VarType.Float, ri]
+                    : TemplateMapping.SubtractAssign[li, ri];
                 case "*=":  return subIdx != null
                     ? TemplateMapping.MultiplicationAssign[(int)Types.VarType.Float, ri]
                     : TemplateMapping.MultiplicationAssign[li, ri];

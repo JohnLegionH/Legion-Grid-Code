@@ -444,9 +444,14 @@ namespace Phlox.ScriptEngine
             Interpreter script = m_NextScript.Value;
             script.ScriptState.RunningEvent = null;
 
-            while (script.ScriptState.EventQueue.Count > 0)
+            while (true)
             {
-                PostedEvent nextEvt = script.ScriptState.EventQueue.Dequeue();
+                PostedEvent nextEvt;
+                lock (script.ScriptState.EventQueueLock)
+                {
+                    if (script.ScriptState.EventQueue.Count == 0) break;
+                    nextEvt = script.ScriptState.EventQueue.Dequeue();
+                }
                 PhloxEventInfo info = FindEventHandler(nextEvt, script);
                 if (info != null)
                 {

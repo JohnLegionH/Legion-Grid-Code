@@ -94,8 +94,11 @@ namespace InWorldz.Phlox.Serialization
             catch { callsSnapshot = Array.Empty<VM.StackFrame>(); }
 
             VM.PostedEvent[] eventQueueSnapshot;
-            try { eventQueueSnapshot = state.EventQueue.ToArray(); }
-            catch { eventQueueSnapshot = Array.Empty<VM.PostedEvent>(); }
+            lock (state.EventQueueLock)
+            {
+                try { eventQueueSnapshot = state.EventQueue.ToArray(); }
+                catch { eventQueueSnapshot = Array.Empty<VM.PostedEvent>(); }
+            }
 
             Dictionary<int, VM.ActiveListen> listensSnapshot;
             try { listensSnapshot = new Dictionary<int, VM.ActiveListen>(state.ActiveListens); }
