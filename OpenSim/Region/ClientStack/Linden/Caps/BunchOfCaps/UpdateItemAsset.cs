@@ -432,6 +432,14 @@ namespace OpenSim.Region.ClientStack.Linden
                     return;
                 }
             }
+
+            public override void Timedout(object state)
+            {
+                Stop();
+                m_log.WarnFormat(
+                    "[CAPS]: Script upload URL timed out — viewer did not POST script data for item {0} prim {1}",
+                    m_inventoryItemID, m_primID);
+            }
         }
     }
 }

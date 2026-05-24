@@ -499,7 +499,7 @@ namespace OpenSim.Region.Framework.Scenes
 
                 m_part.ParentGroup.Scene.EventManager.TriggerRezScript(
                     m_part.LocalId, itemID, String.Empty, startParam, postOnRez, engine, stateSource);
-                StoreScriptErrors(itemID, null);
+                StoreScriptErrors(itemID, null, engine);
                 m_part.ParentGroup.AddActiveScriptCount(1);
                 m_part.ScheduleFullUpdate();
                 return true;
@@ -529,7 +529,7 @@ namespace OpenSim.Region.Framework.Scenes
             string script = Utils.BytesToString(asset.Data);
             m_part.ParentGroup.Scene.EventManager.TriggerRezScript(
                 m_part.LocalId, itemID, script, startParam, postOnRez, engine, stateSource);
-            StoreScriptErrors(itemID, null);
+            StoreScriptErrors(itemID, null, engine);
             //if (item.ScriptRunning)
                 m_part.ParentGroup.AddActiveScriptCount(1);
 
@@ -685,20 +685,25 @@ namespace OpenSim.Region.Framework.Scenes
             return errors;
         }
 
-        // Signal to CreateScriptInstanceEr() that compilation/loading is complete
-        private void StoreScriptErrors(UUID itemId, ArrayList errors)
+        // Signal to CreateScriptInstanceEr() that compilation/loading is complete.
+        // engine: the script engine name that accepted this script (e.g. "InWorldz.Phlox").
+        //   When errors == null only that engine's GetScriptErrors() is called.
+        //   Polling ALL engines via GetScriptErrors() would permanently block on any
+        //   engine (e.g. YEngine) whose GetScriptErrors() has no timeout and waits
+        //   indefinitely for a compile it never started.
+        private void StoreScriptErrors(UUID itemId, ArrayList errors, string engine)
         {
             lock (m_scriptErrors)
             {
-                // If compilation/loading initiated via CreateScriptInstance(),
-                // it does not want the errors, so just get out
+                // If compilation/loading initiated via CreateScriptInstance() (non-Er),
+                // that path does not want errors back, so just get out.
                 if (!m_scriptErrors.ContainsKey(itemId))
                 {
                     return;
                 }
 
-                // Initiated via CreateScriptInstanceEr(), if we know what the
-                // errors are, save them and wake CreateScriptInstanceEr().
+                // Initiated via CreateScriptInstanceEr(); if we already have the errors,
+                // save them and wake CreateScriptInstanceEr().
                 if (errors != null)
                 {
                     m_scriptErrors[itemId] = errors;
@@ -707,31 +712,45 @@ namespace OpenSim.Region.Framework.Scenes
                 }
             }
 
-            // Initiated via CreateScriptInstanceEr() but we don't know what
-            // the errors are yet, so retrieve them from the script engine.
-            // This may involve some waiting internal to GetScriptErrors().
-            errors = GetScriptErrors(itemId);
-
-            // Get a default non-null value to indicate success.
-            if (errors == null)
+            // errors is null: ask only the engine that handled this script for results.
+            IScriptModule[] scriptEngines = m_part.ParentGroup.Scene.RequestModuleInterfaces<IScriptModule>();
+            IScriptModule handler = null;
+            foreach (IScriptModule e in scriptEngines)
             {
-                errors = new ArrayList();
+                if (e != null && e.ScriptEngineName == engine)
+                {
+                    handler = e;
+                    break;
+                }
             }
 
-            // Post to CreateScriptInstanceEr() and wake it up
+            ArrayList result;
+            if (handler == null)
+            {
+                m_log.WarnFormat(
+                    "[PRIM INVENTORY]: StoreScriptErrors: no registered engine named '{0}' for script {1}; check DefaultScriptEngine config",
+                    engine, itemId);
+                result = new ArrayList();
+            }
+            else
+            {
+                result = handler.GetScriptErrors(itemId) ?? new ArrayList();
+            }
+
             lock (m_scriptErrors)
             {
-                m_scriptErrors[itemId] = errors;
+                m_scriptErrors[itemId] = result;
                 System.Threading.Monitor.PulseAll(m_scriptErrors);
             }
         }
 
-        // Like StoreScriptErrors(), but just posts a single string message
+        // Like StoreScriptErrors(), but posts a single string error message.
+        // engine is unused when errors != null, so string.Empty is correct here.
         private void StoreScriptError(UUID itemId, string message)
         {
             ArrayList errors = new ArrayList(1);
             errors.Add(message);
-            StoreScriptErrors(itemId, errors);
+            StoreScriptErrors(itemId, errors, string.Empty);
         }
 
         /// <summary>

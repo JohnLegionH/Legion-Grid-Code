@@ -363,8 +363,10 @@ namespace OpenSim.Services.Connectors
             {
                 newID = SynchronousRestObjectRequester.MakeRequest<AssetBase, string>("POST", uri, asset, 10000, m_Auth);
             }
-            catch
+            catch (Exception e)
             {
+                m_log.WarnFormat("[AssetService]: Store failed for asset {0} ({1}): {2}",
+                    asset?.ID, asset?.Name, e.Message);
                 newID = null;
             }
 
