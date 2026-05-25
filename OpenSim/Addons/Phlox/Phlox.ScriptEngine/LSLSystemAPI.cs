@@ -10438,6 +10438,19 @@ public void llRezObject(string inventory, Vector3 pos, Vector3 vel, Quaternion r
 				case SupportedEventList.Events.ON_REZ:              return (ulong)scriptEvents.on_rez;
 				case SupportedEventList.Events.SENSOR:              return (ulong)scriptEvents.sensor;
 				case SupportedEventList.Events.HTTP_REQUEST:        return (ulong)scriptEvents.http_request;
+				case SupportedEventList.Events.TRANSACTION_RESULT:  return (ulong)scriptEvents.transaction_result;
+				case SupportedEventList.Events.LINKSET_DATA:        return (ulong)scriptEvents.linkset_data;
+				// Note: the following events are intentionally deferred — each requires a
+				// coordinated two-sided change (Phlox SupportedEventList AND core OpenSim
+				// scriptEvents enum / posting infrastructure) before a case label here is safe.
+				// - BOT_UPDATE: scriptEvents flag missing. No PostObjectEvent call posts this
+				//   event anywhere in the codebase (confirmed 2026-05-24); no scripts broken.
+				// - PATH_UPDATE: scriptEvents.path_update flag bit exists (1UL << 40), but
+				//   SupportedEventList.Events has no PATH_UPDATE member (Phlox side gap).
+				//   Wiring requires adding the enum member AND confirming the pathfinding
+				//   subsystem posts it. Deferred pending evaluation.
+				// - EXPERIENCE_PERMISSIONS / EXPERIENCE_PERMISSIONS_DENIED: SL Experience
+				//   system is out of scope for Legion Grid; no OpenSim infrastructure exists.
 				default: return 0UL;
                         }
                 }
