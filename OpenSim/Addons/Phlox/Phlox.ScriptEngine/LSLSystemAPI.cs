@@ -119,7 +119,36 @@ namespace Phlox.ScriptEngine
             m_ScriptEngine.ListenManager?.Remove(m_itemID);
         }
         public void AddExecutionTime(double ms) => m_host?.ParentGroup?.AddScriptLPS((int)ms);
-        public void OnScriptInjected(bool fromCrossing) { }
+        public void OnScriptInjected(bool fromCrossing)
+        {
+            if (m_thisScript?.ScriptState?.MiscAttributes == null) return;
+
+            foreach (KeyValuePair<int, object[]> kvp in
+                     m_thisScript.ScriptState.MiscAttributes.ToList())
+            {
+                switch ((RuntimeState.MiscAttr)kvp.Key)
+                {
+                    case RuntimeState.MiscAttr.SensorRepeat:
+                        llSensorRepeat((string)kvp.Value[0], (string)kvp.Value[1],
+                            (int)kvp.Value[2], (float)kvp.Value[3],
+                            (float)kvp.Value[4], (float)kvp.Value[5]);
+                        break;
+                    case RuntimeState.MiscAttr.VolumeDetect:
+                        llVolumeDetect((int)kvp.Value[0]);
+                        break;
+                    case RuntimeState.MiscAttr.Control:
+                        // Halcyon calls a 7-arg TakeControlsInternal helper that bypasses the
+                        // permission check by re-using the existing grant on the TaskInventoryItem.
+                        // We call llTakeControls() directly which re-validates PERMISSION_TAKE_CONTROLS.
+                        // If permission state didn't persist alongside the Control entry, restore
+                        // will silently fail. Acceptable for now; revisit if reports of lost
+                        // controls on restart surface.
+                        if (m_host.ParentGroup.IsAttachment || !fromCrossing)
+                            llTakeControls((int)kvp.Value[0], (int)kvp.Value[1], (int)kvp.Value[2]);
+                        break;
+                }
+            }
+        }
         public void OnGroupCrossedAvatarReady(UUID avatarId) { }
         public float GetAverageScriptTime() => 0f;
 

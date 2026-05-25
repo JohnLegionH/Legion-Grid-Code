@@ -11,6 +11,7 @@ using log4net;
 using OpenMetaverse;
 using OpenSim.Framework;
 using OpenSim.Region.Framework.Interfaces;
+using OpenSim.Region.ScriptEngine.Interfaces;
 using Amib.Threading;
 using InWorldz.Phlox.VM;
 using InWorldz.Phlox.Glue;
@@ -206,6 +207,9 @@ namespace Phlox.ScriptEngine
                             listen.Message ?? string.Empty);
                     }
                 }
+
+                bool fromCrossing = req.StateSource == (int)StateSource.PrimCrossing;
+                interp.OnScriptInjected(fromCrossing);
             }
 
             if (req.PostOnRez)
