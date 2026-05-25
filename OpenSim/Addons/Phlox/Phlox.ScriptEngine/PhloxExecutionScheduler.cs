@@ -210,6 +210,18 @@ namespace Phlox.ScriptEngine
 
                 bool fromCrossing = req.StateSource == (int)StateSource.PrimCrossing;
                 interp.OnScriptInjected(fromCrossing);
+
+                if (req.StateSource == (int)StateSource.RegionStart &&
+                    interp.Script.FindEvent(interp.ScriptState.LSLState,
+                        (int)SupportedEventList.Events.CHANGED) != null)
+                {
+                    const int CHANGED_REGION_START = 0x400;
+                    PostEvent(req.ItemID, new PostedEvent
+                    {
+                        EventType = SupportedEventList.Events.CHANGED,
+                        Args = new object[] { CHANGED_REGION_START }
+                    });
+                }
             }
 
             if (req.PostOnRez)
