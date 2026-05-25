@@ -50,6 +50,12 @@ namespace Phlox.ScriptEngine
         public Scene World => m_ScriptEngine.World;
         private DateTime m_scriptTimer = DateTime.UtcNow;  // for llResetTime/llGetAndResetTime
 
+        // Thread-local Random so each scheduler thread gets its own seeded instance;
+        // avoids both per-call seed collisions (new Random()) and lock contention.
+        [ThreadStatic]
+        private static Random s_threadRandom;
+        private static Random ThreadRandom => s_threadRandom ??= new Random();
+
         public LSLSystemAPI(PhloxEngine engine, SceneObjectPart host, uint localID, UUID itemID)
         {
             m_ScriptEngine = engine;
@@ -127,7 +133,7 @@ namespace Phlox.ScriptEngine
         public float llPow(float b, float e) => (float)Math.Pow(b, e);
         public int llAbs(int i) => i == int.MinValue ? i : Math.Abs(i);
         public float llFabs(float f) => Math.Abs(f);
-        public float llFrand(float mag) => (float)(new Random().NextDouble() * mag);
+        public float llFrand(float mag) => (float)(ThreadRandom.NextDouble() * mag);
         public int llFloor(float f) => (int)Math.Floor(f);
         public int llCeil(float f) => (int)Math.Ceiling(f);
         public int llRound(float f) => (int)Math.Round(f, MidpointRounding.AwayFromZero);
