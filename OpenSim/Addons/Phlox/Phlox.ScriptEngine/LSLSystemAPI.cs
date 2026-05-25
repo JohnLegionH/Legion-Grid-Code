@@ -860,7 +860,7 @@ namespace Phlox.ScriptEngine
                 m_host.SetDieAtEdge(on);
 
             if ((status & STATUS_SANDBOX) != 0)
-                { /* not implemented */ }
+                Stub("llSetStatus(STATUS_SANDBOX)");
 
             // Rotation axis locks — byte bitmask: bit0=X, bit1=Y, bit2=Z
             if ((status & (STATUS_ROTATE_X | STATUS_ROTATE_Y | STATUS_ROTATE_Z)) != 0)
