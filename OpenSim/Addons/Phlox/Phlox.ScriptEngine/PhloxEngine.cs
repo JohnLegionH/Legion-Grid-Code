@@ -109,7 +109,6 @@ namespace Phlox.ScriptEngine
             m_Scene.EventManager.OnObjectGrab += OnObjectGrab;
             m_Scene.EventManager.OnObjectGrabbing += OnObjectGrabbing;
             m_Scene.EventManager.OnObjectDeGrab += OnObjectDeGrab;
-            m_Scene.EventManager.OnSceneObjectPartUpdated += OnSceneObjectPartUpdated;
             m_Scene.EventManager.OnScriptChangedEvent += OnScriptChangedEvent;
             m_Scene.EventManager.OnScriptControlEvent += OnScriptControlEvent;
 			m_Scene.EventManager.OnShutdown += OnShutdown;
@@ -130,7 +129,6 @@ namespace Phlox.ScriptEngine
             m_Scene.EventManager.OnObjectGrab -= OnObjectGrab;
             m_Scene.EventManager.OnObjectGrabbing -= OnObjectGrabbing;
             m_Scene.EventManager.OnObjectDeGrab -= OnObjectDeGrab;
-            m_Scene.EventManager.OnSceneObjectPartUpdated -= OnSceneObjectPartUpdated;
             m_Scene.EventManager.OnScriptChangedEvent -= OnScriptChangedEvent;
             m_Scene.EventManager.OnScriptControlEvent -= OnScriptControlEvent;
             m_MasterScheduler?.Stop();
@@ -359,23 +357,6 @@ namespace Phlox.ScriptEngine
         private const int CHANGED_TELEPORT   = 0x200;
         private const int CHANGED_REGION_START = 0x400;
         private const int CHANGED_MEDIA      = 0x800;
-
-        private void OnSceneObjectPartUpdated(SceneObjectPart part, bool full)
-        {
-            if (part == null || part.ParentGroup == null || part.ParentGroup.IsDeleted) return;
-
-            // full=true means a property that scripts care about changed.
-            // We fire CHANGED_SHAPE for full updates — covers texture, color, scale changes
-            // fired by llSetPrimitiveParams etc. Scripts that care about specific sub-types
-            // will receive it and can check what actually changed themselves.
-            if (!full) return;
-
-            var parms = new EventParams("changed",
-                new object[] { CHANGED_SHAPE },
-                new DetectParams[0]);
-
-            PostObjectEvent(part.LocalId, parms);
-        }
 
         private void OnScriptChangedEvent(uint localID, uint change, object data)
         {
