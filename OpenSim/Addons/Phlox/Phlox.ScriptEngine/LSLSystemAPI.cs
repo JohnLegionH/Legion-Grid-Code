@@ -1462,6 +1462,8 @@ namespace Phlox.ScriptEngine
             ScenePresence sp = World.GetScenePresence(item.PermsGranter);
             if (sp == null || sp.IsChildAgent) return;
             sp.RegisterControlEventsToScript(controls, accept, pass_on, m_host.LocalId, m_itemID);
+            m_thisScript.ScriptState.MiscAttributes[(int)RuntimeState.MiscAttr.Control] =
+                new object[] { controls, accept, pass_on };
         }
 
         public void llReleaseControls()
@@ -1469,8 +1471,12 @@ namespace Phlox.ScriptEngine
             TaskInventoryItem item = GetInventorySelf();
             if (item == null) return;
             ScenePresence sp = World.GetScenePresence(item.PermsGranter);
-            if (sp == null) return;
-            sp.UnRegisterControlEventsToScript(m_host.LocalId, m_itemID);
+            // Null-conditional (not early-return): we need to reach the MiscAttributes
+            // Remove below even when the avatar has left the region, so a stale
+            // Control entry isn't restored after the next restart. If you add code
+            // after this point, handle the null-sp case explicitly.
+            sp?.UnRegisterControlEventsToScript(m_host.LocalId, m_itemID);
+            m_thisScript.ScriptState.MiscAttributes.Remove((int)RuntimeState.MiscAttr.Control);
         }
 
         public void llTakeCamera(string avatar)
@@ -2494,12 +2500,15 @@ namespace Phlox.ScriptEngine
             if (!UUID.TryParse(id, out UUID keyID)) keyID = UUID.Zero;
             m_ScriptEngine.AsyncCommands?.SensorRepeatPlugin.SetSenseRepeatEvent(
                 m_localID, m_itemID, name, keyID, type, range, arc, rate, m_host);
+            m_thisScript.ScriptState.MiscAttributes[(int)RuntimeState.MiscAttr.SensorRepeat] =
+                new object[] { name, id, type, range, arc, rate };
         }
 
         public void llSensorRemove()
         {
             m_ScriptEngine.AsyncCommands?.SensorRepeatPlugin.UnSetSenseRepeaterEvents(
                 m_localID, m_itemID);
+            m_thisScript.ScriptState.MiscAttributes.Remove((int)RuntimeState.MiscAttr.SensorRepeat);
         }
 
         // ── Listen ─────────────────────────────────────────────────────────────
@@ -6155,6 +6164,8 @@ public void llRezObject(string inventory, Vector3 pos, Vector3 vel, Quaternion r
         {
             if (m_host?.ParentGroup == null || m_host.ParentGroup.IsDeleted) return;
             m_host.ParentGroup.RootPart.ScriptSetVolumeDetect(detect != 0);
+            m_thisScript.ScriptState.MiscAttributes[(int)RuntimeState.MiscAttr.VolumeDetect] =
+                new object[] { detect };
         }
 
         // ── Object queries ─────────────────────────────────────────────────────
