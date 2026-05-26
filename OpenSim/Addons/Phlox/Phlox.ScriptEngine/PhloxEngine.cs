@@ -118,6 +118,16 @@ namespace Phlox.ScriptEngine
             m_Scene.EventManager.OnScriptLandColliderStart += OnScriptLandColliderStart;
             m_Scene.EventManager.OnScriptLandColliding     += OnScriptLandColliding;
             m_Scene.EventManager.OnScriptLandColliderEnd   += OnScriptLandColliderEnd;
+            m_Scene.EventManager.OnAttach                  += OnAttach;
+            m_Scene.EventManager.OnScriptMovingStartEvent  += OnScriptMovingStartEvent;
+            m_Scene.EventManager.OnScriptMovingEndEvent    += OnScriptMovingEndEvent;
+            m_Scene.EventManager.OnScriptAtTargetEvent       += OnScriptAtTargetEvent;
+            m_Scene.EventManager.OnScriptNotAtTargetEvent    += OnScriptNotAtTargetEvent;
+            m_Scene.EventManager.OnScriptAtRotTargetEvent    += OnScriptAtRotTargetEvent;
+            m_Scene.EventManager.OnScriptNotAtRotTargetEvent += OnScriptNotAtRotTargetEvent;
+            IMoneyModule moneyModule = m_Scene.RequestModuleInterface<IMoneyModule>();
+            if (moneyModule != null)
+                moneyModule.OnObjectPaid += HandleObjectPaid;
             m_log.InfoFormat("[PhloxEngine]: Region loaded {0}", scene.RegionInfo.RegionName);
         }
 
@@ -137,6 +147,16 @@ namespace Phlox.ScriptEngine
             m_Scene.EventManager.OnObjectDeGrab -= OnObjectDeGrab;
             m_Scene.EventManager.OnScriptChangedEvent -= OnScriptChangedEvent;
             m_Scene.EventManager.OnScriptControlEvent -= OnScriptControlEvent;
+            IMoneyModule moneyModule = m_Scene.RequestModuleInterface<IMoneyModule>();
+            if (moneyModule != null)
+                moneyModule.OnObjectPaid -= HandleObjectPaid;
+            m_Scene.EventManager.OnScriptNotAtRotTargetEvent -= OnScriptNotAtRotTargetEvent;
+            m_Scene.EventManager.OnScriptAtRotTargetEvent    -= OnScriptAtRotTargetEvent;
+            m_Scene.EventManager.OnScriptNotAtTargetEvent    -= OnScriptNotAtTargetEvent;
+            m_Scene.EventManager.OnScriptAtTargetEvent       -= OnScriptAtTargetEvent;
+            m_Scene.EventManager.OnScriptMovingEndEvent    -= OnScriptMovingEndEvent;
+            m_Scene.EventManager.OnScriptMovingStartEvent  -= OnScriptMovingStartEvent;
+            m_Scene.EventManager.OnAttach                  -= OnAttach;
             m_Scene.EventManager.OnScriptLandColliderEnd   -= OnScriptLandColliderEnd;
             m_Scene.EventManager.OnScriptLandColliding     -= OnScriptLandColliding;
             m_Scene.EventManager.OnScriptLandColliderStart -= OnScriptLandColliderStart;
@@ -452,6 +472,85 @@ namespace Phlox.ScriptEngine
             foreach (DetectedObject detobj in col.Colliders)
                 PostObjectEvent(localID, new EventParams(
                     "land_collision_end", new object[] { detobj.posVector }, new DetectParams[0]));
+        }
+
+        // ── Attach / Detach ────────────────────────────────────────────────────
+
+        private void OnAttach(uint localID, UUID itemID, UUID avatarID)
+        {
+            PostObjectEvent(localID, new EventParams(
+                "attach", new object[] { avatarID.ToString() },
+                new DetectParams[0]));
+        }
+
+        // ── Moving events ──────────────────────────────────────────────────────
+
+        private void OnScriptMovingStartEvent(uint localID)
+        {
+            PostObjectEvent(localID, new EventParams(
+                "moving_start", new object[0],
+                new DetectParams[0]));
+        }
+
+        private void OnScriptMovingEndEvent(uint localID)
+        {
+            PostObjectEvent(localID, new EventParams(
+                "moving_end", new object[0],
+                new DetectParams[0]));
+        }
+
+        // ── Target events ──────────────────────────────────────────────────────
+
+        private void OnScriptAtTargetEvent(UUID scriptID, uint handle, Vector3 targetpos, Vector3 atpos)
+        {
+            PostScriptEvent(scriptID, new EventParams(
+                "at_target", new object[] { (int)handle, targetpos, atpos },
+                new DetectParams[0]));
+        }
+
+        private void OnScriptNotAtTargetEvent(UUID scriptID)
+        {
+            PostScriptEvent(scriptID, new EventParams(
+                "not_at_target", new object[0],
+                new DetectParams[0]));
+        }
+
+        private void OnScriptAtRotTargetEvent(UUID scriptID, uint handle, Quaternion targetrot, Quaternion atrot)
+        {
+            PostScriptEvent(scriptID, new EventParams(
+                "at_rot_target", new object[] { (int)handle, targetrot, atrot },
+                new DetectParams[0]));
+        }
+
+        private void OnScriptNotAtRotTargetEvent(UUID scriptID)
+        {
+            PostScriptEvent(scriptID, new EventParams(
+                "not_at_rot_target", new object[0],
+                new DetectParams[0]));
+        }
+
+        // ── Money event ────────────────────────────────────────────────────────
+        // Dormant until a real IMoneyModule that fires OnObjectPaid is deployed.
+        // SampleMoneyModule declares the event but never invokes it.
+
+        private void HandleObjectPaid(UUID objectID, UUID agentID, int amount)
+        {
+            SceneObjectPart part = m_Scene.GetSceneObjectPart(objectID);
+            if (part == null) return;
+
+            if ((part.ScriptEvents & scriptEvents.money) == 0)
+                part = part.ParentGroup.RootPart;
+
+            if (part == null) return;
+
+            DetectParams[] det = new DetectParams[1];
+            det[0] = new DetectParams();
+            det[0].Key = agentID;
+            det[0].Populate(m_Scene);
+
+            PostObjectEvent(part.LocalId, new EventParams(
+                "money", new object[] { agentID.ToString(), amount },
+                det));
         }
 
         #endregion

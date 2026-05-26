@@ -222,6 +222,19 @@ namespace Phlox.ScriptEngine
                         Args = new object[] { CHANGED_REGION_START }
                     });
                 }
+
+            }
+
+            if (req.StateSource == (int)StateSource.AttachedRez &&
+                req.Prim?.ParentGroup?.AttachedAvatar != UUID.Zero &&
+                interp.Script.FindEvent(interp.ScriptState.LSLState,
+                    (int)SupportedEventList.Events.ATTACH) != null)
+            {
+                PostEvent(req.ItemID, new PostedEvent
+                {
+                    EventType = SupportedEventList.Events.ATTACH,
+                    Args = new object[] { req.Prim.ParentGroup.AttachedAvatar.ToString() }
+                });
             }
 
             if (req.PostOnRez)
