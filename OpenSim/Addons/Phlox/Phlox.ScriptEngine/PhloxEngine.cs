@@ -112,6 +112,12 @@ namespace Phlox.ScriptEngine
             m_Scene.EventManager.OnScriptChangedEvent += OnScriptChangedEvent;
             m_Scene.EventManager.OnScriptControlEvent += OnScriptControlEvent;
 			m_Scene.EventManager.OnShutdown += OnShutdown;
+            m_Scene.EventManager.OnScriptColliderStart     += OnScriptColliderStart;
+            m_Scene.EventManager.OnScriptColliding         += OnScriptColliding;
+            m_Scene.EventManager.OnScriptCollidingEnd      += OnScriptCollidingEnd;
+            m_Scene.EventManager.OnScriptLandColliderStart += OnScriptLandColliderStart;
+            m_Scene.EventManager.OnScriptLandColliding     += OnScriptLandColliding;
+            m_Scene.EventManager.OnScriptLandColliderEnd   += OnScriptLandColliderEnd;
             m_log.InfoFormat("[PhloxEngine]: Region loaded {0}", scene.RegionInfo.RegionName);
         }
 
@@ -131,6 +137,12 @@ namespace Phlox.ScriptEngine
             m_Scene.EventManager.OnObjectDeGrab -= OnObjectDeGrab;
             m_Scene.EventManager.OnScriptChangedEvent -= OnScriptChangedEvent;
             m_Scene.EventManager.OnScriptControlEvent -= OnScriptControlEvent;
+            m_Scene.EventManager.OnScriptLandColliderEnd   -= OnScriptLandColliderEnd;
+            m_Scene.EventManager.OnScriptLandColliding     -= OnScriptLandColliding;
+            m_Scene.EventManager.OnScriptLandColliderStart -= OnScriptLandColliderStart;
+            m_Scene.EventManager.OnScriptCollidingEnd      -= OnScriptCollidingEnd;
+            m_Scene.EventManager.OnScriptColliding         -= OnScriptColliding;
+            m_Scene.EventManager.OnScriptColliderStart     -= OnScriptColliderStart;
             m_MasterScheduler?.Stop();
             AsyncCommands?.Shutdown();
             m_Scene = null;
@@ -367,6 +379,79 @@ namespace Phlox.ScriptEngine
                 new object[] { (int)change },
                 new DetectParams[0]);
             PostObjectEvent(localID, parms);
+        }
+
+        // ── Collision events ───────────────────────────────────────────────────
+
+        private void OnScriptColliderStart(uint localID, ColliderArgs col)
+        {
+            int dc = col.Colliders.Count;
+            if (dc == 0) return;
+            DetectParams[] det = new DetectParams[dc];
+            int i = 0;
+            foreach (DetectedObject detobj in col.Colliders)
+            {
+                DetectParams d = new DetectParams();
+                d.Key = detobj.keyUUID;
+                d.Populate(m_Scene, detobj);
+                det[i++] = d;
+            }
+            PostObjectEvent(localID, new EventParams("collision_start", new object[] { dc }, det));
+        }
+
+        private void OnScriptColliding(uint localID, ColliderArgs col)
+        {
+            int dc = col.Colliders.Count;
+            if (dc == 0) return;
+            DetectParams[] det = new DetectParams[dc];
+            int i = 0;
+            foreach (DetectedObject detobj in col.Colliders)
+            {
+                DetectParams d = new DetectParams();
+                d.Key = detobj.keyUUID;
+                d.Populate(m_Scene, detobj);
+                det[i++] = d;
+            }
+            PostObjectEvent(localID, new EventParams("collision", new object[] { dc }, det));
+        }
+
+        private void OnScriptCollidingEnd(uint localID, ColliderArgs col)
+        {
+            int dc = col.Colliders.Count;
+            if (dc == 0) return;
+            DetectParams[] det = new DetectParams[dc];
+            int i = 0;
+            foreach (DetectedObject detobj in col.Colliders)
+            {
+                DetectParams d = new DetectParams();
+                d.Key = detobj.keyUUID;
+                d.Populate(m_Scene, detobj);
+                det[i++] = d;
+            }
+            PostObjectEvent(localID, new EventParams("collision_end", new object[] { dc }, det));
+        }
+
+        // ── Land collision events ──────────────────────────────────────────────
+
+        private void OnScriptLandColliderStart(uint localID, ColliderArgs col)
+        {
+            foreach (DetectedObject detobj in col.Colliders)
+                PostObjectEvent(localID, new EventParams(
+                    "land_collision_start", new object[] { detobj.posVector }, new DetectParams[0]));
+        }
+
+        private void OnScriptLandColliding(uint localID, ColliderArgs col)
+        {
+            foreach (DetectedObject detobj in col.Colliders)
+                PostObjectEvent(localID, new EventParams(
+                    "land_collision", new object[] { detobj.posVector }, new DetectParams[0]));
+        }
+
+        private void OnScriptLandColliderEnd(uint localID, ColliderArgs col)
+        {
+            foreach (DetectedObject detobj in col.Colliders)
+                PostObjectEvent(localID, new EventParams(
+                    "land_collision_end", new object[] { detobj.posVector }, new DetectParams[0]));
         }
 
         #endregion
