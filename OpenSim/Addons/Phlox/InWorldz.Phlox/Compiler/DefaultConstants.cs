@@ -301,6 +301,7 @@ namespace InWorldz.Phlox.Compiler
             {"CHANGED_REGION_RESTART", new ConstantSymbol("CHANGED_REGION_RESTART", SymbolTable.INT, "1024")},
             {"CHANGED_MEDIA", new ConstantSymbol("CHANGED_MEDIA", SymbolTable.INT, "2048")},
             {"CHANGED_ANIMATION", new ConstantSymbol("CHANGED_ANIMATION", SymbolTable.INT, "16384")},   // see https://jira.secondlife.com/browse/SVC-408 and comments
+            {"CHANGED_POSITION", new ConstantSymbol("CHANGED_POSITION", SymbolTable.INT, "32768")},
             {"TYPE_INVALID", new ConstantSymbol("TYPE_INVALID", SymbolTable.INT, "0")},
             {"TYPE_INTEGER", new ConstantSymbol("TYPE_INTEGER", SymbolTable.INT, "1")},
             {"TYPE_FLOAT", new ConstantSymbol("TYPE_FLOAT", SymbolTable.INT, "2")},

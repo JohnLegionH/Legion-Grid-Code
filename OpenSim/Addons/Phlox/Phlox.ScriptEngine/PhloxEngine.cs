@@ -212,6 +212,7 @@ namespace Phlox.ScriptEngine
         {
             m_log.DebugFormat("[PhloxEngine]: OnRemoveScript {0}", itemID);
             m_ScriptLoader.PostUnloadRequest(localID, itemID);
+            OnScriptRemoved?.Invoke(itemID);
         }
 
         private void OnScriptReset(uint localID, UUID itemID)
