@@ -73,7 +73,7 @@ namespace OpenSim.Region.ScriptEngine.Shared.Api.Plugins
 
                 m_CmdManager.m_ScriptEngine.PostScriptEvent(
                     rInfo.GetItemID(),
-                    new EventParams("remote_data", resobj, new DetectParams[0]));
+                    new EventParams("remote_data", resobj, Array.Empty<DetectParams>()));
 
                 rInfo = (RPCRequestInfo)xmlrpc.GetNextCompletedRequest();
             }
@@ -97,7 +97,7 @@ namespace OpenSim.Region.ScriptEngine.Shared.Api.Plugins
 
                 m_CmdManager.m_ScriptEngine.PostScriptEvent(
                     srdInfo.ItemID,
-                    new EventParams("remote_data", resobj, new DetectParams[0]));
+                    new EventParams("remote_data", resobj, Array.Empty<DetectParams>()));
 
                 srdInfo = (SendRemoteDataRequest)xmlrpc.GetNextCompletedSRDRequest();
             }

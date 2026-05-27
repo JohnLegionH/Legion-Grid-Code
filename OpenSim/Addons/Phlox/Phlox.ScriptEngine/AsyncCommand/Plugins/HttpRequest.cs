@@ -76,7 +76,7 @@ namespace OpenSim.Region.ScriptEngine.Shared.Api.Plugins
                     };
 
                     m_CmdManager.m_ScriptEngine.PostObjectEvent(httpInfo.LocalID,
-                        new EventParams("http_response", resobj, new DetectParams[0]));
+                        new EventParams("http_response", resobj, Array.Empty<DetectParams>()));
                 }
 
                 req = iHttpReq.GetNextCompletedRequest();

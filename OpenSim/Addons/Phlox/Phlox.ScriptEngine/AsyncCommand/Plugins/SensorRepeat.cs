@@ -188,7 +188,7 @@ namespace OpenSim.Region.ScriptEngine.Shared.Api.Plugins
                 {
                     m_CmdManager.m_ScriptEngine.PostScriptEvent(ts.itemID,
                         new EventParams("no_sensor", new object[0],
-                        new DetectParams[0]));
+                        Array.Empty<DetectParams>()));
                 }
                 else
                 {
@@ -217,7 +217,7 @@ namespace OpenSim.Region.ScriptEngine.Shared.Api.Plugins
                     {
                         m_CmdManager.m_ScriptEngine.PostScriptEvent(ts.itemID,
                             new EventParams("no_sensor", new object[0],
-                            new DetectParams[0]));
+                            Array.Empty<DetectParams>()));
                     }
                     else
                     {

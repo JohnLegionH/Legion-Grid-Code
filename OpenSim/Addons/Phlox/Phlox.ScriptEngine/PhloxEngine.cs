@@ -391,6 +391,8 @@ namespace Phlox.ScriptEngine
         private const int CHANGED_REGION_START = 0x400;
         private const int CHANGED_MEDIA      = 0x800;
 
+        private static readonly DetectParams[] s_emptyDetectParams = Array.Empty<DetectParams>();
+
         private void OnScriptChangedEvent(uint localID, uint change, object data)
         {
             // Delivers changed() events fired by OpenSim's own infrastructure:
@@ -398,7 +400,7 @@ namespace Phlox.ScriptEngine
             // The localID is the specific part that changed — post only to that part's scripts.
             var parms = new EventParams("changed",
                 new object[] { (int)change },
-                new DetectParams[0]);
+                s_emptyDetectParams);
             PostObjectEvent(localID, parms);
         }
 
@@ -458,21 +460,21 @@ namespace Phlox.ScriptEngine
         {
             foreach (DetectedObject detobj in col.Colliders)
                 PostObjectEvent(localID, new EventParams(
-                    "land_collision_start", new object[] { detobj.posVector }, new DetectParams[0]));
+                    "land_collision_start", new object[] { detobj.posVector }, s_emptyDetectParams));
         }
 
         private void OnScriptLandColliding(uint localID, ColliderArgs col)
         {
             foreach (DetectedObject detobj in col.Colliders)
                 PostObjectEvent(localID, new EventParams(
-                    "land_collision", new object[] { detobj.posVector }, new DetectParams[0]));
+                    "land_collision", new object[] { detobj.posVector }, s_emptyDetectParams));
         }
 
         private void OnScriptLandColliderEnd(uint localID, ColliderArgs col)
         {
             foreach (DetectedObject detobj in col.Colliders)
                 PostObjectEvent(localID, new EventParams(
-                    "land_collision_end", new object[] { detobj.posVector }, new DetectParams[0]));
+                    "land_collision_end", new object[] { detobj.posVector }, s_emptyDetectParams));
         }
 
         // ── Attach / Detach ────────────────────────────────────────────────────
@@ -481,7 +483,7 @@ namespace Phlox.ScriptEngine
         {
             PostObjectEvent(localID, new EventParams(
                 "attach", new object[] { avatarID.ToString() },
-                new DetectParams[0]));
+                s_emptyDetectParams));
         }
 
         // ── Moving events ──────────────────────────────────────────────────────
@@ -490,14 +492,14 @@ namespace Phlox.ScriptEngine
         {
             PostObjectEvent(localID, new EventParams(
                 "moving_start", new object[0],
-                new DetectParams[0]));
+                s_emptyDetectParams));
         }
 
         private void OnScriptMovingEndEvent(uint localID)
         {
             PostObjectEvent(localID, new EventParams(
                 "moving_end", new object[0],
-                new DetectParams[0]));
+                s_emptyDetectParams));
         }
 
         // ── Target events ──────────────────────────────────────────────────────
@@ -506,28 +508,28 @@ namespace Phlox.ScriptEngine
         {
             PostScriptEvent(scriptID, new EventParams(
                 "at_target", new object[] { (int)handle, targetpos, atpos },
-                new DetectParams[0]));
+                s_emptyDetectParams));
         }
 
         private void OnScriptNotAtTargetEvent(UUID scriptID)
         {
             PostScriptEvent(scriptID, new EventParams(
                 "not_at_target", new object[0],
-                new DetectParams[0]));
+                s_emptyDetectParams));
         }
 
         private void OnScriptAtRotTargetEvent(UUID scriptID, uint handle, Quaternion targetrot, Quaternion atrot)
         {
             PostScriptEvent(scriptID, new EventParams(
                 "at_rot_target", new object[] { (int)handle, targetrot, atrot },
-                new DetectParams[0]));
+                s_emptyDetectParams));
         }
 
         private void OnScriptNotAtRotTargetEvent(UUID scriptID)
         {
             PostScriptEvent(scriptID, new EventParams(
                 "not_at_rot_target", new object[0],
-                new DetectParams[0]));
+                s_emptyDetectParams));
         }
 
         // ── Money event ────────────────────────────────────────────────────────

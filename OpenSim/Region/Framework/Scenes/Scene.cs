@@ -2015,14 +2015,13 @@ namespace OpenSim.Region.Framework.Scenes
 
         private void CheckMovingTransitions()
         {
-            List<SceneObjectGroup> groups = GetSceneObjectGroups();
-            foreach (SceneObjectGroup sog in groups)
+            ForEachSOG(sog =>
             {
                 SceneObjectPart rootPart = sog.RootPart;
-                if (rootPart == null) continue;
+                if (rootPart == null) return;
 
                 PhysicsActor physActor = rootPart.PhysActor;
-                if (physActor == null || !physActor.IsPhysical) continue;
+                if (physActor == null || !physActor.IsPhysical) return;
 
                 bool currentlyMoving =
                     physActor.Velocity.LengthSquared() > MOVING_VELOCITY_THRESHOLD_SQ ||
@@ -2034,7 +2033,7 @@ namespace OpenSim.Region.Framework.Scenes
                     m_eventManager.TriggerMovingEndEvent(rootPart.LocalId);
 
                 sog.WasMoving = currentlyMoving;
-            }
+            });
         }
 
         /// <summary>
