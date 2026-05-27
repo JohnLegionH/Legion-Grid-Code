@@ -60,9 +60,8 @@ namespace OpenSim.Services.AssetService
         // HTTP/3 client for modern asset delivery
         private readonly HttpClient m_http3Client;
         
-        // High-performance asset cache with LRU eviction
-        private readonly ConcurrentDictionary<string, Http3CachedAsset> m_assetCache = new();
-        private readonly ConcurrentDictionary<string, DateTime> m_accessTimes = new();
+        // High-performance asset cache with LRU eviction (unified entry, Interlocked-tracked size)
+        private readonly ConcurrentDictionary<string, CacheEntry> m_cache = new();
         
         // Performance optimization components
         private readonly AssetPreloader m_preloader;
@@ -79,14 +78,19 @@ namespace OpenSim.Services.AssetService
         private TimeSpan m_cacheExpiry = TimeSpan.FromHours(2);
         private string m_http3AssetUrl = "https://assets.opensim.local:8443";
         
+        // Cache sizing and eviction state
+        private long m_cacheSizeBytes = 0;
+        private int m_evicting = 0;
+
         // Statistics
         private long m_cacheHits = 0;
         private long m_cacheMisses = 0;
+        private long m_cacheEvictions = 0;
         private long m_http3Requests = 0;
         private long m_fallbackRequests = 0;
-        
-        // Threading
-        private readonly SemaphoreSlim m_cacheSemaphore = new(1, 1);
+
+        // Threading / lifecycle
+        private readonly CancellationTokenSource m_cts = new();
         private readonly Timer m_maintenanceTimer;
         private volatile bool m_disposed = false;
 
@@ -211,15 +215,12 @@ namespace OpenSim.Services.AssetService
             try
             {
                 // Try cache first
-                var cachedAsset = await GetFromCacheAsync(id);
+                var cachedAsset = GetFromCache(id);
                 if (cachedAsset != null)
                 {
-                    Interlocked.Increment(ref m_cacheHits);
                     m_metrics?.RecordCacheHit(id);
                     return cachedAsset;
                 }
-
-                Interlocked.Increment(ref m_cacheMisses);
 
                 // Try HTTP/3 asset service if enabled
                 if (m_enableHttp3)
@@ -228,12 +229,12 @@ namespace OpenSim.Services.AssetService
                     if (asset != null)
                     {
                         Interlocked.Increment(ref m_http3Requests);
-                        await CacheAssetAsync(id, asset);
+                        CacheAsset(id, asset);
                         m_metrics?.RecordHttp3Success(id, asset.Data?.Length ?? 0);
-                        
+
                         // Trigger preloading of related assets
                         _ = Task.Run(() => m_preloader.PreloadRelatedAssets(asset), cancellationToken);
-                        
+
                         return asset;
                     }
                 }
@@ -243,7 +244,7 @@ namespace OpenSim.Services.AssetService
                 var fallbackAsset = m_fallbackAssetService.Get(id);
                 if (fallbackAsset != null)
                 {
-                    await CacheAssetAsync(id, fallbackAsset);
+                    CacheAsset(id, fallbackAsset);
                     m_metrics?.RecordFallbackSuccess(id);
                 }
                 
@@ -262,20 +263,20 @@ namespace OpenSim.Services.AssetService
         public AssetMetadata GetMetadata(string id)
         {
             // Check cache for metadata
-            if (m_assetCache.TryGetValue(id, out var cached))
+            if (m_cache.TryGetValue(id, out var entry))
             {
                 return new AssetMetadata
                 {
-                    ID = cached.Asset.ID,
-                    Name = cached.Asset.Name,
-                    Description = cached.Asset.Description,
-                    Type = cached.Asset.Type,
-                    ContentType = cached.Asset.Metadata.ContentType,
-                    CreationDate = cached.Asset.Metadata.CreationDate,
-                    Flags = cached.Asset.Metadata.Flags,
-                    FullID = cached.Asset.FullID,
-                    Local = cached.Asset.Local,
-                    Temporary = cached.Asset.Temporary
+                    ID = entry.Asset.ID,
+                    Name = entry.Asset.Name,
+                    Description = entry.Asset.Description,
+                    Type = entry.Asset.Type,
+                    ContentType = entry.Asset.Metadata.ContentType,
+                    CreationDate = entry.Asset.Metadata.CreationDate,
+                    Flags = entry.Asset.Metadata.Flags,
+                    FullID = entry.Asset.FullID,
+                    Local = entry.Asset.Local,
+                    Temporary = entry.Asset.Temporary
                 };
             }
             
@@ -291,19 +292,18 @@ namespace OpenSim.Services.AssetService
 
         public AssetBase GetCached(string id)
         {
-            if (m_assetCache.TryGetValue(id, out var cached))
+            if (m_cache.TryGetValue(id, out var entry))
             {
-                // Check if cache entry is still valid
-                if (DateTime.UtcNow - cached.CachedAt < m_cacheExpiry)
+                if (DateTime.UtcNow.Ticks - entry.CachedAtTicks < m_cacheExpiry.Ticks)
                 {
                     Interlocked.Increment(ref m_cacheHits);
-                    return cached.Asset;
+                    return entry.Asset;
                 }
-                
-                // Remove expired entry
-                m_assetCache.TryRemove(id, out _);
+
+                if (m_cache.TryRemove(id, out var removed))
+                    Interlocked.Add(ref m_cacheSizeBytes, -removed.SizeBytes);
             }
-            
+
             return null;
         }
 
@@ -363,7 +363,7 @@ namespace OpenSim.Services.AssetService
                 tasks[i] = Task.Run(async () =>
                 {
                     // Check cache first
-                    if (m_assetCache.ContainsKey(id))
+                    if (m_cache.ContainsKey(id))
                         return true;
                     
                     // Quick HTTP/3 HEAD request
@@ -410,12 +410,12 @@ namespace OpenSim.Services.AssetService
                 if (!string.IsNullOrEmpty(assetId))
                 {
                     // Cache the newly stored asset
-                    _ = Task.Run(() => CacheAssetAsync(assetId, asset));
-                    
+                    _ = Task.Run(() => CacheAsset(assetId, asset), m_cts.Token);
+
                     // TODO: Upload to HTTP/3 asset service for distribution
                     if (m_enableHttp3)
                     {
-                        _ = Task.Run(() => UploadToHttp3ServiceAsync(asset));
+                        _ = Task.Run(() => UploadToHttp3ServiceAsync(asset), m_cts.Token);
                     }
                 }
                 
@@ -433,7 +433,8 @@ namespace OpenSim.Services.AssetService
             try
             {
                 // Remove from cache to force refresh
-                m_assetCache.TryRemove(id, out _);
+                if (m_cache.TryRemove(id, out var evicted))
+                    Interlocked.Add(ref m_cacheSizeBytes, -evicted.SizeBytes);
                 
                 // Update in fallback service
                 var fallbackResult = m_fallbackAssetService.UpdateContent(id, data);
@@ -458,7 +459,8 @@ namespace OpenSim.Services.AssetService
             try
             {
                 // Remove from cache
-                m_assetCache.TryRemove(id, out _);
+                if (m_cache.TryRemove(id, out var evicted))
+                    Interlocked.Add(ref m_cacheSizeBytes, -evicted.SizeBytes);
                 
                 // Delete from fallback service
                 var fallbackResult = m_fallbackAssetService.Delete(id);
@@ -621,92 +623,79 @@ namespace OpenSim.Services.AssetService
 
         #region Caching
 
-        private async Task<AssetBase> GetFromCacheAsync(string id)
+        private AssetBase GetFromCache(string id)
         {
-            if (m_assetCache.TryGetValue(id, out var cached))
+            if (!m_cache.TryGetValue(id, out var entry))
             {
-                // Check if cache entry is still valid
-                if (DateTime.UtcNow - cached.CachedAt < m_cacheExpiry)
-                {
-                    // Update access time for LRU
-                    m_accessTimes.AddOrUpdate(id, DateTime.UtcNow, (key, oldValue) => DateTime.UtcNow);
-                    cached.AccessCount++;
-                    return cached.Asset;
-                }
-                
-                // Remove expired entry
-                await m_cacheSemaphore.WaitAsync();
-                try
-                {
-                    m_assetCache.TryRemove(id, out _);
-                }
-                finally
-                {
-                    m_cacheSemaphore.Release();
-                }
+                Interlocked.Increment(ref m_cacheMisses);
+                return null;
             }
-            
-            return null;
+
+            if (DateTime.UtcNow.Ticks - entry.CachedAtTicks > m_cacheExpiry.Ticks)
+            {
+                if (m_cache.TryRemove(id, out var removed))
+                    Interlocked.Add(ref m_cacheSizeBytes, -removed.SizeBytes);
+                Interlocked.Increment(ref m_cacheMisses);
+                return null;
+            }
+
+            Interlocked.Exchange(ref entry.LastAccessTicks, DateTime.UtcNow.Ticks);
+            Interlocked.Increment(ref entry.AccessCount);
+            Interlocked.Increment(ref m_cacheHits);
+            return entry.Asset;
         }
 
-        private async Task CacheAssetAsync(string id, AssetBase asset)
+        private void CacheAsset(string id, AssetBase asset)
         {
             if (asset?.Data == null)
                 return;
 
-            var cachedAsset = new Http3CachedAsset
-            {
-                Asset = asset,
-                CachedAt = DateTime.UtcNow,
-                Size = asset.Data.Length,
-                AccessCount = 1
-            };
+            long nowTicks = DateTime.UtcNow.Ticks;
+            var entry = new CacheEntry(asset, asset.Data.LongLength, nowTicks);
 
-            await m_cacheSemaphore.WaitAsync();
+            if (m_cache.TryAdd(id, entry))
+            {
+                Interlocked.Add(ref m_cacheSizeBytes, entry.SizeBytes);
+
+                long currentBytes = Interlocked.Read(ref m_cacheSizeBytes);
+                if (m_cache.Count > m_maxCacheSize || currentBytes > (long)m_maxCacheSizeMB * 1024L * 1024L)
+                    TryEvictBatch();
+            }
+        }
+
+        private void TryEvictBatch()
+        {
+            if (Interlocked.CompareExchange(ref m_evicting, 1, 0) != 0)
+                return;
+
             try
             {
-                // Check cache size limits
-                if (m_assetCache.Count >= m_maxCacheSize || GetCacheSizeMB() >= m_maxCacheSizeMB)
-                {
-                    await EvictLeastRecentlyUsedAsync();
-                }
+                int evictCount = Math.Max(1, m_cache.Count / 10);
+                int sampleSize = evictCount * 5;
+                int totalCount = m_cache.Count;
+                int skip = totalCount > sampleSize ? Random.Shared.Next(totalCount - sampleSize) : 0;
 
-                m_assetCache.TryAdd(id, cachedAsset);
-                m_accessTimes.TryAdd(id, DateTime.UtcNow);
+                var toEvict = m_cache
+                    .Skip(skip)
+                    .Take(sampleSize)
+                    .OrderBy(kvp => kvp.Value.LastAccessTicks)
+                    .Take(evictCount)
+                    .Select(kvp => kvp.Key)
+                    .ToList();
+
+                foreach (var key in toEvict)
+                {
+                    if (m_cache.TryRemove(key, out var removed))
+                    {
+                        Interlocked.Add(ref m_cacheSizeBytes, -removed.SizeBytes);
+                        Interlocked.Increment(ref m_cacheEvictions);
+                    }
+                }
             }
             finally
             {
-                m_cacheSemaphore.Release();
+                Volatile.Write(ref m_evicting, 0);
             }
-        }
-
-        private async Task EvictLeastRecentlyUsedAsync()
-        {
-            // Evict 10% of cache size to avoid frequent evictions
-            var evictCount = Math.Max(1, m_assetCache.Count / 10);
-            
-            // Find least recently accessed items
-            var sortedByAccess = m_accessTimes
-                .OrderBy(kvp => kvp.Value)
-                .Take(evictCount)
-                .Select(kvp => kvp.Key)
-                .ToList();
-
-            foreach (var id in sortedByAccess)
-            {
-                m_assetCache.TryRemove(id, out _);
-                m_accessTimes.TryRemove(id, out _);
-            }
-        }
-
-        private int GetCacheSizeMB()
-        {
-            long totalBytes = 0;
-            foreach (var cached in m_assetCache.Values)
-            {
-                totalBytes += cached.Size;
-            }
-            return (int)(totalBytes / (1024 * 1024));
         }
 
         #endregion
@@ -779,50 +768,38 @@ namespace OpenSim.Services.AssetService
 
             try
             {
-                // Clean expired cache entries
-                _ = Task.Run(async () =>
+                // Clean expired cache entries (runs on ThreadPool timer thread — no lock needed)
+                long cutoffTicks = (DateTime.UtcNow - m_cacheExpiry).Ticks;
+                var expiredKeys = new List<string>();
+
+                foreach (var kvp in m_cache)
                 {
-                    var expiredKeys = new List<string>();
-                    var cutoff = DateTime.UtcNow - m_cacheExpiry;
+                    if (kvp.Value.CachedAtTicks < cutoffTicks)
+                        expiredKeys.Add(kvp.Key);
+                }
 
-                    foreach (var kvp in m_assetCache)
-                    {
-                        if (kvp.Value.CachedAt < cutoff)
-                        {
-                            expiredKeys.Add(kvp.Key);
-                        }
-                    }
+                foreach (var key in expiredKeys)
+                {
+                    if (m_cache.TryRemove(key, out var removed))
+                        Interlocked.Add(ref m_cacheSizeBytes, -removed.SizeBytes);
+                }
 
-                    if (expiredKeys.Count > 0)
-                    {
-                        await m_cacheSemaphore.WaitAsync();
-                        try
-                        {
-                            foreach (var key in expiredKeys)
-                            {
-                                m_assetCache.TryRemove(key, out _);
-                            }
-                        }
-                        finally
-                        {
-                            m_cacheSemaphore.Release();
-                        }
-
-                        m_log.DebugFormat("[HTTP3 ASSET SERVICE]: Cleaned {0} expired cache entries", expiredKeys.Count);
-                    }
-                });
+                if (expiredKeys.Count > 0)
+                    m_log.DebugFormat("[HTTP3 ASSET SERVICE]: Cleaned {0} expired cache entries", expiredKeys.Count);
 
                 // Log statistics
                 if (m_enableMetrics)
                 {
-                    var cacheHitRate = m_cacheHits + m_cacheMisses > 0 
-                        ? (double)m_cacheHits / (m_cacheHits + m_cacheMisses) * 100 
-                        : 0;
+                    long hits = Interlocked.Read(ref m_cacheHits);
+                    long misses = Interlocked.Read(ref m_cacheMisses);
+                    long sizeMB = Interlocked.Read(ref m_cacheSizeBytes) / (1024L * 1024L);
+                    double cacheHitRate = hits + misses > 0 ? (double)hits / (hits + misses) * 100 : 0;
 
                     m_log.InfoFormat(
                         "[HTTP3 ASSET SERVICE]: Stats - Cache: {0} items ({1} MB), Hit rate: {2:F1}%, " +
-                        "HTTP/3: {3} requests, Fallback: {4} requests",
-                        m_assetCache.Count, GetCacheSizeMB(), cacheHitRate, m_http3Requests, m_fallbackRequests);
+                        "HTTP/3: {3} requests, Fallback: {4} requests, Evictions: {5}",
+                        m_cache.Count, sizeMB, cacheHitRate, m_http3Requests, m_fallbackRequests,
+                        Interlocked.Read(ref m_cacheEvictions));
                 }
             }
             catch (Exception ex)
@@ -844,9 +821,10 @@ namespace OpenSim.Services.AssetService
 
             try
             {
+                m_cts.Cancel();
                 m_maintenanceTimer?.Dispose();
                 m_http3Client?.Dispose();
-                m_cacheSemaphore?.Dispose();
+                m_cts.Dispose();
                 m_preloader?.Dispose();
                 m_compressor?.Dispose();
                 m_metrics?.Dispose();
@@ -863,12 +841,22 @@ namespace OpenSim.Services.AssetService
 
         #region Inner Classes
 
-        private class Http3CachedAsset
+        private sealed class CacheEntry
         {
-            public AssetBase Asset { get; set; }
-            public DateTime CachedAt { get; set; }
-            public long Size { get; set; }
-            public int AccessCount { get; set; }
+            public AssetBase Asset { get; }
+            public long SizeBytes { get; }
+            public long CachedAtTicks { get; }
+            public long LastAccessTicks;
+            public int AccessCount;
+
+            public CacheEntry(AssetBase asset, long sizeBytes, long nowTicks)
+            {
+                Asset = asset;
+                SizeBytes = sizeBytes;
+                CachedAtTicks = nowTicks;
+                LastAccessTicks = nowTicks;
+                AccessCount = 0;
+            }
         }
 
         #endregion
