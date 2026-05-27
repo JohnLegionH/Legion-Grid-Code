@@ -447,6 +447,8 @@ namespace OpenSim.Region.Framework.Scenes
         private bool m_scriptListens_notAtTarget;
         private bool m_scriptListens_atRotTarget;
         private bool m_scriptListens_notAtRotTarget;
+        private bool m_wasMoving;
+        public bool WasMoving { get { return m_wasMoving; } set { m_wasMoving = value; } }
 
         public bool m_dupeInProgress = false;
         internal Dictionary<UUID, string> m_savedScriptState;

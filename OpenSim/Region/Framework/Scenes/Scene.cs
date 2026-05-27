@@ -1767,6 +1767,7 @@ namespace OpenSim.Region.Framework.Scenes
                     //CheckKFM(FrameTime);
                     // Check if any objects have reached their targets
                     CheckAtTargets();
+                    CheckMovingTransitions();
 
                     // Update SceneObjectGroups that have scheduled themselves for updates
                     // Objects queue their updates onto all scene presences
@@ -2007,6 +2008,32 @@ namespace OpenSim.Region.Framework.Scenes
                     else
                         grp.CheckAtTargets();
                 }
+            }
+        }
+
+        private const float MOVING_VELOCITY_THRESHOLD_SQ = 0.01f;
+
+        private void CheckMovingTransitions()
+        {
+            List<SceneObjectGroup> groups = GetSceneObjectGroups();
+            foreach (SceneObjectGroup sog in groups)
+            {
+                SceneObjectPart rootPart = sog.RootPart;
+                if (rootPart == null) continue;
+
+                PhysicsActor physActor = rootPart.PhysActor;
+                if (physActor == null || !physActor.IsPhysical) continue;
+
+                bool currentlyMoving =
+                    physActor.Velocity.LengthSquared() > MOVING_VELOCITY_THRESHOLD_SQ ||
+                    physActor.RotationalVelocity.LengthSquared() > MOVING_VELOCITY_THRESHOLD_SQ;
+
+                if (currentlyMoving && !sog.WasMoving)
+                    m_eventManager.TriggerMovingStartEvent(rootPart.LocalId);
+                else if (!currentlyMoving && sog.WasMoving)
+                    m_eventManager.TriggerMovingEndEvent(rootPart.LocalId);
+
+                sog.WasMoving = currentlyMoving;
             }
         }
 
