@@ -71,13 +71,25 @@
     ; see hit rates with console comand: fcache status
     MemoryCacheTimeout = .016 ; one minute
 
+    ; Maximum number of assets to hold in the memory cache (0 = unlimited).
+    ; Only used when MemoryCacheEnabled = true. When the limit is reached,
+    ; new assets skip memory insertion but remain accessible via the file
+    ; tier. TTL expiry frees slots over time.
+    MaxMemoryCacheCount = 0
+
     ; How long {in hours} to keep assets cached on disk, .5 == 30 minutes
     ; Specify 0 if you do not want your disk cache to expire
     FileCacheTimeout = 48
 
+    ; Maximum total disk space used by the file cache, in MB (0 = unlimited).
+    ; When exceeded during cleanup, oldest-accessed files are deleted first
+    ; until cache is back under the limit. Scene assets in use are protected.
+    ; Only effective when FileCleanupTimer > 0 (cleanup enabled).
+    MaxFileCacheSizeMB = 0
+
     ; How often {in hours} should the disk be checked for expired files
-    ; Specify 0 to disable expiration checking
-    FileCleanupTimer = 0.0  ; disabled
+    ; Changed from 0.0 to 1.0 - cleanup-off was making the cache an append-only log.
+    FileCleanupTimer = 1.0
 
     ; If WAIT_ON_INPROGRESS_REQUESTS has been defined then this specifies how
     ; long (in miliseconds) to block a request thread while trying to complete

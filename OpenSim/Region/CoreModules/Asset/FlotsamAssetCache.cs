@@ -103,6 +103,8 @@ namespace OpenSim.Region.CoreModules.Asset
         private static int m_CacheDirectoryTiers = 1;
         private static int m_CacheDirectoryTierLen = 3;
         private static int m_CacheWarnAt = 30000;
+        private int m_MaxMemoryCacheCount = 0;
+        private long m_MaxFileCacheSizeMB = 0;
 
         private System.Timers.Timer m_CacheCleanTimer;
 
@@ -182,6 +184,8 @@ namespace OpenSim.Region.CoreModules.Asset
                         m_CacheDirectoryTierLen = assetConfig.GetInt("CacheDirectoryTierLength", m_CacheDirectoryTierLen);
 
                         m_CacheWarnAt = assetConfig.GetInt("CacheWarnAt", m_CacheWarnAt);
+                        m_MaxMemoryCacheCount = assetConfig.GetInt("MaxMemoryCacheCount", m_MaxMemoryCacheCount);
+                        m_MaxFileCacheSizeMB = assetConfig.GetLong("MaxFileCacheSizeMB", m_MaxFileCacheSizeMB);
                     }
 
                     if(m_updateFileTimeOnCacheHit)
@@ -363,6 +367,8 @@ namespace OpenSim.Region.CoreModules.Asset
 
         private void UpdateMemoryCache(string key, AssetBase asset)
         {
+            if (m_MaxMemoryCacheCount > 0 && m_MemoryCache.Count >= m_MaxMemoryCacheCount)
+                return;
             m_MemoryCache.AddOrUpdate(key, asset, m_MemoryExpiration);
         }
 
@@ -823,6 +829,9 @@ namespace OpenSim.Region.CoreModules.Asset
                 }
             }
 
+            if (m_MaxFileCacheSizeMB > 0 && m_cleanupRunning)
+                EnforceFileCacheSizeLimit(gids);
+
             lock (weakAssetReferencesLock)
             {
                 weakAssetReferences = new Dictionary<string, WeakReference>();
@@ -942,6 +951,60 @@ namespace OpenSim.Region.CoreModules.Asset
                 m_log.Warn($"[FLOTSAM ASSET CACHE]: Could not complete clean of expired files in {dir}: {e.Message}");
             }
             return cooldown;
+        }
+
+        private void EnforceFileCacheSizeLimit(Dictionary<UUID, sbyte> gids)
+        {
+            long limitBytes = m_MaxFileCacheSizeMB * 1024L * 1024L;
+
+            var files = new List<(string path, long size, DateTime lastAccess)>();
+            long totalBytes = 0;
+
+            try
+            {
+                foreach (string file in Directory.EnumerateFiles(
+                    m_CacheDirectory, "*", SearchOption.AllDirectories))
+                {
+                    if (!m_cleanupRunning) return;
+                    try
+                    {
+                        var info = new FileInfo(file);
+                        totalBytes += info.Length;
+                        files.Add((file, info.Length, info.LastAccessTime));
+                    }
+                    catch { }
+                }
+            }
+            catch (Exception e)
+            {
+                m_log.Warn($"[FLOTSAM ASSET CACHE]: Error enumerating cache for size limit: {e.Message}");
+                return;
+            }
+
+            if (totalBytes <= limitBytes)
+                return;
+
+            m_log.Info($"[FLOTSAM ASSET CACHE]: Cache size {totalBytes / (1024L * 1024L)}MB exceeds limit {m_MaxFileCacheSizeMB}MB - evicting oldest files");
+
+            files.Sort((a, b) => a.lastAccess.CompareTo(b.lastAccess));
+
+            long target = (long)(limitBytes * 0.90);
+
+            foreach (var (path, size, _) in files)
+            {
+                if (!m_cleanupRunning || totalBytes <= target) break;
+
+                string id = Path.GetFileName(path);
+                if (m_defaultAssets.Contains(id)) continue;
+                if (UUID.TryParse(id, out UUID uid) && gids.ContainsKey(uid)) continue;
+
+                try
+                {
+                    File.Delete(path);
+                    totalBytes -= size;
+                }
+                catch { }
+            }
         }
 
         /// <summary>
@@ -1343,7 +1406,11 @@ namespace OpenSim.Region.CoreModules.Asset
                         WorkManager.RunInThreadPool(delegate
                         {
                             if (m_MemoryCacheEnabled)
+                            {
                                 con.Output("[FLOTSAM ASSET CACHE] Memory Cache: {0} assets", m_MemoryCache.Count);
+                                if (m_MaxMemoryCacheCount > 0)
+                                    con.Output("[FLOTSAM ASSET CACHE] Memory Cache limit: {0} items", m_MaxMemoryCacheCount);
+                            }
                             else
                                 con.Output("[FLOTSAM ASSET CACHE] Memory cache disabled");
 
