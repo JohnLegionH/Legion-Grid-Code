@@ -347,7 +347,13 @@ namespace OpenSim.Region.Framework.Scenes
             set { PhysicsActor.IsColliding = value; }
         }
 
-        private List<uint> m_lastColliders = new();
+        // Collision tracking buffers — eagerly allocated (avatars are always subscribed for
+        // ground-plane contact). HEARTBEAT-THREAD ONLY: same sequential dispatch as SOP.
+        private List<uint> m_lastColliders    = new();
+        private List<uint> m_thisHitBuffer    = new();
+        private List<uint> m_endedScratch     = new();
+        private List<uint> m_startedScratch   = new();
+        private List<CollisionForSoundInfo> m_soundInfoScratch = new();
         private bool m_lastLandCollide;
 
         private TeleportFlags m_teleportFlags;
@@ -6502,13 +6508,13 @@ namespace OpenSim.Region.Framework.Scenes
                 bool thisHitLand = false;
                 bool startLand = false;
 
-                List<uint> thisHitColliders = new(numberCollisions);
-                List<uint> endedColliders = new(m_lastColliders.Count);
-                List<uint> startedColliders = new(numberCollisions);
+                m_thisHitBuffer.Clear();
+                m_endedScratch.Clear();
+                m_startedScratch.Clear();
+                m_soundInfoScratch.Clear();
 
                 if(ParcelAllowThisAvatarSounds)
                 {
-                    List<CollisionForSoundInfo> soundinfolist = new();
                     CollisionForSoundInfo soundinfo;
                     ContactPoint curcontact;
 
@@ -6530,16 +6536,16 @@ namespace OpenSim.Region.Framework.Scenes
                                         position = curcontact.Position,
                                         relativeVel = curcontact.RelativeSpeed
                                     };
-                                    soundinfolist.Add(soundinfo);
+                                    m_soundInfoScratch.Add(soundinfo);
                                 }
                             }
                         }
                         else
                         {
-                            thisHitColliders.Add(id);
+                            m_thisHitBuffer.Add(id);
                             if (!m_lastColliders.Contains(id))
                             {
-                                startedColliders.Add(id);
+                                m_startedScratch.Add(id);
                                 curcontact = coldata[id];
                                 if (Math.Abs(curcontact.RelativeSpeed) > 0.2)
                                 {
@@ -6549,13 +6555,13 @@ namespace OpenSim.Region.Framework.Scenes
                                         position = curcontact.Position,
                                         relativeVel = curcontact.RelativeSpeed
                                     };
-                                    soundinfolist.Add(soundinfo);
+                                    m_soundInfoScratch.Add(soundinfo);
                                 }
                             }
                         }
                     }
-                    if (soundinfolist.Count > 0)
-                        CollisionSounds.AvatarCollisionSound(this, soundinfolist);
+                    if (m_soundInfoScratch.Count > 0)
+                        CollisionSounds.AvatarCollisionSound(this, m_soundInfoScratch);
                 }
                 else
                 {
@@ -6568,9 +6574,9 @@ namespace OpenSim.Region.Framework.Scenes
                         }
                         else
                         {
-                            thisHitColliders.Add(id);
+                            m_thisHitBuffer.Add(id);
                             if (!m_lastColliders.Contains(id))
-                                startedColliders.Add(id);
+                                m_startedScratch.Add(id);
                         }
                     }
                 }
@@ -6578,9 +6584,9 @@ namespace OpenSim.Region.Framework.Scenes
                 // calculate things that ended colliding
                 foreach (uint localID in m_lastColliders)
                 {
-                    if (!thisHitColliders.Contains(localID))
+                    if (!m_thisHitBuffer.Contains(localID))
                     {
-                        endedColliders.Add(localID);
+                        m_endedScratch.Add(localID);
                     }
                 }
 
@@ -6591,9 +6597,9 @@ namespace OpenSim.Region.Framework.Scenes
                     scriptEvents attev = att.RootPart.ScriptEvents;
                     if ((attev & scriptEvents.anyobjcollision) != 0)
                     {
-                        SendCollisionEvent(att, scriptEvents.collision_start, startedColliders, m_scene.EventManager.TriggerScriptCollidingStart);
+                        SendCollisionEvent(att, scriptEvents.collision_start, m_startedScratch, m_scene.EventManager.TriggerScriptCollidingStart);
                         SendCollisionEvent(att, scriptEvents.collision      , m_lastColliders , m_scene.EventManager.TriggerScriptColliding);
-                        SendCollisionEvent(att, scriptEvents.collision_end  , endedColliders  , m_scene.EventManager.TriggerScriptCollidingEnd);
+                        SendCollisionEvent(att, scriptEvents.collision_end  , m_endedScratch  , m_scene.EventManager.TriggerScriptCollidingEnd);
                     }
 
                     if ((attev & scriptEvents.anylandcollision) != 0)
@@ -6610,7 +6616,7 @@ namespace OpenSim.Region.Framework.Scenes
                 }
 
                 m_lastLandCollide = thisHitLand;
-                m_lastColliders = thisHitColliders;
+                (m_lastColliders, m_thisHitBuffer) = (m_thisHitBuffer, m_lastColliders);
             }
             catch { }
         }

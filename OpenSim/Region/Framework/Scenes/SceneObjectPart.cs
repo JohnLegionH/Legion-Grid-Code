@@ -288,7 +288,16 @@ namespace OpenSim.Region.Framework.Scenes
         private byte[] m_TextureAnimation;
         private byte m_clickAction;
         private Color m_color = Color.Black;
-        private List<uint> m_lastColliders = new List<uint>();
+        // Collision tracking buffers — lazily allocated when collision events are subscribed
+        // (UpdatePhysicsSubscribedEvents), freed on unsubscribe. HEARTBEAT-THREAD ONLY:
+        // PhysicsCollision runs only on the heartbeat thread (BSScene.SendUpdatesToSimulator,
+        // sequential foreach). These reused fields are safe without locking. If collision
+        // dispatch is ever parallelized, this assumption must be revisited.
+        private List<uint> m_lastColliders;
+        private List<uint> m_thisHitBuffer;
+        private List<uint> m_endedScratch;
+        private List<uint> m_startedScratch;
+        private List<CollisionForSoundInfo> m_soundInfoScratch;
         private bool m_lastLandCollide;
         private int m_linkNum;
 
@@ -2777,6 +2786,10 @@ namespace OpenSim.Region.Framework.Scenes
             scriptEvents combinedEvents = ScriptEvents | ParentGroup.RootPart.ScriptEvents;
 
             int ncollisions = collissionswith.Count;
+            m_thisHitBuffer.Clear();
+            m_endedScratch.Clear();
+            m_startedScratch.Clear();
+            m_soundInfoScratch.Clear();
             if (ncollisions == 0)
             {
                 if (m_lastColliders.Count == 0 && !m_lastLandCollide)
@@ -2799,15 +2812,10 @@ namespace OpenSim.Region.Framework.Scenes
             bool thisHitLand = false;
             bool startLand = false;
 
-            List<uint> thisHitColliders = new List<uint>(ncollisions);
-            List<uint> endedColliders = new List<uint>(m_lastColliders.Count);
-            List<uint> startedColliders = new List<uint>(ncollisions);
-
             // calculate things that started colliding this time
             // and build up list of colliders this time
             if (!VolumeDetectActive && CollisionSoundType >= 0)
             {
-                List<CollisionForSoundInfo> soundinfolist = new List<CollisionForSoundInfo>();
                 CollisionForSoundInfo soundinfo;
                 ContactPoint curcontact;
 
@@ -2828,16 +2836,16 @@ namespace OpenSim.Region.Framework.Scenes
                                     position = curcontact.Position,
                                     relativeVel = curcontact.RelativeSpeed
                                 };
-                                soundinfolist.Add(soundinfo);
+                                m_soundInfoScratch.Add(soundinfo);
                             }
                         }
                     }
                     else
                     {
-                        thisHitColliders.Add(id);
+                        m_thisHitBuffer.Add(id);
                         if (!m_lastColliders.Contains(id))
                         {
-                            startedColliders.Add(id);
+                            m_startedScratch.Add(id);
 
                             curcontact = collissionswith[id];
                             if (Math.Abs(curcontact.RelativeSpeed) > 0.2)
@@ -2848,14 +2856,14 @@ namespace OpenSim.Region.Framework.Scenes
                                     position = curcontact.Position,
                                     relativeVel = curcontact.RelativeSpeed
                                 };
-                                soundinfolist.Add(soundinfo);
+                                m_soundInfoScratch.Add(soundinfo);
                             }
                         }
                     }
                 }
                 // play sounds.
-                if (soundinfolist.Count > 0)
-                    CollisionSounds.PartCollisionSound(this, soundinfolist);
+                if (m_soundInfoScratch.Count > 0)
+                    CollisionSounds.PartCollisionSound(this, m_soundInfoScratch);
             }
             else
             {
@@ -2868,9 +2876,9 @@ namespace OpenSim.Region.Framework.Scenes
                     }
                     else
                     {
-                        thisHitColliders.Add(id);
+                        m_thisHitBuffer.Add(id);
                         if (!m_lastColliders.Contains(id))
-                            startedColliders.Add(id);
+                            m_startedScratch.Add(id);
                     }
                 }
             }
@@ -2878,8 +2886,8 @@ namespace OpenSim.Region.Framework.Scenes
             // calculate things that ended colliding
             foreach (uint localID in m_lastColliders)
             {
-                if (!thisHitColliders.Contains(localID))
-                    endedColliders.Add(localID);
+                if (!m_thisHitBuffer.Contains(localID))
+                    m_endedScratch.Add(localID);
             }
 
             eventManager = ParentGroup.Scene.EventManager;
@@ -2887,9 +2895,9 @@ namespace OpenSim.Region.Framework.Scenes
             if ((combinedEvents & scriptEvents.anyobjcollision) != 0)
             {
                 if ((combinedEvents & scriptEvents.collision_start) != 0)
-                    SendCollisionEvent(scriptEvents.collision_start, startedColliders, eventManager.TriggerScriptCollidingStart);
+                    SendCollisionEvent(scriptEvents.collision_start, m_startedScratch, eventManager.TriggerScriptCollidingStart);
                 if ((combinedEvents & scriptEvents.collision_end) != 0)
-                    SendCollisionEvent(scriptEvents.collision_end  , endedColliders  , eventManager.TriggerScriptCollidingEnd);
+                    SendCollisionEvent(scriptEvents.collision_end  , m_endedScratch  , eventManager.TriggerScriptCollidingEnd);
             }
 
             if (!VolumeDetectActive)
@@ -2911,7 +2919,7 @@ namespace OpenSim.Region.Framework.Scenes
                 }
             }
 
-            m_lastColliders = thisHitColliders;
+            (m_lastColliders, m_thisHitBuffer) = (m_thisHitBuffer, m_lastColliders);
             m_lastLandCollide = thisHitLand;
         }
 
@@ -4873,6 +4881,11 @@ namespace OpenSim.Region.Framework.Scenes
                 pa.OnCollisionUpdate -= PhysicsCollision;
                 pa.OnRequestTerseUpdate -= PhysicsRequestingTerseUpdate;
                 pa.OnOutOfBounds -= PhysicsOutOfBounds;
+                m_lastColliders    = null;
+                m_thisHitBuffer    = null;
+                m_endedScratch     = null;
+                m_startedScratch   = null;
+                m_soundInfoScratch = null;
 
                 ParentGroup.Scene.PhysicsScene.RemovePrim(pa);
 
@@ -5139,10 +5152,20 @@ namespace OpenSim.Region.Framework.Scenes
                 // subscribe to physics updates.
                 pa.OnCollisionUpdate += PhysicsCollision;
                 pa.SubscribeEvents(50); // 20 reports per second
+                m_lastColliders     ??= new List<uint>();
+                m_thisHitBuffer     ??= new List<uint>();
+                m_endedScratch      ??= new List<uint>();
+                m_startedScratch    ??= new List<uint>();
+                m_soundInfoScratch  ??= new List<CollisionForSoundInfo>();
             }
             else
             {
                 pa.UnSubscribeEvents();
+                m_lastColliders    = null;
+                m_thisHitBuffer    = null;
+                m_endedScratch     = null;
+                m_startedScratch   = null;
+                m_soundInfoScratch = null;
             }
         }
 
