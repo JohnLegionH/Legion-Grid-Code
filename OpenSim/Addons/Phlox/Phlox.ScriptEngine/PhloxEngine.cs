@@ -125,6 +125,7 @@ namespace Phlox.ScriptEngine
             m_Scene.EventManager.OnScriptNotAtTargetEvent    += OnScriptNotAtTargetEvent;
             m_Scene.EventManager.OnScriptAtRotTargetEvent    += OnScriptAtRotTargetEvent;
             m_Scene.EventManager.OnScriptNotAtRotTargetEvent += OnScriptNotAtRotTargetEvent;
+            m_Scene.EventManager.OnObjectBeingRemovedFromScene += OnObjectBeingRemovedFromScene;
             IMoneyModule moneyModule = m_Scene.RequestModuleInterface<IMoneyModule>();
             if (moneyModule != null)
                 moneyModule.OnObjectPaid += HandleObjectPaid;
@@ -163,6 +164,8 @@ namespace Phlox.ScriptEngine
             m_Scene.EventManager.OnScriptCollidingEnd      -= OnScriptCollidingEnd;
             m_Scene.EventManager.OnScriptColliding         -= OnScriptColliding;
             m_Scene.EventManager.OnScriptColliderStart     -= OnScriptColliderStart;
+            m_Scene.EventManager.OnObjectBeingRemovedFromScene -= OnObjectBeingRemovedFromScene;
+            LSLSystemAPI.ClearRegionCharacters(scene.RegionInfo.RegionID);
             m_MasterScheduler?.Stop();
             AsyncCommands?.Shutdown();
             m_Scene = null;
@@ -226,7 +229,23 @@ namespace Phlox.ScriptEngine
             StateManager?.Stop();
             StateManager = null;
         }
-		
+
+        private void OnObjectBeingRemovedFromScene(SceneObjectGroup obj)
+        {
+            // When a prim leaves the scene, clean up any character it owned (M-14b).
+            // BotManager has no per-prim hook, so orphaned bots must be removed here.
+            Scene scene = m_Scene;
+            if (scene == null) return;
+            IBotManager mgr = scene.RequestModuleInterface<IBotManager>();
+            UUID regionID = scene.RegionInfo.RegionID;
+            foreach (SceneObjectPart part in obj.Parts)
+            {
+                UUID botID = LSLSystemAPI.ClearCharacter(regionID, part.LocalId);
+                if (botID != UUID.Zero)
+                    mgr?.RemoveBot(botID, obj.OwnerID);
+            }
+        }
+
         private void OnStartScript(uint localID, UUID itemID)
         {
             m_ExeScheduler?.ChangeEnabledStatus(itemID, true);

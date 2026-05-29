@@ -11113,6 +11113,34 @@ public int llSetLinkGLTFOverrides(int link, int face, LSLList overrides)
 		private static readonly Dictionary<(UUID, uint), UUID> s_primCharacters = new();
 		private static readonly object s_charLock = new();
 
+        // Called by PhloxEngine.OnObjectBeingRemovedFromScene when a prim leaves the scene (M-14b).
+        // Removes the dict entry and returns the botID so the caller can remove the bot from BotManager.
+        // Returns UUID.Zero if no character was registered for this prim.
+        internal static UUID ClearCharacter(UUID regionID, uint localID)
+        {
+            lock (s_charLock)
+            {
+                var key = (regionID, localID);
+                if (s_primCharacters.TryGetValue(key, out UUID botID))
+                {
+                    s_primCharacters.Remove(key);
+                    return botID;
+                }
+            }
+            return UUID.Zero;
+        }
+
+        // Called by PhloxEngine.RemoveRegion to purge all character dict entries for a region (M-14b).
+        // BotManager.RemoveRegion already removes the bot NPCs; this cleans only the dict.
+        internal static void ClearRegionCharacters(UUID regionID)
+        {
+            lock (s_charLock)
+            {
+                foreach (var key in s_primCharacters.Keys.Where(k => k.Item1 == regionID).ToList())
+                    s_primCharacters.Remove(key);
+            }
+        }
+
 		private UUID GetCharacterBot()
 		{
 			lock (s_charLock)
