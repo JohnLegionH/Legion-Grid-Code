@@ -90,6 +90,9 @@ namespace OpenSim.Region.CoreModules.Scripting.HttpRequest
         private readonly ConcurrentQueue<HttpRequestClass> m_CompletedRequests = new();
         private readonly ConcurrentDictionary<uint, ThrottleData> m_RequestsThrottle = new();
         private readonly ConcurrentDictionary<UUID, ThrottleData> m_OwnerRequestsThrottle = new();
+        // Reverse map: localID → ownerID, populated in CheckThrottle (where ownerID is known).
+        // Used in StopHttpRequest to look up ownerID for owner-throttle cleanup (M-1).
+        private readonly ConcurrentDictionary<uint, UUID> m_localToOwner = new();
 
         public HttpRequestModule()
         {
@@ -349,6 +352,7 @@ namespace OpenSim.Region.CoreModules.Scripting.HttpRequest
                 };
             }
             m_OwnerRequestsThrottle[ownerID] = th;
+            m_localToOwner[localID] = ownerID;
 
             return ret;
         }
@@ -468,6 +472,14 @@ namespace OpenSim.Region.CoreModules.Scripting.HttpRequest
             {
                 if (th.control + m_primOwnerPerSec * (Util.GetTimeStamp() - th.lastTime) >= m_primBurst)
                     m_RequestsThrottle.TryRemove(localID, out _);
+            }
+            if (m_localToOwner.TryRemove(localID, out UUID ownerID))
+            {
+                if (m_OwnerRequestsThrottle.TryGetValue(ownerID, out ThrottleData ownerTh))
+                {
+                    if (ownerTh.control + m_primOwnerPerSec * (Util.GetTimeStamp() - ownerTh.lastTime) >= m_primOwnerBurst)
+                        m_OwnerRequestsThrottle.TryRemove(ownerID, out _);
+                }
             }
         }
 
