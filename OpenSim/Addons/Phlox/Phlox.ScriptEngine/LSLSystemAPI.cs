@@ -11105,14 +11105,19 @@ public int llSetLinkGLTFOverrides(int link, int face, LSLList overrides)
 
 		// -- Tier 4: Pathfinding / Character System (606-628) --
 		// Maps prim LocalID -> bot UUID for llCreateCharacter/llNavigateTo etc.
-		private static readonly Dictionary<uint, UUID> s_primCharacters = new();
+		// Region-qualified key: (regionID, prim localID). LocalIDs are unique only within
+		// a single region; in a multi-region process two prims in different regions can share
+		// a localID. Keying by (regionID, localID) prevents cross-region character state
+		// collision. See memory-session-f-plan.md (M-14).
+		private (UUID, uint) CharKey => (World.RegionInfo.RegionID, m_host.LocalId);
+		private static readonly Dictionary<(UUID, uint), UUID> s_primCharacters = new();
 		private static readonly object s_charLock = new();
 
 		private UUID GetCharacterBot()
 		{
 			lock (s_charLock)
 			{
-				if (s_primCharacters.TryGetValue(m_host.LocalId, out UUID botID))
+				if (s_primCharacters.TryGetValue(CharKey, out UUID botID))
 					return botID;
 			}
 			return UUID.Zero;
@@ -11145,9 +11150,9 @@ public int llSetLinkGLTFOverrides(int link, int face, LSLList overrides)
 			UUID botID;
 			lock (s_charLock)
 			{
-				if (!s_primCharacters.TryGetValue(m_host.LocalId, out botID))
+				if (!s_primCharacters.TryGetValue(CharKey, out botID))
 					return;
-				s_primCharacters.Remove(m_host.LocalId);
+				s_primCharacters.Remove(CharKey);
 			}
 			IBotManager manager = GetBotManager();
 			if (manager != null)
@@ -11176,7 +11181,7 @@ public int llSetLinkGLTFOverrides(int link, int face, LSLList overrides)
 			if (speed != 1.0f)
 				manager.SetBotSpeed(botID, speed, m_host.OwnerID);
 			lock (s_charLock)
-				s_primCharacters[m_host.LocalId] = botID;
+				s_primCharacters[CharKey] = botID;
 		}
 
 		public void llNavigateTo(Vector3 pos, LSLList options)
