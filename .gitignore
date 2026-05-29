@@ -121,3 +121,5 @@ bin/OpenSim.ini
 
 *.patch
 *.sql
+.claude/
+Opensim Scripts/
