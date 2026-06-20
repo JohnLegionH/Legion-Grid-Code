@@ -1,0 +1,137 @@
+id	category	expect	phlox_result	verdict	first_error	exception
+op-add	operator	PASS	PASS	CONFORMANT		
+op-sub	operator	PASS	PASS	CONFORMANT		
+op-mul	operator	PASS	PASS	CONFORMANT		
+op-div	operator	PASS	PASS	CONFORMANT		
+op-mod	operator	PASS	PASS	CONFORMANT		
+op-shl	operator	PASS	PASS	CONFORMANT		
+op-shr	operator	PASS	PASS	CONFORMANT		
+op-lt	operator	PASS	PASS	CONFORMANT		
+op-le	operator	PASS	PASS	CONFORMANT		
+op-gt	operator	PASS	PASS	CONFORMANT		
+op-ge	operator	PASS	PASS	CONFORMANT		
+op-eq	operator	PASS	PASS	CONFORMANT		
+op-ne	operator	PASS	PASS	CONFORMANT		
+op-band	operator	PASS	PASS	CONFORMANT		
+op-bxor	operator	PASS	PASS	CONFORMANT		
+op-bor	operator	PASS	PASS	CONFORMANT		
+op-and	operator	PASS	PASS	CONFORMANT		
+op-or	operator	PASS	PASS	CONFORMANT		
+op-assign	operator	PASS	PASS	CONFORMANT		
+op-assign-add	operator	PASS	PASS	CONFORMANT		
+op-assign-sub	operator	PASS	PASS	CONFORMANT		
+op-assign-mul	operator	PASS	PASS	CONFORMANT		
+op-assign-div	operator	PASS	PASS	CONFORMANT		
+op-assign-mod	operator	PASS	PASS	CONFORMANT		
+op-unary-minus	operator	PASS	PASS	CONFORMANT		
+op-unary-bang	operator	PASS	PASS	CONFORMANT		
+op-unary-tilde	operator	PASS	PASS	CONFORMANT		
+op-preinc	operator	PASS	PASS	CONFORMANT		
+op-predec	operator	PASS	PASS	CONFORMANT		
+op-postinc	operator	PASS	PASS	CONFORMANT		
+op-postdec	operator	PASS	PASS	CONFORMANT		
+op-ternary	operator-invalid	FAIL	FAIL	CONFORMANT	line 3:14 mismatched input '1' expecting {';', ')'}	
+op-bor-assign	operator-invalid	FAIL	FAIL	CONFORMANT	line 3:2 no viable alternative at input 'r |'	
+op-band-assign	operator-invalid	FAIL	FAIL	CONFORMANT	line 3:2 no viable alternative at input 'r &'	
+op-bxor-assign	operator-invalid	FAIL	FAIL	CONFORMANT	line 3:2 no viable alternative at input 'r ^'	
+op-shl-assign	operator-invalid	FAIL	PASS	OVER		
+op-shr-assign	operator-invalid	FAIL	PASS	OVER		
+cast-int-to-string	cast	PASS	PASS	CONFORMANT		
+cast-int-to-float	cast	PASS	PASS	CONFORMANT		
+cast-float-to-int	cast	PASS	PASS	CONFORMANT		
+cast-string-to-int	cast	PASS	PASS	CONFORMANT		
+cast-string-to-float	cast	PASS	PASS	CONFORMANT		
+cast-string-to-key	cast	PASS	PASS	CONFORMANT		
+cast-key-to-string	cast	PASS	PASS	CONFORMANT		
+cast-vec-to-string	cast	PASS	PASS	CONFORMANT		
+cast-string-to-vec	cast	PASS	PASS	CONFORMANT		
+cast-rot-to-string	cast	PASS	PASS	CONFORMANT		
+cast-string-to-rot	cast	PASS	PASS	CONFORMANT		
+cast-list-to-string	cast	PASS	PASS	CONFORMANT		
+cast-int-to-list	cast	FAIL	PASS	OVER		
+vec-add	vector-rotation	PASS	PASS	CONFORMANT		
+vec-sub	vector-rotation	PASS	PASS	CONFORMANT		
+vec-mul-scalar	vector-rotation	PASS	PASS	CONFORMANT		
+vec-div-scalar	vector-rotation	PASS	PASS	CONFORMANT		
+vec-dot	vector-rotation	PASS	PASS	CONFORMANT		
+vec-cross	vector-rotation	PASS	PASS	CONFORMANT		
+vec-mul-rot	vector-rotation	PASS	PASS	CONFORMANT		
+vec-div-rot	vector-rotation	PASS	PASS	CONFORMANT		
+rot-mul	vector-rotation	PASS	PASS	CONFORMANT		
+rot-div	vector-rotation	PASS	PASS	CONFORMANT		
+rot-add	vector-rotation	FAIL	PASS	OVER		
+rot-sub	vector-rotation	FAIL	PASS	OVER		
+list-empty	list	PASS	PASS	CONFORMANT		
+list-mixed	list	PASS	PASS	CONFORMANT		
+list-concat	list	PASS	PASS	CONFORMANT		
+list-promote	list	PASS	PASS	CONFORMANT		
+list-list-mul	list	FAIL	FAIL	CONFORMANT	line 2:15 Type mismatch: cannot apply operator to list and list	
+event-at_rot_target	event	PASS	PASS	CONFORMANT		
+event-at_target	event	PASS	PASS	CONFORMANT		
+event-attach	event	PASS	PASS	CONFORMANT		
+event-changed	event	PASS	PASS	CONFORMANT		
+event-collision	event	PASS	PASS	CONFORMANT		
+event-collision_start	event	PASS	PASS	CONFORMANT		
+event-collision_end	event	PASS	PASS	CONFORMANT		
+event-control	event	PASS	PASS	CONFORMANT		
+event-dataserver	event	PASS	PASS	CONFORMANT		
+event-email	event	PASS	PASS	CONFORMANT		
+event-http_response	event	PASS	PASS	CONFORMANT		
+event-http_request	event	PASS	PASS	CONFORMANT		
+event-land_collision	event	PASS	PASS	CONFORMANT		
+event-land_collision_start	event	PASS	PASS	CONFORMANT		
+event-land_collision_end	event	PASS	PASS	CONFORMANT		
+event-link_message	event	PASS	PASS	CONFORMANT		
+event-listen	event	PASS	PASS	CONFORMANT		
+event-money	event	PASS	PASS	CONFORMANT		
+event-moving_start	event	PASS	PASS	CONFORMANT		
+event-moving_end	event	PASS	PASS	CONFORMANT		
+event-no_sensor	event	PASS	PASS	CONFORMANT		
+event-not_at_rot_target	event	PASS	PASS	CONFORMANT		
+event-not_at_target	event	PASS	PASS	CONFORMANT		
+event-object_rez	event	PASS	PASS	CONFORMANT		
+event-on_rez	event	PASS	PASS	CONFORMANT		
+event-remote_data	event	PASS	PASS	CONFORMANT		
+event-run_time_permissions	event	PASS	PASS	CONFORMANT		
+event-sensor	event	PASS	PASS	CONFORMANT		
+event-state_exit	event	PASS	PASS	CONFORMANT		
+event-timer	event	PASS	PASS	CONFORMANT		
+event-touch	event	PASS	PASS	CONFORMANT		
+event-touch_start	event	PASS	PASS	CONFORMANT		
+event-touch_end	event	PASS	PASS	CONFORMANT		
+event-transaction_result	event	PASS	PASS	CONFORMANT		
+event-linkset_data	event	PASS	PASS	CONFORMANT		
+event-experience_permissions	event	PASS	PASS	CONFORMANT		
+event-experience_permissions_denied	event	PASS	PASS	CONFORMANT		
+event-path_update	event	PASS	FAIL	UNDER	line 1:27 Unknown LSL event 'path_update'	
+event-game_control	event	PASS	FAIL	UNDER	line 1:27 Unknown LSL event 'game_control'	
+event-on_damage	event	PASS	FAIL	UNDER	line 1:27 Unknown LSL event 'on_damage'	
+event-on_death	event	PASS	FAIL	UNDER	line 1:27 Unknown LSL event 'on_death'	
+event-final_damage	event	PASS	FAIL	UNDER	line 1:27 Unknown LSL event 'final_damage'	
+event-bogus_event_xyz	event	FAIL	FAIL	CONFORMANT	line 1:27 Unknown LSL event 'this_is_not_a_real_event_xyz'	
+stmt-if	statement	PASS	PASS	CONFORMANT		
+stmt-if-else	statement	PASS	PASS	CONFORMANT		
+stmt-while	statement	PASS	PASS	CONFORMANT		
+stmt-do-while	statement	PASS	PASS	CONFORMANT		
+stmt-for	statement	PASS	PASS	CONFORMANT		
+stmt-for-empty-init	statement	PASS	PASS	CONFORMANT		
+stmt-jump-label	statement	PASS	PASS	CONFORMANT		
+stmt-return-void	statement	PASS	PASS	CONFORMANT		
+stmt-multi-return-paths	statement	PASS	PASS	CONFORMANT		
+stmt-nested-block	statement	PASS	PASS	CONFORMANT		
+stmt-missing-return	statement	FAIL	FAIL	CONFORMANT	line: 1:8 f(): Not all control paths return a value	
+stmt-return-typed-from-void	statement	FAIL	FAIL	CONFORMANT	line 1:6 Void function/event should not return a value	
+type-quaternion	type	PASS	FAIL	UNDER	line 1:37 no viable alternative at input 'quaternion q'	
+type-quaternion-cast	type	PASS	FAIL	UNDER	line 1:55 mismatched input ',' expecting ';'	
+func-typed-correct-return	function	PASS	PASS	CONFORMANT		
+func-multi-typed-correct	function	PASS	PASS	CONFORMANT		
+func-typed-wrong-return-type	function	FAIL	FAIL	CONFORMANT	line 1:13 Return type mismatch: expected string, got integer	
+func-no-args-call	function	PASS	PASS	CONFORMANT		
+lit-string-basic	literal	PASS	PASS	CONFORMANT		
+lit-string-newline	literal	PASS	PASS	CONFORMANT		
+lit-string-tab	literal	PASS	PASS	CONFORMANT		
+lit-string-quote	literal	PASS	PASS	CONFORMANT		
+lit-string-backslash	literal	PASS	PASS	CONFORMANT		
+lit-int-hex	literal	PASS	PASS	CONFORMANT		
+lit-float-exp	literal	PASS	PASS	CONFORMANT		
+lit-float-neg-exp	literal	PASS	PASS	CONFORMANT		

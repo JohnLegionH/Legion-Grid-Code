@@ -650,7 +650,7 @@ namespace OpenSim.Region.ClientStack.Linden
                 return false;
             }
 
-            OSDMap cmap = (OSDMap)decodedMeshOsd;
+            OSDMap cmap = decodedMeshOsd as OSDMap;
             if (cmap == null)
                 return false;
 

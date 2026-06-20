@@ -123,3 +123,12 @@ bin/OpenSim.ini
 *.sql
 .claude/
 Opensim Scripts/
+
+# Real service configs never get committed — but keep the .example templates
+bin/config-include/GridCommon*.ini
+bin/config-include/StandaloneCommon*.ini
+!bin/config-include/GridCommon.ini.example
+!bin/config-include/StandaloneCommon.ini.example
+
+# Windows "Copy" duplicates
+* - Copy.*
