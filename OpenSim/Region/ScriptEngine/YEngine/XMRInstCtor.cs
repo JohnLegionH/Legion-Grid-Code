@@ -943,6 +943,21 @@ namespace OpenSim.Region.ScriptEngine.Yengine
             return ReadXTypedValue(tag);
         }
 
+        // Allow-list of value types permitted when importing legacy XEngine-format
+        // script state from XML. The 'type' attribute in that XML is attacker-
+        // influenceable (it rides in on foreign objects / archives), so we must
+        // never resolve and instantiate an arbitrary named type. Only these known
+        // LSL / primitive value types are accepted; anything else degrades to null
+        // (the variable takes its default) rather than an arbitrary CreateInstance.
+        private static bool IsAllowedXStateType(Type t)
+        {
+            return t == typeof(int)    || t == typeof(double) || t == typeof(string) ||
+                   t == typeof(bool)   || t == typeof(float)  || t == typeof(long)   ||
+                   t == typeof(LSL_Integer) || t == typeof(LSL_Float)    ||
+                   t == typeof(LSL_String)  || t == typeof(LSL_List)     ||
+                   t == typeof(LSL_Vector)  || t == typeof(LSL_Rotation);
+        }
+
         private static object ReadXTypedValue(XmlNode tag)
         {
             Object varValue;
@@ -967,7 +982,7 @@ namespace OpenSim.Region.ScriptEngine.Yengine
 
                 assembly = itemType + ", OpenSim.Region.ScriptEngine.Shared";
                 itemT = Type.GetType(assembly);
-                if (itemT == null)
+                if (itemT == null || !IsAllowedXStateType(itemT))
                     return null;
 
                 varValue = Activator.CreateInstance(itemT, args);
@@ -977,6 +992,8 @@ namespace OpenSim.Region.ScriptEngine.Yengine
             }
             else
             {
+                if (!IsAllowedXStateType(itemT))
+                    return null;
                 varValue = Convert.ChangeType(tag.InnerText, itemT);
             }
             return varValue;
@@ -1108,12 +1125,15 @@ namespace OpenSim.Region.ScriptEngine.Yengine
 
                 string assembly = itemType + ", OpenSim.Region.ScriptEngine.Shared";
                 itemT = Type.GetType(assembly);
-                if(itemT == null)
+                if(itemT == null || !IsAllowedXStateType(itemT))
                 {
                     return null;
                 }
                 return Activator.CreateInstance(itemT, args);
             }
+
+            if(!IsAllowedXStateType(itemT))
+                return null;
 
             return Convert.ChangeType(item.InnerText, itemT);
         }
