@@ -29,7 +29,7 @@ using System;
 using System.IO;
 using System.Collections.Generic;
 using System.Reflection;
-using System.Runtime.Serialization.Formatters.Binary;
+using System.Xml.Serialization;
 using System.Text;
 using System.Threading;
 using System.Timers;
@@ -66,6 +66,11 @@ namespace OpenSim.Region.CoreModules.Asset
 
         private const string m_ModuleName = "FlotsamAssetCache";
         private string m_CacheDirectory = "assetcache";
+
+        // Fixed-type serializer for the on-disk asset cache. Replaces BinaryFormatter;
+        // resolves no types from the byte stream. XmlSerializer is thread-safe for
+        // Serialize/Deserialize so a single shared instance is fine.
+        private static readonly XmlSerializer m_assetSerializer = new XmlSerializer(typeof(AssetBase));
         private string m_assetLoader;
         private string m_assetLoaderArgs;
 
@@ -187,6 +192,12 @@ namespace OpenSim.Region.CoreModules.Asset
                         m_MaxMemoryCacheCount = assetConfig.GetInt("MaxMemoryCacheCount", m_MaxMemoryCacheCount);
                         m_MaxFileCacheSizeMB = assetConfig.GetLong("MaxFileCacheSizeMB", m_MaxFileCacheSizeMB);
                     }
+
+                    // Use a format-versioned subdirectory so legacy BinaryFormatter
+                    // cache files written by older builds are never read by the new
+                    // XML reader. Old files stay in the parent dir (harmless) and can
+                    // be deleted manually; the cache simply regenerates here.
+                    m_CacheDirectory = Path.Combine(Path.GetFullPath(m_CacheDirectory), "format2");
 
                     if(m_updateFileTimeOnCacheHit)
                         m_lastFileAccessTimeChange = new ExpiringKey<string>(300000);
@@ -531,8 +542,10 @@ namespace OpenSim.Region.CoreModules.Asset
                 if (stream.Length == 0) // Empty file will trigger exception below
                     return null;
 
-                BinaryFormatter bformatter = new();
-                asset = (AssetBase)bformatter.Deserialize(stream);
+                // Only the fixed-type XML format is read. A legacy BinaryFormatter
+                // file (or any corrupt file) fails to parse and is handled below as
+                // a cache miss; the byte stream is never BinaryFormatter-deserialized.
+                asset = (AssetBase)m_assetSerializer.Deserialize(stream);
 
                 m_DiskHits++;
             }
@@ -1075,8 +1088,7 @@ namespace OpenSim.Region.CoreModules.Asset
 
                     using (Stream stream = File.Open(tempname, FileMode.Create))
                     {
-                        BinaryFormatter bformatter = new();
-                        bformatter.Serialize(stream, asset);
+                        m_assetSerializer.Serialize(stream, asset);
                         stream.Flush();
                     }
                     m_lastFileAccessTimeChange?.Add(filename, 900000);
