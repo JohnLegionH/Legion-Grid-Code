@@ -244,9 +244,20 @@ namespace OpenSim.Region.OptionalModules.World.NPC
         private void FirePathEvent(BotData data, int eventType, Vector3 pos)
         {
             if (data.PathEventScriptID == UUID.Zero) return;
-            // Path events would be fired via the script engine's event posting
-            // For now this is a placeholder -- full implementation requires
-            // hooking into PhloxEngine.PostScriptEvent
+
+            Scene scene = GetBotScene(data);
+            if (scene == null) return;
+
+            IScriptModule scriptModule = scene.RequestModuleInterface<IScriptModule>();
+            if (scriptModule == null) return;
+
+            // Deliver the bot_update script event, mirroring the original InWorldz/Halcyon
+            // signature: bot_update(key botID, integer flag, list params). The empty object[]
+            // is coerced to an LSLList by the Phlox VM (PostedEvent.Normalize), so this needs
+            // no dependency on the Phlox assemblies. eventType carries the flag
+            // (1 = BOT_MOVE_COMPLETE), matching what InWorldz scripts expect.
+            scriptModule.PostScriptEvent(data.PathEventScriptID, "bot_update",
+                new object[] { data.BotID.ToString(), eventType, new object[0] });
         }
 
         #endregion
