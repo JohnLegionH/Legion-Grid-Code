@@ -278,16 +278,22 @@ namespace OpenSim.Region.OptionalModules.World.NPC
             Scene scene = GetBotScene(data);
             if (scene == null) return;
 
-            IScriptModule scriptModule = scene.RequestModuleInterface<IScriptModule>();
-            if (scriptModule == null) return;
-
             // Deliver the bot_update script event, mirroring the original InWorldz/Halcyon
-            // signature: bot_update(key botID, integer flag, list params). The empty object[]
-            // is coerced to an LSLList by the Phlox VM (PostedEvent.Normalize), so this needs
-            // no dependency on the Phlox assemblies. eventType carries the flag
-            // (1 = BOT_MOVE_COMPLETE), matching what InWorldz scripts expect.
-            scriptModule.PostScriptEvent(data.PathEventScriptID, "bot_update",
-                new object[] { data.BotID.ToString(), eventType, new object[0] });
+            // signature: bot_update(string botID, integer flag, list params). The empty
+            // object[] is coerced to an LSLList by the Phlox VM (PostedEvent.Normalize), so
+            // this needs no dependency on the Phlox assemblies. eventType carries the flag
+            // (1 = BOT_MOVE_COMPLETE, 3 = BOT_MOVE_FAILED), matching what InWorldz scripts expect.
+            //
+            // The grid may run several script engines (YEngine + Phlox), each registered as
+            // IScriptModule; RequestModuleInterface<IScriptModule>() returns only the first
+            // (often YEngine), which may not own this script. Post to every engine — the one
+            // that owns the script item delivers, the rest ignore an unknown item.
+            IScriptModule[] engines = scene.RequestModuleInterfaces<IScriptModule>();
+            if (engines == null) return;
+
+            object[] args = new object[] { data.BotID.ToString(), eventType, new object[0] };
+            foreach (IScriptModule engine in engines)
+                engine?.PostScriptEvent(data.PathEventScriptID, "bot_update", args);
         }
 
         #endregion
