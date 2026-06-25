@@ -70,6 +70,11 @@ namespace OpenSim.Region.OptionalModules.World.NPC
         // attached, so we can detach exactly that subscription on deregister/removal.
         public PhysicsActor CollisionPhysActor;
         public PhysicsActor.CollisionUpdate CollisionHandler;
+
+        // Per-bot collision phase state so the module-contained delivery reproduces core's
+        // collision_start-once / collision-repeating / collision_end-once (and the land equivalents).
+        public HashSet<uint> CollisionLast = new HashSet<uint>();
+        public bool LandCollideLast;
     }
 
     [Extension(Path = "/OpenSim/RegionModules", NodeName = "RegionModule", Id = "BotManager")]
@@ -582,9 +587,12 @@ namespace OpenSim.Region.OptionalModules.World.NPC
         // NOTE: Bot collisions use a module-contained delivery path (BotManager -> registered host group),
         // not core's ScenePresence.RaiseCollisionScriptEvents. This is a deliberate, contained choice to avoid
         // modifying the hot per-frame core collision path and to keep the fix portable to grids (e.g. Tranquillity)
-        // whose bot subsystem differs. Phase tracking (start/continue/end) mirrors the Halcyon reference -- in
-        // fact we reuse core's own SceneObjectPart.PhysicsCollision, which IS that phase machine + DetectParams,
-        // by forwarding the bot's physics collision event into the registered host group's root part.
+        // whose bot subsystem differs. The phase machine (collision_start-once / collision-repeating /
+        // collision_end-once + land_collision_*) and the DetectedObject/ColliderArgs population mirror core's
+        // SceneObjectPart.PhysicsCollision exactly, but are reproduced here rather than calling that method:
+        // its collision scratch buffers are only allocated for parts that subscribe to their OWN physics
+        // collisions, so a phantom host (as the InWorldz bot-collision example requires) has none and calling
+        // it would NPE. We deliver through the public EventManager.TriggerScriptColliding* triggers instead.
         // Revisit/converge if core ever exposes a clean per-group collision-registration hook.
         private void SubscribeBotCollision(BotData data)
         {
@@ -606,11 +614,10 @@ namespace OpenSim.Region.OptionalModules.World.NPC
             data.CollisionPhysActor = null;
         }
 
-        // Forwards the bot's physics collision into the registered host group's root part, which runs core's
-        // canonical collision phase machine (collision_start/collision/collision_end + land_collision_*), builds
-        // DetectParams, and respects each script's event mask. Runs on the physics callback thread — the same
-        // context core uses for ScenePresence.PhysicsCollisionUpdate. Mirrors Halcyon's
-        // group.RootPart.PhysicsCollision(e) delivery for avatar collision registrations.
+        // Delivers the bot's physics collisions to the registered host's scripts. Reproduces core's phase
+        // machine: started = current-last (collision_start), continuing = current∩last (collision), ended =
+        // last-current (collision_end); land by transition. Runs on the physics callback thread (same context
+        // core uses), and only when a host script actually subscribed to the matching event.
         private void OnBotCollision(BotData data, EventArgs e)
         {
             SceneObjectGroup host = data.CollisionEventHost;   // local copy: deregister may null it concurrently
@@ -618,19 +625,153 @@ namespace OpenSim.Region.OptionalModules.World.NPC
             SceneObjectPart root = host.RootPart;
             if (root == null) return;
 
-            // Only forward when a script in the host wants a collision/land_collision event, so an unsubscribed
-            // object neither does work nor emits collision sounds for the bot's hits.
-            if ((root.ScriptEvents & COLLISION_EVENT_MASK) == 0) return;
+            scriptEvents ev = root.ScriptEvents;
+            if ((ev & COLLISION_EVENT_MASK) == 0) return;
+            if (!(e is CollisionEventUpdate cu)) return;
+
+            Scene scene = GetBotScene(data);                   // colliders live in the bot's scene
+            if (scene == null) return;
 
             try
             {
-                root.PhysicsCollision(e);
+                var coldata = cu.m_objCollisionList;
+                HashSet<uint> current = new HashSet<uint>();
+                bool curLand = false;
+                if (coldata != null)
+                {
+                    foreach (uint id in coldata.Keys)
+                    {
+                        if (id == 0) curLand = true;
+                        else current.Add(id);
+                    }
+                }
+
+                HashSet<uint> last = data.CollisionLast;
+                EventManager em = scene.EventManager;
+                int link = root.LinkNum;
+
+                if ((ev & scriptEvents.collision_start) != 0)
+                {
+                    List<uint> started = new List<uint>();
+                    foreach (uint id in current) if (!last.Contains(id)) started.Add(id);
+                    if (started.Count > 0)
+                    {
+                        ColliderArgs a = BuildColliderArgs(scene, started, link);
+                        if (a.Colliders.Count > 0) em.TriggerScriptCollidingStart(root.LocalId, a);
+                    }
+                }
+                if ((ev & scriptEvents.collision_end) != 0)
+                {
+                    List<uint> ended = new List<uint>();
+                    foreach (uint id in last) if (!current.Contains(id)) ended.Add(id);
+                    if (ended.Count > 0)
+                    {
+                        ColliderArgs a = BuildColliderArgs(scene, ended, link);
+                        if (a.Colliders.Count > 0) em.TriggerScriptCollidingEnd(root.LocalId, a);
+                    }
+                }
+                if ((ev & scriptEvents.collision) != 0)
+                {
+                    List<uint> cont = new List<uint>();
+                    foreach (uint id in current) if (last.Contains(id)) cont.Add(id);
+                    if (cont.Count > 0)
+                    {
+                        ColliderArgs a = BuildColliderArgs(scene, cont, link);
+                        if (a.Colliders.Count > 0) em.TriggerScriptColliding(root.LocalId, a);
+                    }
+                }
+
+                if (curLand)
+                {
+                    if (!data.LandCollideLast && (ev & scriptEvents.land_collision_start) != 0)
+                        em.TriggerScriptLandCollidingStart(root.LocalId, GroundArgs(root, link));
+                    if ((ev & scriptEvents.land_collision) != 0)
+                        em.TriggerScriptLandColliding(root.LocalId, GroundArgs(root, link));
+                }
+                else if (data.LandCollideLast && (ev & scriptEvents.land_collision_end) != 0)
+                {
+                    em.TriggerScriptLandCollidingEnd(root.LocalId, GroundArgs(root, link));
+                }
+
+                data.CollisionLast = current;
+                data.LandCollideLast = curLand;
             }
             catch (Exception ex)
             {
                 m_log.WarnFormat("[BotManager]: bot {0} collision delivery to host {1} failed: {2}",
                     data.BotID, host.UUID, ex.Message);
             }
+        }
+
+        // Builds a ColliderArgs of DetectedObjects for the given collider local IDs, resolved against the
+        // bot's scene (prim or avatar). Mirrors SceneObjectPart.CreateColliderArgs/CreateDetObject.
+        private ColliderArgs BuildColliderArgs(Scene scene, List<uint> ids, int linkNum)
+        {
+            List<DetectedObject> dets = new List<DetectedObject>();
+            foreach (uint id in ids)
+            {
+                if (id == 0) continue;
+                SceneObjectPart obj = scene.GetSceneObjectPart(id);
+                if (obj != null)
+                {
+                    dets.Add(new DetectedObject()
+                    {
+                        keyUUID = obj.UUID,
+                        nameStr = obj.Name,
+                        ownerUUID = obj.OwnerID,
+                        posVector = obj.AbsolutePosition,
+                        rotQuat = obj.GetWorldRotation(),
+                        velVector = obj.Velocity,
+                        colliderType = 0,
+                        groupUUID = obj.GroupID,
+                        linkNumber = linkNum
+                    });
+                    continue;
+                }
+                ScenePresence av = scene.GetScenePresence(id);
+                if (av != null && !av.IsChildAgent)
+                {
+                    DetectedObject d = new DetectedObject()
+                    {
+                        keyUUID = av.UUID,
+                        nameStr = av.Name,
+                        ownerUUID = av.UUID,
+                        posVector = av.AbsolutePosition,
+                        rotQuat = av.Rotation,
+                        velVector = av.Velocity,
+                        colliderType = av.IsNPC ? 0x20 : 0x1,
+                        groupUUID = UUID.Zero,
+                        linkNumber = linkNum
+                    };
+                    if (av.IsSatOnObject) d.colliderType |= 0x4;
+                    else if (!d.velVector.IsZero()) d.colliderType |= 0x2;
+                    dets.Add(d);
+                }
+            }
+            return new ColliderArgs() { Colliders = dets };
+        }
+
+        // Builds the single ground DetectedObject for a land_collision event (mirrors CreateDetObjectForGround).
+        private ColliderArgs GroundArgs(SceneObjectPart root, int linkNum)
+        {
+            return new ColliderArgs()
+            {
+                Colliders = new List<DetectedObject>()
+                {
+                    new DetectedObject()
+                    {
+                        keyUUID = UUID.Zero,
+                        nameStr = "",
+                        ownerUUID = UUID.Zero,
+                        posVector = root.AbsolutePosition,
+                        rotQuat = Quaternion.Identity,
+                        velVector = Vector3.Zero,
+                        colliderType = 0,
+                        groupUUID = UUID.Zero,
+                        linkNumber = linkNum
+                    }
+                }
+            };
         }
 
         public BotMovementResult StartFollowingAvatar(UUID botID, UUID targetID,
