@@ -17,6 +17,7 @@ using OpenMetaverse;
 using OpenSim.Framework;
 using OpenSim.Region.Framework.Interfaces;
 using OpenSim.Region.Framework.Scenes;
+using OpenSim.Region.PhysicsModules.SharedBase;
 using OpenSim.Services.Interfaces;
 using System.IO;
 using Microsoft.Data.Sqlite;
@@ -64,6 +65,11 @@ namespace OpenSim.Region.OptionalModules.World.NPC
         public Vector3 CurrentNavTarget;
         public bool NavInFlight;
         public int NavInFlightTicks;
+
+        // Collision-event bridge: the bot's physics actor we subscribed to, and the handler we
+        // attached, so we can detach exactly that subscription on deregister/removal.
+        public PhysicsActor CollisionPhysActor;
+        public PhysicsActor.CollisionUpdate CollisionHandler;
     }
 
     [Extension(Path = "/OpenSim/RegionModules", NodeName = "RegionModule", Id = "BotManager")]
@@ -92,6 +98,12 @@ namespace OpenSim.Region.OptionalModules.World.NPC
         private const double NAV_POLL_INTERVAL_MS = 500.0;
         private const float NAV_ARRIVAL_TOLERANCE = 1.5f;    // metres (horizontal)
         private const int NAV_INFLIGHT_TIMEOUT_TICKS = 120;  // ~60s safety so a stuck bot still reports
+
+        // Collision/land_collision script-event mask — only bridge a bot's collisions to a host whose
+        // scripts actually subscribed to one of these, so we don't do work or emit sounds for nobody.
+        private const scriptEvents COLLISION_EVENT_MASK =
+            scriptEvents.collision_start | scriptEvents.collision | scriptEvents.collision_end |
+            scriptEvents.land_collision_start | scriptEvents.land_collision | scriptEvents.land_collision_end;
 
         /// <summary>
         /// Public accessor for script API to reach persistence manager.
@@ -161,6 +173,7 @@ namespace OpenSim.Region.OptionalModules.World.NPC
                     if (kvp.Value.BotScene == scene)
                     {
                         StopWanderTimer(kvp.Value);
+                        UnsubscribeBotCollision(kvp.Value);
                         m_npcModule?.DeleteNPC(kvp.Key, scene);
                         m_bots.Remove(kvp.Key);
                     }
@@ -382,6 +395,7 @@ namespace OpenSim.Region.OptionalModules.World.NPC
             if (data == null) return;
 
             StopAllMovement(data);
+            UnsubscribeBotCollision(data);
             Scene scene = GetBotScene(data);
             if (scene != null)
                 m_npcModule.DeleteNPC(botID, scene);
@@ -547,6 +561,75 @@ namespace OpenSim.Region.OptionalModules.World.NPC
                     data.NavInFlight = false;
                     m_log.WarnFormat("[BotManager]: nav advance for bot {0} failed: {1}", data.BotID, ex.Message);
                 }
+            }
+
+            // Lazily attach the collision bridge for bots that registered for collision events before
+            // their physics actor existed (e.g. registered in the same event as botCreateBot).
+            List<BotData> needCollisionBridge = null;
+            lock (m_bots)
+            {
+                foreach (BotData d in m_bots.Values)
+                {
+                    if (d.CollisionEventHost != null && d.CollisionHandler == null)
+                        (needCollisionBridge ??= new List<BotData>()).Add(d);
+                }
+            }
+            if (needCollisionBridge != null)
+                foreach (BotData d in needCollisionBridge)
+                    SubscribeBotCollision(d);
+        }
+
+        // NOTE: Bot collisions use a module-contained delivery path (BotManager -> registered host group),
+        // not core's ScenePresence.RaiseCollisionScriptEvents. This is a deliberate, contained choice to avoid
+        // modifying the hot per-frame core collision path and to keep the fix portable to grids (e.g. Tranquillity)
+        // whose bot subsystem differs. Phase tracking (start/continue/end) mirrors the Halcyon reference -- in
+        // fact we reuse core's own SceneObjectPart.PhysicsCollision, which IS that phase machine + DetectParams,
+        // by forwarding the bot's physics collision event into the registered host group's root part.
+        // Revisit/converge if core ever exposes a clean per-group collision-registration hook.
+        private void SubscribeBotCollision(BotData data)
+        {
+            if (data.CollisionHandler != null) return;          // already bridged
+            ScenePresence sp = GetBotSP(data);
+            PhysicsActor pa = sp?.PhysicsActor;
+            if (pa == null) return;                             // bot not physical yet; retried from NavPollTick
+
+            data.CollisionPhysActor = pa;
+            data.CollisionHandler = (ev) => OnBotCollision(data, ev);
+            pa.OnCollisionUpdate += data.CollisionHandler;
+        }
+
+        private void UnsubscribeBotCollision(BotData data)
+        {
+            if (data.CollisionHandler != null && data.CollisionPhysActor != null)
+                data.CollisionPhysActor.OnCollisionUpdate -= data.CollisionHandler;
+            data.CollisionHandler = null;
+            data.CollisionPhysActor = null;
+        }
+
+        // Forwards the bot's physics collision into the registered host group's root part, which runs core's
+        // canonical collision phase machine (collision_start/collision/collision_end + land_collision_*), builds
+        // DetectParams, and respects each script's event mask. Runs on the physics callback thread — the same
+        // context core uses for ScenePresence.PhysicsCollisionUpdate. Mirrors Halcyon's
+        // group.RootPart.PhysicsCollision(e) delivery for avatar collision registrations.
+        private void OnBotCollision(BotData data, EventArgs e)
+        {
+            SceneObjectGroup host = data.CollisionEventHost;   // local copy: deregister may null it concurrently
+            if (host == null || host.IsDeleted) return;
+            SceneObjectPart root = host.RootPart;
+            if (root == null) return;
+
+            // Only forward when a script in the host wants a collision/land_collision event, so an unsubscribed
+            // object neither does work nor emits collision sounds for the bot's hits.
+            if ((root.ScriptEvents & COLLISION_EVENT_MASK) == 0) return;
+
+            try
+            {
+                root.PhysicsCollision(e);
+            }
+            catch (Exception ex)
+            {
+                m_log.WarnFormat("[BotManager]: bot {0} collision delivery to host {1} failed: {2}",
+                    data.BotID, host.UUID, ex.Message);
             }
         }
 
@@ -1052,6 +1135,7 @@ namespace OpenSim.Region.OptionalModules.World.NPC
             BotData data = GetBotWithPermission(botID, ownerID);
             if (data == null) return;
             data.CollisionEventHost = hostGroup;
+            SubscribeBotCollision(data);
         }
 
         public void BotDeregisterFromCollisionEvents(UUID botID, SceneObjectGroup hostGroup, UUID ownerID)
@@ -1059,6 +1143,7 @@ namespace OpenSim.Region.OptionalModules.World.NPC
             BotData data = GetBotWithPermission(botID, ownerID);
             if (data == null) return;
             data.CollisionEventHost = null;
+            UnsubscribeBotCollision(data);
         }
 
         #endregion
