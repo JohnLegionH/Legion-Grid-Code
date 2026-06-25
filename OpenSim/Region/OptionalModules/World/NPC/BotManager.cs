@@ -57,6 +57,13 @@ namespace OpenSim.Region.OptionalModules.World.NPC
         // Event registration
         public UUID PathEventScriptID = UUID.Zero;
         public SceneObjectGroup CollisionEventHost;
+
+        // Navigation arrival tracking (poll-driven). INPCModule.MoveToTarget is
+        // fire-and-forget with no arrival callback, so we record the waypoint a bot
+        // is currently walking to and poll its position to detect arrival.
+        public Vector3 CurrentNavTarget;
+        public bool NavInFlight;
+        public int NavInFlightTicks;
     }
 
     [Extension(Path = "/OpenSim/RegionModules", NodeName = "RegionModule", Id = "BotManager")]
@@ -79,6 +86,13 @@ namespace OpenSim.Region.OptionalModules.World.NPC
         private IConfigSource m_config;
         private BotPersistenceManager m_persistence;
 
+        // Navigation arrival poll — supplies the "arrived" trigger INPCModule lacks, so
+        // waypoints advance and bot_update (BOT_MOVE_COMPLETE) fires when a path finishes.
+        private System.Timers.Timer m_navPollTimer;
+        private const double NAV_POLL_INTERVAL_MS = 500.0;
+        private const float NAV_ARRIVAL_TOLERANCE = 1.5f;    // metres (horizontal)
+        private const int NAV_INFLIGHT_TIMEOUT_TICKS = 120;  // ~60s safety so a stuck bot still reports
+
         /// <summary>
         /// Public accessor for script API to reach persistence manager.
         /// </summary>
@@ -95,6 +109,13 @@ namespace OpenSim.Region.OptionalModules.World.NPC
             // BotManager is enabled if NPC module is enabled
             IConfig config = source.Configs["NPC"];
             m_enabled = config != null && config.GetBoolean("Enabled", true);
+
+            if (m_enabled)
+            {
+                m_navPollTimer = new System.Timers.Timer(NAV_POLL_INTERVAL_MS) { AutoReset = true };
+                m_navPollTimer.Elapsed += NavPollTick;
+                m_navPollTimer.Start();
+            }
         }
 
         public void AddRegion(Scene scene)
@@ -150,7 +171,15 @@ namespace OpenSim.Region.OptionalModules.World.NPC
         }
 
         public void PostInitialise() { }
-        public void Close() { }
+        public void Close()
+        {
+            if (m_navPollTimer != null)
+            {
+                m_navPollTimer.Stop();
+                m_navPollTimer.Dispose();
+                m_navPollTimer = null;
+            }
+        }
 
         #endregion
 
@@ -235,6 +264,7 @@ namespace OpenSim.Region.OptionalModules.World.NPC
             data.FollowTarget = UUID.Zero;
             data.NavPoints = null;
             data.NavIndex = 0;
+            data.NavInFlight = false;
             StopWanderTimer(data);
             Scene scene = GetBotScene(data);
             if (scene != null)
@@ -458,7 +488,59 @@ namespace OpenSim.Region.OptionalModules.World.NPC
             else
             {
                 m_npcModule.MoveToTarget(data.BotID, scene, target, noFly, true, running);
+                data.CurrentNavTarget = target;
+                data.NavInFlight = true;
+                data.NavInFlightTicks = 0;
                 data.NavIndex++;
+            }
+        }
+
+        // Polls bots that are walking to a waypoint. INPCModule gives no arrival callback,
+        // so when a bot gets within NAV_ARRIVAL_TOLERANCE (horizontal) of its current target
+        // we advance to the next waypoint via MoveToNextNavPoint — which fires bot_update
+        // (BOT_MOVE_COMPLETE) once the list is exhausted. A timeout reports BOT_MOVE_FAILED
+        // so a stuck bot still notifies the script rather than hanging silently.
+        private void NavPollTick(object sender, System.Timers.ElapsedEventArgs e)
+        {
+            List<BotData> inFlight;
+            lock (m_bots)
+            {
+                inFlight = new List<BotData>();
+                foreach (BotData d in m_bots.Values)
+                    if (d.NavInFlight) inFlight.Add(d);
+            }
+
+            foreach (BotData data in inFlight)
+            {
+                if (data.MovementPaused) continue;
+
+                ScenePresence sp = GetBotSP(data);
+                if (sp == null) { data.NavInFlight = false; continue; }
+
+                float dx = sp.AbsolutePosition.X - data.CurrentNavTarget.X;
+                float dy = sp.AbsolutePosition.Y - data.CurrentNavTarget.Y;
+                bool arrived = (dx * dx + dy * dy) <= NAV_ARRIVAL_TOLERANCE * NAV_ARRIVAL_TOLERANCE;
+                bool timedOut = ++data.NavInFlightTicks >= NAV_INFLIGHT_TIMEOUT_TICKS;
+
+                try
+                {
+                    if (arrived)
+                    {
+                        data.NavInFlight = false;
+                        MoveToNextNavPoint(data);
+                    }
+                    else if (timedOut)
+                    {
+                        data.NavInFlight = false;
+                        data.NavPoints = null;
+                        FirePathEvent(data, 3 /*BOT_MOVE_FAILED*/, data.CurrentNavTarget);
+                    }
+                }
+                catch (Exception ex)
+                {
+                    data.NavInFlight = false;
+                    m_log.WarnFormat("[BotManager]: nav advance for bot {0} failed: {1}", data.BotID, ex.Message);
+                }
             }
         }
 
