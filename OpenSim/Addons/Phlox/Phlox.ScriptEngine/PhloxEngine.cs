@@ -65,6 +65,26 @@ namespace Phlox.ScriptEngine
             }
             m_Enabled = m_Config.GetBoolean("Enabled", false);
             m_log.InfoFormat("[PhloxEngine]: Enabled = {0}", m_Enabled);
+
+            // SLua Tier-1 back-half proof: offline self-test invokable from the region console
+            // ("phlox sluaproof"). Registered once (static guard) across regions. Additive; it
+            // touches no scene/world state and is unrelated to normal script execution.
+            if (!s_sluaProofCmdRegistered && MainConsole.Instance != null)
+            {
+                s_sluaProofCmdRegistered = true;
+                MainConsole.Instance.Commands.AddCommand(
+                    "Phlox", false, "phlox sluaproof",
+                    "phlox sluaproof",
+                    "Run the SLua Tier-1 back-half proof (assemble non-LSL bytecode, run, serialize, resume).",
+                    HandleSluaProofCommand);
+            }
+        }
+
+        private static bool s_sluaProofCmdRegistered = false;
+
+        private void HandleSluaProofCommand(string module, string[] cmdparams)
+        {
+            MainConsole.Instance.Output(SluaBackHalfProof.Run());
         }
 
         public void AddRegion(Scene scene)

@@ -242,6 +242,46 @@ namespace InWorldz.Phlox.Glue
 
             return null;
         }
+
+        /// <summary>
+        /// Assemble Phlox assembly text directly into a CompiledScript, reusing the existing,
+        /// tested assembler stage (AssemblerParser + BytecodeGenerator) that Compile() runs after
+        /// GenVisitor. Exposed so a non-LSL front-end (e.g. a future SLua/Luau front-end) — and the
+        /// SLua Tier-1 back-half proof — can produce a CompiledScript from assembly text with no new
+        /// assembly logic. Additive: does not alter the LSL Compile() path.
+        /// </summary>
+        public VM.CompiledScript AssembleText(string bytecodeText)
+        {
+            if (string.IsNullOrEmpty(bytecodeText)) return null;
+
+            AntlrInputStream asmInput = new AntlrInputStream(bytecodeText);
+            AssemblerLexer asmLexer = new AssemblerLexer(asmInput);
+            CommonTokenStream asmTokens = new CommonTokenStream(asmLexer);
+            AssemblerParser asmParser = new AssemblerParser(asmTokens);
+
+            LslErrorListener asmErrorListener = new LslErrorListener(_listener);
+            asmParser.RemoveErrorListeners();
+            asmParser.AddErrorListener(asmErrorListener);
+
+            BytecodeGenerator bcgen = new BytecodeGenerator(Defaults.SystemMethods.Values);
+            asmParser.SetGenerator(bcgen);
+
+            try
+            {
+                asmParser.program();
+                if (asmErrorListener.ErrorCount > 0)
+                {
+                    _listener.Error(asmErrorListener.ErrorCount + " bytecode generation error(s)");
+                    return null;
+                }
+                return bcgen.Result;
+            }
+            catch (GenerationException e)
+            {
+                _listener.Error(e.Message);
+            }
+            return null;
+        }
     }
 
     /// <summary>
