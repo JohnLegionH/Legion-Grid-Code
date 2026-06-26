@@ -282,6 +282,22 @@ namespace InWorldz.Phlox.Glue
             }
             return null;
         }
+
+        /// <summary>
+        /// Compile an SLua (Luau-dialect) script through the parallel SLua Tier-1 front-end into a
+        /// CompiledScript: SLua source -> Phlox assembly text -> existing assembler (AssembleText).
+        /// Additive; the LSL Compile() path is untouched. Returns null on error (reported to the
+        /// listener). Route to this via PhloxScriptLoader when SLuaCompiler.IsLuaScript() is true.
+        /// </summary>
+        public VM.CompiledScript CompileLua(string input)
+        {
+            string asm = InWorldz.Phlox.SLua.SLuaCompiler.CompileToAssembly(input, _listener);
+            if (string.IsNullOrEmpty(asm))
+                return null;
+            if (_byteCodeDebugging)
+                _byteCode = asm;
+            return AssembleText(asm);
+        }
     }
 
     /// <summary>

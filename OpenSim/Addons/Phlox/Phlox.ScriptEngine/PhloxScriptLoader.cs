@@ -346,7 +346,9 @@ namespace Phlox.ScriptEngine
             try
             {
                 m_CompileTimer.Restart();
-                CompiledScript compiled = frontend.Compile(req.ScriptText);
+                CompiledScript compiled = InWorldz.Phlox.SLua.SLuaCompiler.IsLuaScript(req.ScriptText)
+                    ? frontend.CompileLua(req.ScriptText)
+                    : frontend.Compile(req.ScriptText);
                 m_CompileTimer.Stop();
 
                 if (compiled == null)
@@ -385,7 +387,9 @@ namespace Phlox.ScriptEngine
             try
             {
                 m_CompileTimer.Restart();
-                CompiledScript compiled = frontend.Compile(pending.ScriptText);
+                CompiledScript compiled = InWorldz.Phlox.SLua.SLuaCompiler.IsLuaScript(pending.ScriptText)
+                    ? frontend.CompileLua(pending.ScriptText)
+                    : frontend.Compile(pending.ScriptText);
                 m_CompileTimer.Stop();
 
                 if (compiled == null)

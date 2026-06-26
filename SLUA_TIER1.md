@@ -131,3 +131,70 @@ RESULT: PASS -- non-LSL bytecode ran on the existing VM and survived
 **Headline answer: YES.** Non-LSL-originated bytecode (1) **runs on the existing VM** and (2) **round-trips through the existing `RuntimeState` serialization** — the full mid-execution state (IP + operand stack + globals + call frame) serialized, deserialized, and resumed on a fresh interpreter to the identical correct final value, using `SerializedRuntimeState.FromRuntimeState`/`ToRuntimeState` + protobuf **exactly as-is**. **Zero new serialization code was required** — the "STOP and report" condition (any new serialization code needed) was **not** triggered.
 
 **What this settles:** SL's hard SLua subsystem ("Ares" — serializing Luau coroutine execution state across region crossings) is **already solved on Phlox by construction**, now confirmed empirically. The serializer operates on the VM's `RuntimeState`, not on source-language semantics, so it is front-end-agnostic. The remaining SLua work is purely the **front-end** (§4 blueprint steps 1+3: detect/route + the Luau lexer/parser/codegen), with the back-half now proven beneath it.
+
+---
+
+## 9. TIER-1 FRONT-END — BUILT ✅ (real SLua source runs on Phlox)
+The front-end is built and a real SLua script compiles, runs, and produces its `ll.Say` output. Targets SL's source-verified surface (see `SLUA_SURFACE.md`).
+
+**Toolchain choice:** a **hand-written lexer + recursive-descent parser + direct assembly-text codegen** — NOT a full Luau ANTLR grammar. Tier-1's subset is tiny; a hand-written front-end is ~700 lines in one file and avoids a second ANTLR pipeline. De-risk move: dumped the **LSL compiler's own assembly text** (via `CompilerFrontend(..., byteCodeDebugging:true)` + `GeneratedByteCode`) for the LSL-equivalent script, and mirrored that exact format — no guessing of mnemonics/casts.
+
+**What was built (additive only, branch `slua-tier1`):**
+1. **`InWorldz.Phlox/SLua/SLuaCompiler.cs`** (new) — `SLuaLexer` + `SLuaParser` + AST + `SLuaCodeGen`, plus `SLuaCompiler.CompileToAssembly(src, listener)` and `SLuaCompiler.IsLuaScript(src)`. Maps `ll.Name`→`ll`+Name→`Defaults.SystemMethods` TableIndex; `number`→Phlox Float with `icast`/`fcast` coercion to each function's declared param type (pulled from `FunctionSig.ParamTypes`); event-named global functions → `.evt`; top-level code → synthesized `state_entry`.
+2. **`CompilerFrontend.CompileLua(string)`** (`Glue/CompilerFrontend.cs`) — SLua source → assembly text → existing `AssembleText`. **LSL `Compile()` untouched.**
+3. **Routing** (`Phlox.ScriptEngine/PhloxScriptLoader.cs`, 2 sites) — `IsLuaScript(text) ? CompileLua : Compile`. LSL path unchanged.
+
+**Pinned script compiled to this assembly (verbatim):**
+```
+.globals 1
+.statedef default
+
+fconst 0.0
+gstore 0
+halt
+
+.evt default/state_entry: args=0, locals=0
+fconst 0.0
+icast
+sconst "ready"
+syscall llSay()
+ret
+
+.evt default/touch_start: args=1, locals=0
+gload 0
+fconst 1.0
+fadd
+gstore 0
+gload 0
+fconst 10.0
+flt
+brf sl_else_0
+fconst 0.0
+icast
+sconst "touched"
+syscall llSay()
+sl_else_0:
+ret
+```
+
+**Run result (offline, recording shim observes `ll.*`):**
+```
+LSL IsLuaScript: False (expect False)   |  LSL Compile(): OK   <- existing LSL unaffected
+IsLuaScript: True  ->  assembled OK (NumGlobals=1)
+after rez (state_entry): [llSay(0, ready)]
+12x touch_start -> llSay(0, touched) x9   (count<10 gate; global state persists)
+ready=1, touched=9  ->  RESULT: PASS
+```
+
+**Answers to the build's questions:**
+- Pinned script compiled → assembled → ran, with **both** `ll.Say` outputs correct (`ready` on rez, `touched` on touch up to count<10). **YES.**
+- **LSL/existing scripts unaffected:** `IsLuaScript`=False for LSL; `Compile()` still OK. The Luau path is fully parallel.
+- **First-run confirmations (from `SLUA_SURFACE.md` §3/§7):** top-level code **does** fire as the `state_entry`-equivalent on rez (synthesized handler) ✓; the global `touch_start` **dispatches correctly** via the existing event machinery ✓.
+- **No VM/opcode change** was needed — `number`/`integer` coercion used the existing `icast`/`fcast`; the "STOP if VM change needed" condition was **not** triggered.
+
+**Friction / Tier-2 signal:**
+- *Easier than expected:* dumping the LSL compiler's own assembly text made codegen a mirroring exercise, not a guess. The `number`=Float decision + per-call coercion from `FunctionSig.ParamTypes` was clean.
+- *Tier-2 cost drivers (unchanged from recon):* dynamic/boxed typing (Tier-1 fixed everything to Float; real Luau needs runtime types), tables, closures/upvalues (Tier-1 lowers top-level `local`s to globals), the `LLEvents:on`/`DetectedEvent` object model, and string concat `..`. None block Tier-1; all are additive front-end (+ possibly boxed-value VM support for full dynamic typing).
+- **Repo-convention caveat (IMPORTANT):** `*.csproj` is gitignored, so the required `<Compile Include="SLua\SLuaCompiler.cs">` added to `InWorldz.Phlox.csproj` is **NOT tracked**. On a fresh checkout the file exists but won't compile until that include is re-added. Same applies to the `PhloxScriptLoader`/`PhloxEngine` csproj entries (already present locally).
+
+**Verdict: YES — real SLua source now runs on Phlox.** A trivial-subset `.lua` script compiles through the new front-end, assembles via the proven back-half, runs on the existing VM with the existing 674-fn table + 41-event dispatch, and (per §8) any mid-execution state it reaches serializes/round-trips with zero new serialization code. Tier-2 (dynamic typing, tables, closures, full stdlib) is the next scope.
