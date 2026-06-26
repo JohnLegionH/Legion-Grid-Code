@@ -73,7 +73,10 @@ namespace OpenSim.Region.OptionalModules.World.NPC
 
         // Per-bot collision phase state so the module-contained delivery reproduces core's
         // collision_start-once / collision-repeating / collision_end-once (and the land equivalents).
-        public HashSet<uint> CollisionLast = new HashSet<uint>();
+        // Maps each current collider's localID -> UUID, remembered while the collider is still
+        // resolvable, so a collider that is DELETED while in contact can still be reported in
+        // collision_end via its remembered UUID (mirrors Halcyon TryExtractCollider's fallback).
+        public Dictionary<uint, UUID> CollisionLast = new Dictionary<uint, UUID>();
         public bool LandCollideLast;
     }
 
@@ -593,6 +596,9 @@ namespace OpenSim.Region.OptionalModules.World.NPC
         // its collision scratch buffers are only allocated for parts that subscribe to their OWN physics
         // collisions, so a phantom host (as the InWorldz bot-collision example requires) has none and calling
         // it would NPE. We deliver through the public EventManager.TriggerScriptColliding* triggers instead.
+        // Each collider's UUID is remembered while resolvable (CollisionLast: localID->UUID) so a collider
+        // DELETED mid-contact still fires collision_end via its remembered UUID (Halcyon TryExtractCollider
+        // parity) rather than being dropped as modern core does.
         // Revisit/converge if core ever exposes a clean per-group collision-registration hook.
         private void SubscribeBotCollision(BotData data)
         {
@@ -640,8 +646,13 @@ namespace OpenSim.Region.OptionalModules.World.NPC
                 ScenePresence botSp = GetBotSP(data);
                 if (botSp != null) self = botSp.LocalId;
 
+                Dictionary<uint, UUID> last = data.CollisionLast;
+
+                // Build the current colliding set as localID -> UUID. Remember the UUID now (while the
+                // collider still resolves) so a delete-while-colliding can still be reported in
+                // collision_end. Reuse an already-remembered UUID for continuing colliders.
                 var coldata = cu.m_objCollisionList;
-                HashSet<uint> current = new HashSet<uint>();
+                Dictionary<uint, UUID> current = new Dictionary<uint, UUID>();
                 bool curLand = false;
                 if (coldata != null)
                 {
@@ -649,41 +660,46 @@ namespace OpenSim.Region.OptionalModules.World.NPC
                     {
                         if (id == 0) { curLand = true; continue; }
                         if (id == self) continue;
-                        current.Add(id);
+                        if (current.ContainsKey(id)) continue;
+                        UUID u;
+                        if (!last.TryGetValue(id, out u) || u == UUID.Zero)
+                            u = ResolveColliderUuid(scene, id);
+                        current[id] = u;
                     }
                 }
 
-                HashSet<uint> last = data.CollisionLast;
                 EventManager em = scene.EventManager;
                 int link = root.LinkNum;
 
                 if ((ev & scriptEvents.collision_start) != 0)
                 {
                     List<uint> started = new List<uint>();
-                    foreach (uint id in current) if (!last.Contains(id)) started.Add(id);
+                    foreach (uint id in current.Keys) if (!last.ContainsKey(id)) started.Add(id);
                     if (started.Count > 0)
                     {
-                        ColliderArgs a = BuildColliderArgs(scene, started, link);
+                        ColliderArgs a = BuildColliderArgs(scene, started, current, link);
                         if (a.Colliders.Count > 0) em.TriggerScriptCollidingStart(root.LocalId, a);
                     }
                 }
                 if ((ev & scriptEvents.collision_end) != 0)
                 {
                     List<uint> ended = new List<uint>();
-                    foreach (uint id in last) if (!current.Contains(id)) ended.Add(id);
+                    foreach (uint id in last.Keys) if (!current.ContainsKey(id)) ended.Add(id);
                     if (ended.Count > 0)
                     {
-                        ColliderArgs a = BuildColliderArgs(scene, ended, link);
+                        // Pass `last` as the UUID map: a separated-but-alive collider resolves fully,
+                        // a DELETED one falls back to its remembered UUID so collision_end still fires.
+                        ColliderArgs a = BuildColliderArgs(scene, ended, last, link);
                         if (a.Colliders.Count > 0) em.TriggerScriptCollidingEnd(root.LocalId, a);
                     }
                 }
                 if ((ev & scriptEvents.collision) != 0)
                 {
                     List<uint> cont = new List<uint>();
-                    foreach (uint id in current) if (last.Contains(id)) cont.Add(id);
+                    foreach (uint id in current.Keys) if (last.ContainsKey(id)) cont.Add(id);
                     if (cont.Count > 0)
                     {
-                        ColliderArgs a = BuildColliderArgs(scene, cont, link);
+                        ColliderArgs a = BuildColliderArgs(scene, cont, current, link);
                         if (a.Colliders.Count > 0) em.TriggerScriptColliding(root.LocalId, a);
                     }
                 }
@@ -711,8 +727,10 @@ namespace OpenSim.Region.OptionalModules.World.NPC
         }
 
         // Builds a ColliderArgs of DetectedObjects for the given collider local IDs, resolved against the
-        // bot's scene (prim or avatar). Mirrors SceneObjectPart.CreateColliderArgs/CreateDetObject.
-        private ColliderArgs BuildColliderArgs(Scene scene, List<uint> ids, int linkNum)
+        // bot's scene (prim or avatar). Mirrors SceneObjectPart.CreateColliderArgs/CreateDetObject. For a
+        // collider that no longer resolves (deleted while colliding), falls back to a DetectedObject carrying
+        // the remembered UUID from uuidMap so collision_end still fires — mirrors Halcyon TryExtractCollider.
+        private ColliderArgs BuildColliderArgs(Scene scene, List<uint> ids, Dictionary<uint, UUID> uuidMap, int linkNum)
         {
             List<DetectedObject> dets = new List<DetectedObject>();
             foreach (uint id in ids)
@@ -747,15 +765,46 @@ namespace OpenSim.Region.OptionalModules.World.NPC
                         rotQuat = av.Rotation,
                         velVector = av.Velocity,
                         colliderType = av.IsNPC ? 0x20 : 0x1,
-                        groupUUID = UUID.Zero,
+                        groupUUID = av.ControllingClient != null ? av.ControllingClient.ActiveGroupId : UUID.Zero,
                         linkNumber = linkNum
                     };
                     if (av.IsSatOnObject) d.colliderType |= 0x4;
                     else if (!d.velVector.IsZero()) d.colliderType |= 0x2;
                     dets.Add(d);
+                    continue;
+                }
+
+                // Unresolvable (e.g. deleted while colliding): fall back to the remembered UUID so the
+                // collision_end still fires with a valid llDetectedKey, as Halcyon's TryExtractCollider does.
+                UUID remembered;
+                if (uuidMap != null && uuidMap.TryGetValue(id, out remembered) && remembered != UUID.Zero)
+                {
+                    dets.Add(new DetectedObject()
+                    {
+                        keyUUID = remembered,
+                        nameStr = string.Empty,
+                        ownerUUID = UUID.Zero,
+                        posVector = Vector3.Zero,
+                        rotQuat = Quaternion.Identity,
+                        velVector = Vector3.Zero,
+                        colliderType = 0,
+                        groupUUID = UUID.Zero,
+                        linkNumber = linkNum
+                    });
                 }
             }
             return new ColliderArgs() { Colliders = dets };
+        }
+
+        // Resolves a collider local ID to its UUID while it still exists, so it can be remembered for a
+        // later collision_end if the object is deleted mid-contact. Returns UUID.Zero if unresolvable.
+        private UUID ResolveColliderUuid(Scene scene, uint localId)
+        {
+            SceneObjectPart obj = scene.GetSceneObjectPart(localId);
+            if (obj != null) return obj.UUID;
+            ScenePresence av = scene.GetScenePresence(localId);
+            if (av != null) return av.UUID;
+            return UUID.Zero;
         }
 
         // Builds the single ground DetectedObject for a land_collision event (mirrors CreateDetObjectForGround).
