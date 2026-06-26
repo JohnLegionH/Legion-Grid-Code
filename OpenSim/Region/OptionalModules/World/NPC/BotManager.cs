@@ -634,6 +634,12 @@ namespace OpenSim.Region.OptionalModules.World.NPC
 
             try
             {
+                // Exclude the bot's own local ID: a character's physics collision list can include
+                // itself, and a bot must never report colliding with itself.
+                uint self = 0;
+                ScenePresence botSp = GetBotSP(data);
+                if (botSp != null) self = botSp.LocalId;
+
                 var coldata = cu.m_objCollisionList;
                 HashSet<uint> current = new HashSet<uint>();
                 bool curLand = false;
@@ -641,8 +647,9 @@ namespace OpenSim.Region.OptionalModules.World.NPC
                 {
                     foreach (uint id in coldata.Keys)
                     {
-                        if (id == 0) curLand = true;
-                        else current.Add(id);
+                        if (id == 0) { curLand = true; continue; }
+                        if (id == self) continue;
+                        current.Add(id);
                     }
                 }
 
