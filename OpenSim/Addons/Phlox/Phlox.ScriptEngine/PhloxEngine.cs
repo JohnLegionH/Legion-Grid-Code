@@ -679,7 +679,19 @@ namespace Phlox.ScriptEngine
         {
             var parms = new EventParams("linkset_data",
                 new object[] { action, name.ToString(), value.ToString() }, null);
-            return PostObjectEvent(localID, parms);
+
+            // SL fires linkset_data in EVERY script in the linkset, not only the prim that changed
+            // the store. Fan out to all parts of the group (each PostObjectEvent dispatches to that
+            // part's scripts). Fall back to the single part if the group can't be resolved.
+            SceneObjectPart part = World?.GetSceneObjectPart(localID);
+            SceneObjectGroup group = part?.ParentGroup;
+            if (group == null)
+                return PostObjectEvent(localID, parms);
+
+            bool any = false;
+            foreach (SceneObjectPart p in group.Parts)
+                any |= PostObjectEvent(p.LocalId, parms);
+            return any;
         }
 
         public System.Collections.ArrayList GetScriptErrors(UUID itemID) => new System.Collections.ArrayList();
