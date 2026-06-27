@@ -259,6 +259,7 @@ namespace InWorldz.Phlox.SLua
     internal sealed class UserCall : Expr { public string Name; public List<Expr> Args; }                  // user function call
     internal sealed class FuncExpr : Expr { public List<string> Params; public List<Stmt> Body; }          // anonymous function
     internal sealed class MethodCall : Expr { public Expr Target; public string Method; public List<Expr> Args; } // obj:method(args)
+    internal sealed class MetaCall : Expr { public string Name; public List<Expr> Args; }                   // setmetatable/getmetatable
 
     internal abstract class Stmt : Node { }
     internal sealed class LocalDecl : Stmt { public string Name; public Expr Init; }
@@ -701,6 +702,13 @@ namespace InWorldz.Phlox.SLua
                     ExpectOp(")");
                     return new Builtin { Name = t.Text, Arg = arg, Line = t.Line };
                 }
+                if ((t.Text == "setmetatable" || t.Text == "getmetatable")
+                    && Next.Type == TT.Op && Next.Text == "(")
+                {
+                    Eat();                  // builtin name
+                    var margs = ParseCallArgs();
+                    return ParsePostfix(new MetaCall { Name = t.Text, Args = margs, Line = t.Line });
+                }
                 Eat();
                 if (IsOp("("))   // user function call: name(args)
                     return new UserCall { Name = t.Text, Args = ParseCallArgs(), Line = t.Line };
@@ -1019,6 +1027,7 @@ namespace InWorldz.Phlox.SLua
                 case TableLit tl: foreach (var f in tl.Fields) { if (f.Key != null) ScanExprForNested(f.Key, names); ScanExprForNested(f.Value, names); } break;
                 case Builtin bi: ScanExprForNested(bi.Arg, names); break;
                 case MethodCall mc: ScanExprForNested(mc.Target, names); foreach (var a in mc.Args) ScanExprForNested(a, names); break;
+                case MetaCall mtc: foreach (var a in mtc.Args) ScanExprForNested(a, names); break;
             }
         }
         private static void AllNamesList(List<Stmt> body, HashSet<string> names) { foreach (var s in body) AllNamesStmt(s, names); }
@@ -1058,6 +1067,7 @@ namespace InWorldz.Phlox.SLua
                 case Builtin bi: AllNamesExpr(bi.Arg, names); break;
                 case FuncExpr fe: AllNamesList(fe.Body, names); break;
                 case MethodCall mc: AllNamesExpr(mc.Target, names); foreach (var a in mc.Args) AllNamesExpr(a, names); break;
+                case MetaCall mtc: foreach (var a in mtc.Args) AllNamesExpr(a, names); break;
             }
         }
 
@@ -1101,6 +1111,7 @@ namespace InWorldz.Phlox.SLua
                 case Len ln: LLEExpr(ln.E, evs); break;
                 case TableLit tl: foreach (var f in tl.Fields) { if (f.Key != null) LLEExpr(f.Key, evs); LLEExpr(f.Value, evs); } break;
                 case Builtin bi: LLEExpr(bi.Arg, evs); break;
+                case MetaCall mtc: foreach (var a in mtc.Args) LLEExpr(a, evs); break;
             }
         }
 
@@ -1690,15 +1701,16 @@ namespace InWorldz.Phlox.SLua
                 case Unary u:
                 {
                     if (u.Op == "not") { EmitExpr(u.E); Line("lnot"); return Dynamic; }
-                    VarType t = EmitExpr(u.E);
-                    Coerce(t, VarType.Float, u.Line);
-                    Line("fneg");
-                    return VarType.Float;
+                    EmitExpr(u.E);
+                    Line("luaunm");                  // __unm if table, else numeric negate
+                    return Dynamic;
                 }
                 case Builtin bi:
                     EmitExpr(bi.Arg);
                     Line(bi.Name == "type" ? "luatype" : bi.Name == "tostring" ? "luatostr" : "luatonum");
                     return bi.Name == "tonumber" ? Dynamic : VarType.String;
+                case MetaCall mc:
+                    return EmitMetaCall(mc);
                 case Binary bin:
                     return EmitBinary(bin);
                 case LlCall c:
@@ -1779,6 +1791,25 @@ namespace InWorldz.Phlox.SLua
             return Dynamic;
         }
 
+        // setmetatable(t, mt) -> t ; getmetatable(t) -> mt|nil
+        private VarType EmitMetaCall(MetaCall mc)
+        {
+            if (mc.Name == "setmetatable")
+            {
+                if (mc.Args.Count != 2) throw new SLuaException("setmetatable expects (table, metatable)", mc.Line);
+                EmitExpr(mc.Args[0]);
+                EmitExpr(mc.Args[1]);
+                Line("setmeta");
+            }
+            else // getmetatable
+            {
+                if (mc.Args.Count != 1) throw new SLuaException("getmetatable expects (table)", mc.Line);
+                EmitExpr(mc.Args[0]);
+                Line("getmeta");
+            }
+            return Dynamic;
+        }
+
         private VarType EmitBinary(Binary bin)
         {
             // short-circuit logical operators return a value (not necessarily boolean)
@@ -1814,20 +1845,22 @@ namespace InWorldz.Phlox.SLua
                 return Dynamic;
             }
 
-            // arithmetic + relational: operands coerced to number by the VM ops at consumption
+            // arithmetic + relational: 'luabinop <sel>' dispatches a table-operand metamethod
+            // (__add..__le, gt/ge swap to __lt/__le) and otherwise does the numeric op. Relational
+            // selectors (>=5) already yield a boolean, so no separate 'tobool' is needed.
             EmitExpr(bin.L);
             EmitExpr(bin.R);
             switch (bin.Op)
             {
-                case "+": Line("fadd"); return VarType.Float;
-                case "-": Line("fsub"); return VarType.Float;
-                case "*": Line("fmul"); return VarType.Float;
-                case "/": Line("fdiv"); return VarType.Float;
-                case "%": Line("fmod"); return VarType.Float;
-                case "<": Line("flt"); Line("tobool"); return Dynamic;
-                case ">": Line("fgt"); Line("tobool"); return Dynamic;
-                case "<=": Line("flte"); Line("tobool"); return Dynamic;
-                case ">=": Line("fgte"); Line("tobool"); return Dynamic;
+                case "+": Line("luabinop 0"); return Dynamic;
+                case "-": Line("luabinop 1"); return Dynamic;
+                case "*": Line("luabinop 2"); return Dynamic;
+                case "/": Line("luabinop 3"); return Dynamic;
+                case "%": Line("luabinop 4"); return Dynamic;
+                case "<": Line("luabinop 5"); return Dynamic;
+                case "<=": Line("luabinop 6"); return Dynamic;
+                case ">": Line("luabinop 7"); return Dynamic;
+                case ">=": Line("luabinop 8"); return Dynamic;
                 default: throw new SLuaException("unsupported operator '" + bin.Op + "'", bin.Line);
             }
         }

@@ -185,7 +185,13 @@ namespace InWorldz.Phlox.Types
         // ---- SLua Tier-2: LLEvents:on / DetectedEvent ----
         regevent,        // pop fn, eventName, registry-table: append fn to registry[eventName] list
         methcall,        // operands methodNameConst, argc: pop argc args + receiver, dispatch method
-        firellevents     // operands eventNameConst, argc: pop argc evt-args + registry, invoke handlers
+        firellevents,    // operands eventNameConst, argc: pop argc evt-args + registry, invoke handlers
+
+        // ---- SLua Tier-2: metatables ----
+        luabinop,        // operand sel: pop b,a; metamethod (__add..__le) if a/b is a table, else numeric
+        luaunm,          // pop a; __unm if table, else numeric negate
+        setmeta,         // pop mt, t; t.Metatable = mt; push t
+        getmeta          // pop t; push t.Metatable (or nil)
     }
 
 

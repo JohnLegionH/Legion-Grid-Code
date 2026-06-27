@@ -1567,7 +1567,7 @@ namespace InWorldz.Phlox.VM
             if (!(t is LSLTable table))
                 throw new CheckException("attempt to index a non-table value");
 
-            object v = table.Get(key);
+            object v = MetaTableGet(table, key);          // __index fallback (table/function), else raw
             SafeOperandsPush(v ?? (object)LuaNil.Instance); // missing key -> nil
         }
 
@@ -1579,7 +1579,7 @@ namespace InWorldz.Phlox.VM
             if (!(t is LSLTable table))
                 throw new CheckException("attempt to index a non-table value");
 
-            table.Set(key, IsNilValue(value) ? null : value); // nil value removes the key (Lua)
+            MetaTableSet(table, key, IsNilValue(value) ? null : value); // __newindex on absent key, else raw
         }
 
         private void Op_TabLen()
@@ -1588,6 +1588,8 @@ namespace InWorldz.Phlox.VM
             if (!(t is LSLTable table))
                 throw new CheckException("attempt to get length of a non-table value");
 
+            object lh = MetaRaw(table, "__len");
+            if (lh is LuaClosure cl) { SafeOperandsPush(InvokeClosureSync(cl, new object[] { table }) ?? (object)LuaNil.Instance); return; }
             SafeOperandsPush(table.Length);
         }
 
@@ -1651,6 +1653,12 @@ namespace InWorldz.Phlox.VM
         {
             object b = _state.Operands.Pop();
             object a = _state.Operands.Pop();
+            // __eq fires only when both are distinct tables (Lua semantics); otherwise raw equality.
+            if (a is LSLTable && b is LSLTable && !ReferenceEquals(a, b))
+            {
+                object h = MetaRaw(a, "__eq") ?? MetaRaw(b, "__eq");
+                if (h is LuaClosure cl) { SafeOperandsPush(LuaIsTruthy(InvokeClosureSync(cl, new object[] { a, b }))); return; }
+            }
             SafeOperandsPush(LuaEquals(a, b));          // boxed bool
         }
 
@@ -1670,6 +1678,11 @@ namespace InWorldz.Phlox.VM
         {
             object b = _state.Operands.Pop();
             object a = _state.Operands.Pop();
+            if (a is LSLTable || b is LSLTable)
+            {
+                object h = MetaRaw(a, "__concat") ?? MetaRaw(b, "__concat");
+                if (h is LuaClosure cl) { SafeOperandsPush(InvokeClosureSync(cl, new object[] { a, b }) ?? (object)LuaNil.Instance); return; }
+            }
             SafeOperandsPush(ConcatStr(a) + ConcatStr(b));
         }
 
@@ -1699,7 +1712,15 @@ namespace InWorldz.Phlox.VM
 
         private void Op_LuaToStr()
         {
-            SafeOperandsPush(LuaToString(_state.Operands.Pop()));
+            object v = _state.Operands.Pop();
+            object h = MetaRaw(v, "__tostring");
+            if (h is LuaClosure cl)
+            {
+                object r = InvokeClosureSync(cl, new object[] { v });
+                SafeOperandsPush(r is string s ? s : LuaToString(r));
+                return;
+            }
+            SafeOperandsPush(LuaToString(v));
         }
 
         private static string LuaToString(object v)
@@ -1866,7 +1887,20 @@ namespace InWorldz.Phlox.VM
             for (int i = argc - 1; i >= 0; --i) argv[i] = _state.Operands.Pop();
             object cv = _state.Operands.Pop();
             if (!(cv is LuaClosure cl))
+            {
+                // __call: a table value is callable if its metatable has __call(self, ...).
+                object h = MetaRaw(cv, "__call");
+                if (h is LuaClosure ccl)
+                {
+                    object[] cargs = new object[argc + 1];
+                    cargs[0] = cv;
+                    for (int i = 0; i < argc; i++) cargs[i + 1] = argv[i];
+                    object cr = InvokeClosureSync(ccl, cargs);
+                    if (wanted != 0) SafeOperandsPush(cr ?? (object)LuaNil.Instance);
+                    return;
+                }
                 throw new CheckException("attempt to call a non-function value");
+            }
 
             FunctionInfo fi = cl.Fn;
             StackFrame f = new StackFrame(fi, _state.IP);
@@ -1970,7 +2004,8 @@ namespace InWorldz.Phlox.VM
             }
             if (recv is LSLTable tbl)
             {
-                if (!(tbl.Get(method) is LuaClosure cl))
+                // Method lookup honors __index, so class methods (OOP) resolve through the metatable.
+                if (!(MetaTableGet(tbl, method) is LuaClosure cl))
                     throw new CheckException("attempt to call method '" + method + "' (not a function)");
                 object[] callArgs = new object[argc + 1];
                 callArgs[0] = recv;              // self
@@ -2011,6 +2046,120 @@ namespace InWorldz.Phlox.VM
             int n = list.Length;
             for (int i = 1; i <= n; i++)
                 if (list.Get(i) is LuaClosure cl) InvokeClosureSync(cl, handlerArgs);
+        }
+
+        // ============================================================
+        // SLua Tier-2: metatables
+        // ============================================================
+        // Cheap metamethod read: only tables WITH a metatable can carry one (null = fast path).
+        private static object MetaRaw(object v, string mm)
+        {
+            return (v is LSLTable t && t.Metatable != null) ? t.Metatable.Get(mm) : null;
+        }
+
+        // __index lookup: raw hit wins; else follow the metatable's __index (table form chains,
+        // function form is invoked). Bounded to defend against cyclic __index tables.
+        private object MetaTableGet(LSLTable t, object key)
+        {
+            for (int depth = 0; depth < 100; depth++)
+            {
+                object raw = t.Get(key);
+                if (raw != null) return raw;
+                LSLTable mt = t.Metatable;
+                if (mt == null) return null;
+                object idx = mt.Get("__index");
+                if (idx == null) return null;
+                if (idx is LSLTable idxTable) { t = idxTable; continue; }           // chain through table
+                if (idx is LuaClosure cl) return InvokeClosureSync(cl, new object[] { t, key });
+                return null;
+            }
+            throw new CheckException("'__index' chain too long (possible loop)");
+        }
+
+        // __newindex on assignment to an ABSENT key: table form re-targets, function form is invoked;
+        // an existing key (or no __newindex) is a raw set. Bounded like __index.
+        private void MetaTableSet(LSLTable t, object key, object value)
+        {
+            for (int depth = 0; depth < 100; depth++)
+            {
+                if (t.Get(key) != null) { t.Set(key, value); return; }              // existing key -> raw set
+                LSLTable mt = t.Metatable;
+                object ni = (mt != null) ? mt.Get("__newindex") : null;
+                if (ni == null) { t.Set(key, value); return; }                      // no __newindex -> raw set
+                if (ni is LSLTable niTable) { t = niTable; continue; }              // table form -> assign there
+                if (ni is LuaClosure cl) { InvokeClosureSync(cl, new object[] { t, key, value }); return; }
+                t.Set(key, value); return;
+            }
+            throw new CheckException("'__newindex' chain too long (possible loop)");
+        }
+
+        // Selector -> metamethod name. gt/ge (7/8) reuse __lt/__le with swapped operands (Lua semantics).
+        private static readonly string[] _binopMeta =
+            { "__add", "__sub", "__mul", "__div", "__mod", "__lt", "__le", "__lt", "__le" };
+
+        private void Op_LuaBinop()
+        {
+            int sel = this.GetIntOperand();
+            object b = _state.Operands.Pop();
+            object a = _state.Operands.Pop();
+
+            if (a is LSLTable || b is LSLTable)
+            {
+                bool swap = (sel == 7 || sel == 8);     // gt/ge -> __lt/__le(b, a)
+                object ha = swap ? b : a, hb = swap ? a : b;
+                object h = MetaRaw(ha, _binopMeta[sel]) ?? MetaRaw(hb, _binopMeta[sel]);
+                if (h is LuaClosure cl)
+                {
+                    object r = InvokeClosureSync(cl, new object[] { ha, hb });
+                    SafeOperandsPush(sel >= 5 ? (object)LuaIsTruthy(r) : (r ?? (object)LuaNil.Instance));
+                    return;
+                }
+                throw new CheckException("attempt to perform arithmetic/comparison on a table value (no metamethod)");
+            }
+
+            float fa = ConvToFloat(a), fb = ConvToFloat(b);
+            switch (sel)
+            {
+                case 0: SafeOperandsPush(fa + fb); break;
+                case 1: SafeOperandsPush(fa - fb); break;
+                case 2: SafeOperandsPush(fa * fb); break;
+                case 3: SafeOperandsPush(fa / fb); break;
+                case 4: SafeOperandsPush(fa % fb); break;
+                case 5: SafeOperandsPush(fa < fb); break;   // boxed bool
+                case 6: SafeOperandsPush(fa <= fb); break;
+                case 7: SafeOperandsPush(fa > fb); break;
+                case 8: SafeOperandsPush(fa >= fb); break;
+                default: throw new CheckException("bad luabinop selector " + sel);
+            }
+        }
+
+        private void Op_LuaUnm()
+        {
+            object a = _state.Operands.Pop();
+            if (a is LSLTable)
+            {
+                object h = MetaRaw(a, "__unm");
+                if (h is LuaClosure cl) { SafeOperandsPush(InvokeClosureSync(cl, new object[] { a, a }) ?? (object)LuaNil.Instance); return; }
+                throw new CheckException("attempt to negate a table value (no __unm)");
+            }
+            SafeOperandsPush(-ConvToFloat(a));
+        }
+
+        private void Op_SetMeta()
+        {
+            object mt = _state.Operands.Pop();
+            object t = _state.Operands.Pop();
+            if (!(t is LSLTable table))
+                throw new CheckException("setmetatable: first argument must be a table");
+            table.Metatable = IsNilValue(mt) ? null : (mt as LSLTable);
+            SafeOperandsPush(table); // setmetatable returns the table
+        }
+
+        private void Op_GetMeta()
+        {
+            object t = _state.Operands.Pop();
+            if (t is LSLTable table && table.Metatable != null) { SafeOperandsPush(table.Metatable); return; }
+            SafeOperandsPush(LuaNil.Instance);
         }
 
         private void Op_Trace()

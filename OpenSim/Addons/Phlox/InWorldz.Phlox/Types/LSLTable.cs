@@ -34,6 +34,13 @@ namespace InWorldz.Phlox.Types
         /// <summary>Keys in insertion order (used by serialization + iteration).</summary>
         public IList<object> OrderedKeys { get { return _keys; } }
 
+        /// <summary>
+        /// The table's metatable (or null). Get/Set remain RAW accessors; metamethod dispatch
+        /// (__index/__newindex/operators/__call/__tostring/__len) lives in the interpreter opcodes,
+        /// which check this cheaply (null = no metatable = fast path, unchanged behavior).
+        /// </summary>
+        public LSLTable Metatable;
+
         public LSLTable()
         {
             _map = new Dictionary<object, object>();

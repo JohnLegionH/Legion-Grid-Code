@@ -135,6 +135,12 @@ namespace InWorldz.Phlox.Serialization
             set { if (value != null) Value = value.ToCell(); }
         }
 
+        // Metatable self-reference marker (e.g. the standard OOP idiom `T.__index = T`): the value is
+        // the very table that owns this entry. Resolved back to that table by SerializedLSLTable.ToTable,
+        // which is the only place the owning table is known. Lets the common idiom round-trip a cycle.
+        [ProtoMember(16)]
+        public bool TableSelfRef { get; set; }
+
 		[ProtoMember(8)]
         private SerializedVector3 ValueVector
         {

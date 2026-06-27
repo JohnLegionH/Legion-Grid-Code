@@ -824,6 +824,20 @@ namespace InWorldz.Phlox.VM
                         Op_FireLLEvents();
                         break;
 
+                    // ---- SLua Tier-2: metatables ----
+                    case OpCode.luabinop:
+                        Op_LuaBinop();
+                        break;
+                    case OpCode.luaunm:
+                        Op_LuaUnm();
+                        break;
+                    case OpCode.setmeta:
+                        Op_SetMeta();
+                        break;
+                    case OpCode.getmeta:
+                        Op_GetMeta();
+                        break;
+
                     default:
                         throw new VMException("Unhandled opcode: " + opcode);
                 }
