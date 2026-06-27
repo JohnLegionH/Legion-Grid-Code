@@ -1564,11 +1564,49 @@ namespace InWorldz.Phlox.VM
         {
             object key = _state.Operands.Pop();
             object t = _state.Operands.Pop();
+
+            // SLua vectors/rotations are immutable Luau values: read-only .x/.y/.z (and .s on a rotation).
+            if (t is Vector3 vec)
+            {
+                SafeOperandsPush(VecComponent(vec, key));
+                return;
+            }
+            if (t is Quaternion q)
+            {
+                SafeOperandsPush(RotComponent(q, key));
+                return;
+            }
+
             if (!(t is LSLTable table))
                 throw new CheckException("attempt to index a non-table value");
 
             object v = MetaTableGet(table, key);          // __index fallback (table/function), else raw
             SafeOperandsPush(v ?? (object)LuaNil.Instance); // missing key -> nil
+        }
+
+        private static object VecComponent(Vector3 v, object key)
+        {
+            string k = key as string;
+            switch (k)
+            {
+                case "x": return v.X;
+                case "y": return v.Y;
+                case "z": return v.Z;
+                default: throw new CheckException("vector has no component '" + (k ?? "?") + "' (use .x/.y/.z)");
+            }
+        }
+
+        private static object RotComponent(Quaternion q, object key)
+        {
+            string k = key as string;
+            switch (k)
+            {
+                case "x": return q.X;
+                case "y": return q.Y;
+                case "z": return q.Z;
+                case "s": return q.W;   // LSL rotation scalar component is '.s'
+                default: throw new CheckException("rotation has no component '" + (k ?? "?") + "' (use .x/.y/.z/.s)");
+            }
         }
 
         private void Op_TabSet()
@@ -1670,6 +1708,8 @@ namespace InWorldz.Phlox.VM
             if (a is bool ab && b is bool bb) return ab == bb;
             if (IsLuaNumber(a) && IsLuaNumber(b)) return ConvToFloat(a) == ConvToFloat(b);
             if (a is string sa && b is string sb) return sa == sb;
+            if (a is Vector3 va && b is Vector3 vb) return va == vb;       // SL: by value
+            if (a is Quaternion qa && b is Quaternion qb) return qa == qb; // SL: by value
             if (a is LSLTable && b is LSLTable) return ReferenceEquals(a, b);
             return false;
         }
@@ -1705,6 +1745,8 @@ namespace InWorldz.Phlox.VM
             if (v is bool) return "boolean";
             if (IsLuaNumber(v)) return "number";
             if (v is string) return "string";
+            if (v is Vector3) return "vector";
+            if (v is Quaternion) return "rotation";
             if (v is LSLTable) return "table";
             if (v is FunctionInfo) return "function";
             return "userdata";
@@ -1729,6 +1771,9 @@ namespace InWorldz.Phlox.VM
             if (v is bool b) return b ? "true" : "false";
             if (IsLuaNumber(v)) return LuaNumToStr(v);
             if (v is string s) return s;
+            // SL string form: <x, y, z> / <x, y, z, s> at 5 fractional digits (matches LSL string-cast).
+            if (v is Vector3 vec) return Util.Encoding.Vector3ToStringWith5FractionalDigits(vec);
+            if (v is Quaternion q) return Util.Encoding.QuaternionToStringWith5FractionalDigits(q);
             if (v is LSLTable) return "table";
             if (v is FunctionInfo) return "function";
             return v.ToString();
@@ -2117,6 +2162,13 @@ namespace InWorldz.Phlox.VM
                 throw new CheckException("attempt to perform arithmetic/comparison on a table value (no metamethod)");
             }
 
+            // SL-faithful vector/rotation arithmetic (matches the existing LSL vector opcodes).
+            if (a is Vector3 || b is Vector3 || a is Quaternion || b is Quaternion)
+            {
+                SafeOperandsPush(VectorBinop(sel, a, b));
+                return;
+            }
+
             float fa = ConvToFloat(a), fb = ConvToFloat(b);
             switch (sel)
             {
@@ -2133,9 +2185,56 @@ namespace InWorldz.Phlox.VM
             }
         }
 
+        // SL-faithful vector/rotation operators (mirrors the LSL vector opcodes exactly):
+        //  v+v / v-v component-wise; v*v = DOT (scalar); v%v = cross; v*scalar / scalar*v / v/scalar scale;
+        //  v*rot rotate, v/rot inverse-rotate; rot*rot quat-mul, rot/rot rdiv; == by value.
+        private object VectorBinop(int sel, object a, object b)
+        {
+            switch (sel)
+            {
+                case 0: // +
+                    if (a is Vector3 av0 && b is Vector3 bv0) return av0 + bv0;
+                    break;
+                case 1: // -
+                    if (a is Vector3 av1 && b is Vector3 bv1) return av1 - bv1;
+                    break;
+                case 2: // *
+                    if (a is Vector3 av2)
+                    {
+                        if (b is Vector3 bv2) return Vector3.Dot(av2, bv2);     // dot -> float
+                        if (b is Quaternion bq2) return _VrMul(av2, bq2);       // rotate
+                        if (IsLuaNumber(b)) return av2 * ConvToFloat(b);        // scale
+                    }
+                    else if (a is Quaternion aq2)
+                    {
+                        if (b is Quaternion bq) return _QuatMul(aq2, bq);       // quat mul
+                    }
+                    else if (IsLuaNumber(a) && b is Vector3 bvs) return bvs * ConvToFloat(a); // scalar * vector
+                    break;
+                case 3: // /
+                    if (a is Vector3 av3)
+                    {
+                        if (b is Quaternion bq3) { bq3.W = -bq3.W; return _VrMul(av3, bq3); } // inverse-rotate
+                        if (IsLuaNumber(b)) return av3 / ConvToFloat(b);                       // scale
+                    }
+                    else if (a is Quaternion aq3 && b is Quaternion bq3b)
+                    {
+                        Quaternion binv = new Quaternion(bq3b.X, bq3b.Y, bq3b.Z, -bq3b.W);
+                        return Quaternion.Negate(_QuatMul(aq3, binv));
+                    }
+                    break;
+                case 4: // % -> cross (vectors)
+                    if (a is Vector3 av4 && b is Vector3 bv4) return av4 % bv4;
+                    break;
+            }
+            throw new CheckException("unsupported vector/rotation operation");
+        }
+
         private void Op_LuaUnm()
         {
             object a = _state.Operands.Pop();
+            if (a is Vector3 vneg) { SafeOperandsPush(-vneg); return; }
+            if (a is Quaternion rneg) { SafeOperandsPush(-rneg); return; }
             if (a is LSLTable)
             {
                 object h = MetaRaw(a, "__unm");

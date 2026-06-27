@@ -260,6 +260,7 @@ namespace InWorldz.Phlox.SLua
     internal sealed class FuncExpr : Expr { public List<string> Params; public List<Stmt> Body; }          // anonymous function
     internal sealed class MethodCall : Expr { public Expr Target; public string Method; public List<Expr> Args; } // obj:method(args)
     internal sealed class MetaCall : Expr { public string Name; public List<Expr> Args; }                   // setmetatable/getmetatable
+    internal sealed class VecCtor : Expr { public bool IsRot; public List<Expr> Args; }                      // vector(x,y,z) / rotation(x,y,z,s)
 
     internal abstract class Stmt : Node { }
     internal sealed class LocalDecl : Stmt { public string Name; public Expr Init; }
@@ -709,6 +710,14 @@ namespace InWorldz.Phlox.SLua
                     var margs = ParseCallArgs();
                     return ParsePostfix(new MetaCall { Name = t.Text, Args = margs, Line = t.Line });
                 }
+                if ((t.Text == "vector" || t.Text == "rotation" || t.Text == "quaternion")
+                    && Next.Type == TT.Op && Next.Text == "(")
+                {
+                    bool isRot = (t.Text != "vector");   // rotation/quaternion are synonyms
+                    Eat();                  // constructor name
+                    var vargs = ParseCallArgs();
+                    return ParsePostfix(new VecCtor { IsRot = isRot, Args = vargs, Line = t.Line });
+                }
                 Eat();
                 if (IsOp("("))   // user function call: name(args)
                     return new UserCall { Name = t.Text, Args = ParseCallArgs(), Line = t.Line };
@@ -1028,6 +1037,7 @@ namespace InWorldz.Phlox.SLua
                 case Builtin bi: ScanExprForNested(bi.Arg, names); break;
                 case MethodCall mc: ScanExprForNested(mc.Target, names); foreach (var a in mc.Args) ScanExprForNested(a, names); break;
                 case MetaCall mtc: foreach (var a in mtc.Args) ScanExprForNested(a, names); break;
+                case VecCtor vtc: foreach (var a in vtc.Args) ScanExprForNested(a, names); break;
             }
         }
         private static void AllNamesList(List<Stmt> body, HashSet<string> names) { foreach (var s in body) AllNamesStmt(s, names); }
@@ -1068,6 +1078,7 @@ namespace InWorldz.Phlox.SLua
                 case FuncExpr fe: AllNamesList(fe.Body, names); break;
                 case MethodCall mc: AllNamesExpr(mc.Target, names); foreach (var a in mc.Args) AllNamesExpr(a, names); break;
                 case MetaCall mtc: foreach (var a in mtc.Args) AllNamesExpr(a, names); break;
+                case VecCtor vtc: foreach (var a in vtc.Args) AllNamesExpr(a, names); break;
             }
         }
 
@@ -1112,6 +1123,7 @@ namespace InWorldz.Phlox.SLua
                 case TableLit tl: foreach (var f in tl.Fields) { if (f.Key != null) LLEExpr(f.Key, evs); LLEExpr(f.Value, evs); } break;
                 case Builtin bi: LLEExpr(bi.Arg, evs); break;
                 case MetaCall mtc: foreach (var a in mtc.Args) LLEExpr(a, evs); break;
+                case VecCtor vtc: foreach (var a in vtc.Args) LLEExpr(a, evs); break;
             }
         }
 
@@ -1711,6 +1723,8 @@ namespace InWorldz.Phlox.SLua
                     return bi.Name == "tonumber" ? Dynamic : VarType.String;
                 case MetaCall mc:
                     return EmitMetaCall(mc);
+                case VecCtor vc:
+                    return EmitVecCtor(vc);
                 case Binary bin:
                     return EmitBinary(bin);
                 case LlCall c:
@@ -1789,6 +1803,18 @@ namespace InWorldz.Phlox.SLua
             }
             Line("mkclosure " + name + "(), " + upvals.Count);
             return Dynamic;
+        }
+
+        // vector(x,y,z) -> buildvec ; rotation/quaternion(x,y,z,s) -> buildrot. Args coerced to float by
+        // the VM ops (ConvToFloat). Result is a boxed Vector3/Quaternion (passes the shim's ConvToVector).
+        private VarType EmitVecCtor(VecCtor vc)
+        {
+            int need = vc.IsRot ? 4 : 3;
+            if (vc.Args.Count != need)
+                throw new SLuaException((vc.IsRot ? "rotation" : "vector") + " expects " + need + " components", vc.Line);
+            foreach (var a in vc.Args) EmitExpr(a);
+            Line(vc.IsRot ? "buildrot" : "buildvec");
+            return vc.IsRot ? VarType.Rotation : VarType.Vector;
         }
 
         // setmetatable(t, mt) -> t ; getmetatable(t) -> mt|nil
