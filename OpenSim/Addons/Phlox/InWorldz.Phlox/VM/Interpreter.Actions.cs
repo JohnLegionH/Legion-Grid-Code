@@ -1740,6 +1740,22 @@ namespace InWorldz.Phlox.VM
             int argc = this.GetIntOperand();
             object[] args = new object[argc];
             for (int i = argc - 1; i >= 0; --i) args[i] = _state.Operands.Pop();
+
+            // gsub with a function replacement: invoke the closure per match (re-entrant, safe -
+            // gsub is atomic so the VM never serializes mid-callback).
+            if (funcId == (int)SLua.LuaLib.Func.StrGsub && argc >= 3 && args[2] is LuaClosure clr)
+            {
+                string s = LuaToString(args[0]);
+                string p = LuaToString(args[1]);
+                int maxN = (argc >= 4 && args[3] != null && !(args[3] is LuaNil)) ? ConvToInt(args[3]) : int.MaxValue;
+                string result; int count;
+                SLua.LuaPattern.GSubFunc(s, p, caps => this.InvokeClosureSync(clr, caps.ToArray()), maxN, out result, out count);
+                _state.Operands.Push(result);
+                SafeOperandsPush(count);
+                SafeOperandsPush(2); // value count (result, count)
+                return;
+            }
+
             object[] res = SLua.LuaLib.CallMulti(funcId, args);
             for (int i = 0; i < res.Length; i++) _state.Operands.Push(res[i] ?? (object)LuaNil.Instance);
             SafeOperandsPush(res.Length); // runtime count on top
@@ -1772,6 +1788,115 @@ namespace InWorldz.Phlox.VM
             for (int i = 0; i < k; i++)
                 _state.Operands.Push(i < caps.Count ? (caps[i] ?? (object)LuaNil.Instance) : LuaNil.Instance);
             SafeOperandsPush(1);
+        }
+
+        // ============================================================
+        // SLua Tier-2: closures / first-class functions
+        // ============================================================
+        private void Op_MkCell()
+        {
+            object v = _state.Operands.Pop();
+            SafeOperandsPush(new UpvalCell(v));
+        }
+
+        private void Op_CellGet()
+        {
+            object o = _state.Operands.Pop();
+            if (!(o is UpvalCell c)) throw new CheckException("internal: cellget on non-cell");
+            _state.Operands.Push(c.Value ?? (object)LuaNil.Instance);
+        }
+
+        private void Op_CellPut()
+        {
+            object v = _state.Operands.Pop();
+            object o = _state.Operands.Pop();
+            if (!(o is UpvalCell c)) throw new CheckException("internal: cellput on non-cell");
+            c.Value = v;
+        }
+
+        private void Op_GetUpval()
+        {
+            int i = this.GetIntOperand();
+            LuaClosure cl = _state.TopFrame.Closure;
+            if (cl == null || cl.Upvals == null || i >= cl.Upvals.Length)
+                throw new CheckException("internal: bad upvalue access");
+            _state.Operands.Push(cl.Upvals[i].Value ?? (object)LuaNil.Instance);
+        }
+
+        private void Op_SetUpval()
+        {
+            int i = this.GetIntOperand();
+            object v = _state.Operands.Pop();
+            _state.TopFrame.Closure.Upvals[i].Value = v;
+        }
+
+        private void Op_PushUpval()
+        {
+            int i = this.GetIntOperand();
+            SafeOperandsPush(_state.TopFrame.Closure.Upvals[i]); // the cell (for transitive capture)
+        }
+
+        private void Op_MkClosure()
+        {
+            int funcIndex = this.GetIntOperand();
+            int nups = this.GetIntOperand();
+            FunctionInfo fi = (FunctionInfo)_script.ConstPool[funcIndex];
+            UpvalCell[] ups = new UpvalCell[nups];
+            for (int i = nups - 1; i >= 0; --i) ups[i] = (UpvalCell)_state.Operands.Pop();
+            SafeOperandsPush(new LuaClosure(fi, ups));
+        }
+
+        private void Op_CallV()
+        {
+            int argc = this.GetIntOperand();
+            object[] argv = new object[argc];
+            for (int i = argc - 1; i >= 0; --i) argv[i] = _state.Operands.Pop();
+            object cv = _state.Operands.Pop();
+            if (!(cv is LuaClosure cl))
+                throw new CheckException("attempt to call a non-function value");
+
+            FunctionInfo fi = cl.Fn;
+            StackFrame f = new StackFrame(fi, _state.IP);
+            f.Closure = cl;
+            _state.Calls.Push(f);
+            for (int i = 0; i < fi.NumberOfArguments; i++)
+                f.Locals[i] = (i < argc) ? argv[i] : (object)LuaNil.Instance;
+            _state.MemInfo.AddCall(f);
+            _state.TopFrame = f;
+            _state.IP = fi.Address;
+        }
+
+        /// <summary>
+        /// Synchronously invoke a closure from C# (used by gsub function-replacement). Safe because
+        /// gsub runs atomically as a single opcode -- the VM never yields/serializes mid-callback, so
+        /// the C# call stack is never captured. Returns the closure's first return value (nil if none).
+        /// </summary>
+        public object InvokeClosureSync(LuaClosure cl, object[] args)
+        {
+            int baseDepth = _state.Calls.Count;
+            int stackBefore = _state.Operands.Count;
+            int savedIP = _state.IP;
+
+            FunctionInfo fi = cl.Fn;
+            StackFrame f = new StackFrame(fi, savedIP);
+            f.Closure = cl;
+            _state.Calls.Push(f);
+            for (int i = 0; i < fi.NumberOfArguments; i++)
+                f.Locals[i] = (i < args.Length) ? args[i] : (object)LuaNil.Instance;
+            _state.MemInfo.AddCall(f);
+            _state.TopFrame = f;
+            _state.IP = fi.Address;
+
+            int guard = 0;
+            while (_state.Calls.Count > baseDepth && guard++ < 50000000)
+                Tick();
+
+            _state.IP = savedIP; // resume the outer opcode
+
+            int produced = _state.Operands.Count - stackBefore;
+            object result = produced > 0 ? _state.Operands.Pop() : (object)LuaNil.Instance;
+            for (int i = 1; i < produced; i++) _state.Operands.Pop(); // discard extra returns
+            return result;
         }
 
         private void Op_Trace()

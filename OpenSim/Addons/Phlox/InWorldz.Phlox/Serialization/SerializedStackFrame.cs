@@ -22,6 +22,9 @@ namespace InWorldz.Phlox.Serialization
         [ProtoMember(3)]
         public SerializedLSLPrimitive[] Locals;
 
+        [ProtoMember(4)]
+        public SerializedClosure Closure; // set when this frame is executing a closure (upvalue access)
+
         public SerializedStackFrame()
         {
         }
@@ -41,6 +44,8 @@ namespace InWorldz.Phlox.Serialization
                 serFrame.Locals[i] = SerializedLSLPrimitive.FromPrimitive(frame.Locals[i]);
             }
 
+            serFrame.Closure = (frame.Closure != null) ? SerializedClosure.From(frame.Closure) : null;
+
             return serFrame;
         }
 
@@ -48,6 +53,7 @@ namespace InWorldz.Phlox.Serialization
         {
             VM.StackFrame frame = new VM.StackFrame(this.FunctionInfo, this.ReturnAddress);
             frame.Locals = SerializedLSLPrimitive.ToPrimitiveList(this.Locals);
+            frame.Closure = (this.Closure != null) ? this.Closure.ToClosure() : null;
 
             return frame;
         }

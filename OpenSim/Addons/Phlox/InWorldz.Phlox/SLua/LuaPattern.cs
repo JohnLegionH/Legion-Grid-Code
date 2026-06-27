@@ -374,6 +374,40 @@ namespace InWorldz.Phlox.SLua
             result = sb.ToString();
         }
 
+        // string.gsub with a FUNCTION replacement: repl(captures) -> replacement string (nil/false
+        // keeps the original match). The caller supplies the invoke callback (re-entrant into the VM).
+        public static void GSubFunc(string s, string pat, Func<List<object>, object> repl, int maxN, out string result, out int count)
+        {
+            var ms = new MatchState { src = s, p = pat };
+            bool anchor = pat.Length > 0 && pat[0] == '^';
+            int pp = anchor ? 1 : 0;
+            var sb = new StringBuilder(s.Length);
+            int sp = 0;
+            count = 0;
+            while (count < maxN)
+            {
+                ms.level = 0;
+                ms.matchdepth = MAXCCALLS;
+                int e = Match(ms, sp, pp);
+                if (e != -1)
+                {
+                    count++;
+                    var caps = PushCaptures(ms, sp, e, true);
+                    object rep = repl(caps);
+                    if (rep == null || rep is LuaNil || (rep is bool b && !b))
+                        sb.Append(s.Substring(sp, e - sp)); // nil/false -> keep original
+                    else
+                        sb.Append(LuaStr(rep));
+                }
+                if (e != -1 && e > sp) sp = e;
+                else if (sp < s.Length) sb.Append(s[sp++]);
+                else break;
+                if (anchor) break;
+            }
+            if (sp < s.Length) sb.Append(s.Substring(sp));
+            result = sb.ToString();
+        }
+
         private static void AppendReplacement(MatchState ms, StringBuilder sb, int s, int e, string repl)
         {
             for (int i = 0; i < repl.Length; i++)

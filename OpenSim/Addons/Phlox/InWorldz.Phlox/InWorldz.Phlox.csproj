@@ -206,6 +206,9 @@
     <Compile Include="Types\LuaGmatch.cs">
       <SubType>Code</SubType>
     </Compile>
+    <Compile Include="Types\LuaClosure.cs">
+      <SubType>Code</SubType>
+    </Compile>
     <Compile Include="Types\LSLTable.cs">
       <SubType>Code</SubType>
     </Compile>

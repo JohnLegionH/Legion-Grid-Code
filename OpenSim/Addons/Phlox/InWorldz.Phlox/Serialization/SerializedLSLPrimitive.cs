@@ -121,6 +121,20 @@ namespace InWorldz.Phlox.Serialization
             set { if (value != null) Value = value.ToGmatch(); }
         }
 
+        [ProtoMember(14)]
+        private SerializedClosure ValueClosure
+        {
+            get { return (Value is Types.LuaClosure c) ? SerializedClosure.From(c) : null; }
+            set { if (value != null) Value = value.ToClosure(); }
+        }
+
+        [ProtoMember(15)]
+        private SerializedCell ValueCell
+        {
+            get { return (Value is Types.UpvalCell c) ? SerializedCell.From(c) : null; }
+            set { if (value != null) Value = value.ToCell(); }
+        }
+
 		[ProtoMember(8)]
         private SerializedVector3 ValueVector
         {
@@ -290,6 +304,12 @@ namespace InWorldz.Phlox.Serialization
             if (Value is Types.LuaGmatch)
                 return true;
 
+            if (Value is Types.LuaClosure)
+                return true;
+
+            if (Value is Types.UpvalCell)
+                return true;
+
 			if (Value is VM.FunctionInfo)
 				return true;
             if (Value is SerializedStackFrame)
@@ -300,6 +320,41 @@ namespace InWorldz.Phlox.Serialization
             */
             return false;
         }
+    }
+
+    // First-class function value: code ref + captured upvalue cell VALUES (by value). Cross-closure
+    // cell SHARING is not preserved across a serialize boundary (flagged); single-closure capture
+    // (the common case: a returned closure whose defining frame has exited) round-trips correctly.
+    [ProtoContract]
+    public class SerializedClosure
+    {
+        [ProtoMember(1)] public VM.FunctionInfo Fn;
+        [ProtoMember(2)] public SerializedLSLPrimitive[] Upvals;
+        public SerializedClosure() { }
+        public static SerializedClosure From(Types.LuaClosure c)
+        {
+            var s = new SerializedClosure { Fn = c.Fn };
+            int n = (c.Upvals != null) ? c.Upvals.Length : 0;
+            s.Upvals = new SerializedLSLPrimitive[n];
+            for (int i = 0; i < n; i++) s.Upvals[i] = SerializedLSLPrimitive.FromPrimitive(c.Upvals[i].Value);
+            return s;
+        }
+        public Types.LuaClosure ToClosure()
+        {
+            int n = (Upvals != null) ? Upvals.Length : 0;
+            var cells = new Types.UpvalCell[n];
+            for (int i = 0; i < n; i++) cells[i] = new Types.UpvalCell(SerializedLSLPrimitive.ResolveValue(Upvals[i].Value));
+            return new Types.LuaClosure(Fn, cells);
+        }
+    }
+
+    [ProtoContract]
+    public class SerializedCell
+    {
+        [ProtoMember(1)] public SerializedLSLPrimitive Inner;
+        public SerializedCell() { }
+        public static SerializedCell From(Types.UpvalCell c) { return new SerializedCell { Inner = SerializedLSLPrimitive.FromPrimitive(c.Value) }; }
+        public Types.UpvalCell ToCell() { return new Types.UpvalCell(SerializedLSLPrimitive.ResolveValue(Inner.Value)); }
     }
 
     [ProtoContract]

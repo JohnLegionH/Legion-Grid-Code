@@ -13,6 +13,10 @@ namespace InWorldz.Phlox.VM
         public int ReturnAddress;
         public object[] Locals;
 
+        // The closure executing in this frame (null for plain named functions/events). Supplies the
+        // upvalue cells for the getupval/setupval opcodes. Set by callv.
+        public Types.LuaClosure Closure;
+
         public StackFrame(FunctionInfo funcInfo, int returnAddress)
         {
             FunctionInfo = funcInfo;

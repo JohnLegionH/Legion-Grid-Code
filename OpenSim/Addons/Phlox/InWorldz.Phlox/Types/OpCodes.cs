@@ -170,7 +170,17 @@ namespace InWorldz.Phlox.Types
         // ---- SLua Tier-2: pattern matching plumbing (multi-result + gmatch iterator) ----
         luacallm,        // pop argc args, call LuaLib.CallMulti -> push N results then push N (count)
         adjustm,         // operand T: pop count k, adjust the k values on top to exactly T (pad nil/pop)
-        gmatchnext       // operand K: pop LuaGmatch, advance; push K captures + int 1, or just int 0 (done)
+        gmatchnext,      // operand K: pop LuaGmatch, advance; push K captures + int 1, or just int 0 (done)
+
+        // ---- SLua Tier-2: closures / first-class functions ----
+        mkcell,          // pop value, push a new UpvalCell holding it
+        cellget,         // pop UpvalCell, push its value
+        cellput,         // pop value, pop UpvalCell, set cell value
+        getupval,        // operand i: push current closure's Upvals[i].Value
+        setupval,        // operand i: pop value, set current closure's Upvals[i].Value
+        pushupval,       // operand i: push current closure's Upvals[i] (the cell, for transitive capture)
+        mkclosure,       // operands funcIndex, nups: pop nups cells, push LuaClosure(fn, cells)
+        callv            // operand argc: pop argc args + a closure value, call it
     }
 
 

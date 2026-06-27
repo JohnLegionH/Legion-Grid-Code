@@ -789,6 +789,32 @@ namespace InWorldz.Phlox.VM
                         Op_GmatchNext();
                         break;
 
+                    // ---- SLua Tier-2: closures ----
+                    case OpCode.mkcell:
+                        Op_MkCell();
+                        break;
+                    case OpCode.cellget:
+                        Op_CellGet();
+                        break;
+                    case OpCode.cellput:
+                        Op_CellPut();
+                        break;
+                    case OpCode.getupval:
+                        Op_GetUpval();
+                        break;
+                    case OpCode.setupval:
+                        Op_SetUpval();
+                        break;
+                    case OpCode.pushupval:
+                        Op_PushUpval();
+                        break;
+                    case OpCode.mkclosure:
+                        Op_MkClosure();
+                        break;
+                    case OpCode.callv:
+                        Op_CallV();
+                        break;
+
                     default:
                         throw new VMException("Unhandled opcode: " + opcode);
                 }
