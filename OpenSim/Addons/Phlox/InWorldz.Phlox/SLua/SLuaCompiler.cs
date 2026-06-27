@@ -1758,6 +1758,16 @@ namespace InWorldz.Phlox.SLua
                 case "math.sign":     return (int)LuaLib.Func.MathSign;
                 case "math.clamp":    return (int)LuaLib.Func.MathClamp;
                 case "math.modf":     return (int)LuaLib.Func.MathModf;
+                case "math.log10":    return (int)LuaLib.Func.MathLog10;
+                case "math.sinh":     return (int)LuaLib.Func.MathSinh;
+                case "math.cosh":     return (int)LuaLib.Func.MathCosh;
+                case "math.tanh":     return (int)LuaLib.Func.MathTanh;
+                case "math.noise":    return (int)LuaLib.Func.MathNoise;
+                case "math.map":      return (int)LuaLib.Func.MathMap;
+                case "math.lerp":     return (int)LuaLib.Func.MathLerp;
+                case "math.isnan":    return (int)LuaLib.Func.MathIsNan;
+                case "math.isinf":    return (int)LuaLib.Func.MathIsInf;
+                case "math.isfinite": return (int)LuaLib.Func.MathIsFinite;
                 // ---- conformance pass: string / table breadth ----
                 case "string.reverse": return (int)LuaLib.Func.StrReverse;
                 case "string.split":   return (int)LuaLib.Func.StrSplit;

@@ -33,7 +33,10 @@ namespace InWorldz.Phlox.SLua
             // ---- conformance pass: string.* / table.* (single-return) ----
             StrSplit, StrReverse, TblRemove, TblConcat, TblInsert,
             // ---- conformance pass: multi-return (CallMulti) ----
-            MathModf, TblUnpack
+            MathModf, TblUnpack,
+            // ---- conformance2 pass: math.* breadth from SL's math.luau ----
+            MathLog10, MathSinh, MathCosh, MathTanh, MathNoise, MathMap, MathLerp,
+            MathIsNan, MathIsInf, MathIsFinite
         }
 
         // Not part of RuntimeState: math.random's sequence is not reproduced across serialization
@@ -91,6 +94,28 @@ namespace InWorldz.Phlox.SLua
                 // ---- string.* breadth ----
                 case Func.StrReverse:     { char[] c = Str(At(args, 0)).ToCharArray(); Array.Reverse(c); return new string(c); }
                 case Func.StrSplit:       return Split(args);
+
+                // ---- math.* breadth (match SL's math.luau exactly) ----
+                case Func.MathLog10:      return (float)Math.Log10(Num(At(args, 0)));
+                case Func.MathSinh:       return (float)Math.Sinh(Num(At(args, 0)));
+                case Func.MathCosh:       return (float)Math.Cosh(Num(At(args, 0)));
+                case Func.MathTanh:       return (float)Math.Tanh(Num(At(args, 0)));
+                case Func.MathIsNan:      return double.IsNaN(Num(At(args, 0)));
+                case Func.MathIsInf:      return double.IsInfinity(Num(At(args, 0)));
+                case Func.MathIsFinite:   { double d = Num(At(args, 0)); return !double.IsNaN(d) && !double.IsInfinity(d); }
+                case Func.MathLerp:       // SL: (t == 1) ? b : a + (b - a) * t  (endpoint-exact)
+                {
+                    double a = Num(At(args, 0)), b = Num(At(args, 1)), t = Num(At(args, 2));
+                    return (float)(t == 1.0 ? b : a + (b - a) * t);
+                }
+                case Func.MathMap:        // SL: outmin + (x-inmin)*(outmax-outmin)/(inmax-inmin)
+                {
+                    double x = Num(At(args, 0)), inmin = Num(At(args, 1)), inmax = Num(At(args, 2)),
+                           outmin = Num(At(args, 3)), outmax = Num(At(args, 4));
+                    return (float)(outmin + (x - inmin) * (outmax - outmin) / (inmax - inmin));
+                }
+                case Func.MathNoise:      // faithful port of SL VM lmathlib perlin (float internals); y,z default 0
+                    return Perlin((float)Num(At(args, 0)), (float)NumOr0(At(args, 1)), (float)NumOr0(At(args, 2)));
 
                 // ---- table.* (mutate/read the passed LSLTable reference) ----
                 case Func.TblInsert:      return TblInsertFn(args);
@@ -228,6 +253,39 @@ namespace InWorldz.Phlox.SLua
         {
             if (o == null || o is LuaNil) return dflt;
             return (int)Num(o);
+        }
+
+        private static double NumOr0(object o) { return (o == null || o is LuaNil) ? 0.0 : Num(o); }
+
+        // ---- math.noise: faithful port of SL VM lmathlib.cpp perlin (improved Perlin, float internals) ----
+        private static readonly byte[] kPerlinHash = {
+            151,160,137,91,90,15,131,13,201,95,96,53,194,233,7,225,140,36,103,30,69,142,8,99,37,240,21,10,23,190,6,148,247,120,234,75,0,26,197,62,94,252,219,203,117,35,11,32,57,177,33,88,237,149,56,87,174,20,125,136,171,168,68,175,74,165,71,134,139,48,27,166,77,146,158,231,83,111,229,122,60,211,133,230,220,105,92,41,55,46,245,40,244,102,143,54,65,25,63,161,1,216,80,73,209,76,132,187,208,89,18,169,200,196,135,130,116,188,159,86,164,100,109,198,173,186,3,64,52,217,226,250,124,123,5,202,38,147,118,126,255,82,85,212,207,206,59,227,47,16,58,17,182,189,28,42,223,183,170,213,119,248,152,2,44,154,163,70,221,153,101,155,167,43,172,9,129,22,39,253,19,98,108,110,79,113,224,232,178,185,112,104,218,246,97,228,251,34,242,193,238,210,144,12,191,179,162,241,81,51,145,235,249,14,239,107,49,192,214,31,181,199,106,157,184,84,204,176,115,121,50,45,127,4,150,254,138,236,205,93,222,114,67,29,24,72,243,141,128,195,78,66,215,61,156,180,151
+        };
+        private static readonly float[,] kPerlinGrad = {
+            {1,1,0},{-1,1,0},{1,-1,0},{-1,-1,0},{1,0,1},{-1,0,1},{1,0,-1},{-1,0,-1},
+            {0,1,1},{0,-1,1},{0,1,-1},{0,-1,-1},{1,1,0},{0,-1,1},{-1,1,0},{0,-1,-1}
+        };
+        private static float PerlinFade(float t) { return t * t * t * (t * (t * 6 - 15) + 10); }
+        private static float PerlinLerp(float t, float a, float b) { return a + t * (b - a); }
+        private static float PerlinGrad(int hash, float x, float y, float z)
+        {
+            int h = hash & 15;
+            return kPerlinGrad[h, 0] * x + kPerlinGrad[h, 1] * y + kPerlinGrad[h, 2] * z;
+        }
+        private static float Perlin(float x, float y, float z)
+        {
+            float xflr = (float)Math.Floor(x), yflr = (float)Math.Floor(y), zflr = (float)Math.Floor(z);
+            int xi = (int)xflr & 255, yi = (int)yflr & 255, zi = (int)zflr & 255;
+            float xf = x - xflr, yf = y - yflr, zf = z - zflr;
+            float u = PerlinFade(xf), v = PerlinFade(yf), w = PerlinFade(zf);
+            byte[] p = kPerlinHash;
+            int a = (p[xi] + yi) & 255, aa = (p[a] + zi) & 255, ab = (p[a + 1] + zi) & 255;
+            int b = (p[xi + 1] + yi) & 255, ba = (p[b] + zi) & 255, bb = (p[b + 1] + zi) & 255;
+            float la = PerlinLerp(u, PerlinGrad(p[aa], xf, yf, zf), PerlinGrad(p[ba], xf - 1, yf, zf));
+            float lb = PerlinLerp(u, PerlinGrad(p[ab], xf, yf - 1, zf), PerlinGrad(p[bb], xf - 1, yf - 1, zf));
+            float la1 = PerlinLerp(u, PerlinGrad(p[aa + 1], xf, yf, zf - 1), PerlinGrad(p[ba + 1], xf - 1, yf, zf - 1));
+            float lb1 = PerlinLerp(u, PerlinGrad(p[ab + 1], xf, yf - 1, zf - 1), PerlinGrad(p[bb + 1], xf - 1, yf - 1, zf - 1));
+            return PerlinLerp(w, PerlinLerp(v, la, lb), PerlinLerp(v, la1, lb1));
         }
 
         // Lua tostring (kept local to avoid coupling to the interpreter).

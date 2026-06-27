@@ -1623,6 +1623,7 @@ namespace InWorldz.Phlox.VM
         private void Op_TabLen()
         {
             object t = _state.Operands.Pop();
+            if (t is string s) { SafeOperandsPush((float)s.Length); return; } // Luau: #s = string length
             if (!(t is LSLTable table))
                 throw new CheckException("attempt to get length of a non-table value");
 
