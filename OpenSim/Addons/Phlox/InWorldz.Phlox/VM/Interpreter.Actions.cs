@@ -1914,6 +1914,105 @@ namespace InWorldz.Phlox.VM
             return result;
         }
 
+        // ============================================================
+        // SLua Tier-2: LLEvents:on / DetectedEvent
+        // ============================================================
+        private static readonly HashSet<string> _detectionEvents = new HashSet<string>
+        {
+            "touch_start", "touch", "touch_end", "collision_start", "collision", "collision_end", "sensor"
+        };
+        private static Dictionary<string, int> _detMethods;
+
+        private static int DetectedMethodIndex(string m)
+        {
+            if (_detMethods == null)
+            {
+                var map = new Dictionary<string, int>();
+                void Add(string method, string ll) { if (Defaults.SystemMethods.TryGetValue(ll, out var s)) map[method] = s.TableIndex; }
+                Add("getKey", "llDetectedKey"); Add("getName", "llDetectedName"); Add("getPos", "llDetectedPos");
+                Add("getOwner", "llDetectedOwner"); Add("getGroup", "llDetectedGroup"); Add("getType", "llDetectedType");
+                Add("getVel", "llDetectedVel"); Add("getRot", "llDetectedRot"); Add("getLinkNumber", "llDetectedLinkNumber");
+                _detMethods = map;
+            }
+            return _detMethods.TryGetValue(m, out var idx) ? idx : -1;
+        }
+
+        // LLEvents:on -> append a handler closure to registry[eventName] (a list table).
+        private void Op_RegEvent()
+        {
+            object fn = _state.Operands.Pop();
+            object ev = _state.Operands.Pop();
+            object reg = _state.Operands.Pop();
+            if (!(reg is LSLTable registry)) throw new CheckException("internal: LLEvents registry is not a table");
+            string evName = (ev as string) ?? (ev == null ? "" : ev.ToString());
+            LSLTable list = registry.Get(evName) as LSLTable;
+            if (list == null) { list = new LSLTable(); registry.Set(evName, list); }
+            list.Set(list.Length + 1, fn); // append (1-based)
+        }
+
+        // obj:method(args). DetectedEvent -> native (llDetected*); LSLTable -> method-as-field closure.
+        private void Op_MethCall()
+        {
+            int methIdx = this.GetIntOperand();
+            int argc = this.GetIntOperand();
+            string method = (string)_script.ConstPool[methIdx];
+            object[] args = new object[argc];
+            for (int i = argc - 1; i >= 0; --i) args[i] = _state.Operands.Pop();
+            object recv = _state.Operands.Pop();
+
+            if (recv is LuaDetected det)
+            {
+                int tableIndex = DetectedMethodIndex(method);
+                if (tableIndex < 0) throw new CheckException("DetectedEvent has no method '" + method + "' in the Tier-2 subset");
+                SafeOperandsPush(det.Index);     // detection index
+                _syscallShim.Call(tableIndex);   // shim reads index, calls llDetected*, pushes result
+                return;
+            }
+            if (recv is LSLTable tbl)
+            {
+                if (!(tbl.Get(method) is LuaClosure cl))
+                    throw new CheckException("attempt to call method '" + method + "' (not a function)");
+                object[] callArgs = new object[argc + 1];
+                callArgs[0] = recv;              // self
+                for (int i = 0; i < argc; i++) callArgs[i + 1] = args[i];
+                SafeOperandsPush(InvokeClosureSync(cl, callArgs) ?? (object)LuaNil.Instance);
+                return;
+            }
+            throw new CheckException("attempt to call a method on a non-object value");
+        }
+
+        // Dispatcher: invoke all LLEvents:on handlers registered for an event. Detection events get
+        // an array of DetectedEvent; other events get the raw scalar event args. Runs synchronously
+        // during the event (detection context live), so DetectedEvent methods read live data.
+        private void Op_FireLLEvents()
+        {
+            int evIdx = this.GetIntOperand();
+            int argc = this.GetIntOperand();
+            string evName = (string)_script.ConstPool[evIdx];
+            object[] evArgs = new object[argc];
+            for (int i = argc - 1; i >= 0; --i) evArgs[i] = _state.Operands.Pop();
+            object reg = _state.Operands.Pop();
+            if (!(reg is LSLTable registry)) return;
+            if (!(registry.Get(evName) is LSLTable list)) return;
+
+            object[] handlerArgs;
+            if (_detectionEvents.Contains(evName))
+            {
+                int num = (evArgs.Length > 0) ? ConvToInt(evArgs[0]) : 0;
+                LSLTable arr = new LSLTable();
+                for (int i = 0; i < num; i++) arr.Set(i + 1, new LuaDetected(i)); // 1-based DetectedEvent array
+                handlerArgs = new object[] { arr };
+            }
+            else
+            {
+                handlerArgs = evArgs;
+            }
+
+            int n = list.Length;
+            for (int i = 1; i <= n; i++)
+                if (list.Get(i) is LuaClosure cl) InvokeClosureSync(cl, handlerArgs);
+        }
+
         private void Op_Trace()
         {
             object top = _state.Operands.Pop();

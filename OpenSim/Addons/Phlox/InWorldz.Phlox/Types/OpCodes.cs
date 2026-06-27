@@ -180,7 +180,12 @@ namespace InWorldz.Phlox.Types
         setupval,        // operand i: pop value, set current closure's Upvals[i].Value
         pushupval,       // operand i: push current closure's Upvals[i] (the cell, for transitive capture)
         mkclosure,       // operands funcIndex, nups: pop nups cells, push LuaClosure(fn, cells)
-        callv            // operand argc: pop argc args + a closure value, call it
+        callv,           // operands argc, wanted: pop argc args + a closure value, call it
+
+        // ---- SLua Tier-2: LLEvents:on / DetectedEvent ----
+        regevent,        // pop fn, eventName, registry-table: append fn to registry[eventName] list
+        methcall,        // operands methodNameConst, argc: pop argc args + receiver, dispatch method
+        firellevents     // operands eventNameConst, argc: pop argc evt-args + registry, invoke handlers
     }
 
 

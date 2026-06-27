@@ -258,6 +258,7 @@ namespace InWorldz.Phlox.SLua
     internal sealed class LibValue : Expr { public string Lib; public string Name; }                       // math.pi / math.huge
     internal sealed class UserCall : Expr { public string Name; public List<Expr> Args; }                  // user function call
     internal sealed class FuncExpr : Expr { public List<string> Params; public List<Stmt> Body; }          // anonymous function
+    internal sealed class MethodCall : Expr { public Expr Target; public string Method; public List<Expr> Args; } // obj:method(args)
 
     internal abstract class Stmt : Node { }
     internal sealed class LocalDecl : Stmt { public string Name; public Expr Init; }
@@ -362,7 +363,7 @@ namespace InWorldz.Phlox.SLua
                 }
 
                 // call statement (result discarded)
-                if (first is LlCall || first is UserCall || first is LibCall)
+                if (first is LlCall || first is UserCall || first is LibCall || first is MethodCall)
                     return new CallStmt { Call = first, Line = line };
 
                 throw new SLuaException("expected '=' (assignment) or a call statement", line);
@@ -749,6 +750,14 @@ namespace InWorldz.Phlox.SLua
                     ExpectOp("]");
                     e = new Index { Target = e, Key = key, Line = line };
                 }
+                else if (IsOp(":"))   // method call: obj:method(args)
+                {
+                    int line = Cur.Line; Eat();
+                    if (Cur.Type != TT.Name) Err("expected method name after ':'");
+                    string method = Eat().Text;
+                    var margs = ParseCallArgs();
+                    e = new MethodCall { Target = e, Method = method, Args = margs, Line = line };
+                }
                 else break;
             }
             return e;
@@ -853,6 +862,11 @@ namespace InWorldz.Phlox.SLua
         private FuncScope _scope;                                  // current function scope (null in globals-init)
         private readonly List<string> _lambdaDefs = new List<string>(); // flattened .def blocks for anon functions
         private int _lambdaSeq;
+
+        // LLEvents:on registry — a hidden global table (event-name -> list of handler closures).
+        // Serializes for free via Globals. _lleventsSlot is -1 when LLEvents:on is unused.
+        private int _lleventsSlot = -1;
+        private readonly HashSet<string> _lleventsUsed = new HashSet<string>(); // literal event names registered
 
         // Allocate a named local in the current scope; a captured name becomes a cell.
         private LocalVar AllocLocal(string name, VarType type)
@@ -1004,6 +1018,7 @@ namespace InWorldz.Phlox.SLua
                 case Len ln: ScanExprForNested(ln.E, names); break;
                 case TableLit tl: foreach (var f in tl.Fields) { if (f.Key != null) ScanExprForNested(f.Key, names); ScanExprForNested(f.Value, names); } break;
                 case Builtin bi: ScanExprForNested(bi.Arg, names); break;
+                case MethodCall mc: ScanExprForNested(mc.Target, names); foreach (var a in mc.Args) ScanExprForNested(a, names); break;
             }
         }
         private static void AllNamesList(List<Stmt> body, HashSet<string> names) { foreach (var s in body) AllNamesStmt(s, names); }
@@ -1042,7 +1057,84 @@ namespace InWorldz.Phlox.SLua
                 case TableLit tl: foreach (var f in tl.Fields) { if (f.Key != null) AllNamesExpr(f.Key, names); AllNamesExpr(f.Value, names); } break;
                 case Builtin bi: AllNamesExpr(bi.Arg, names); break;
                 case FuncExpr fe: AllNamesList(fe.Body, names); break;
+                case MethodCall mc: AllNamesExpr(mc.Target, names); foreach (var a in mc.Args) AllNamesExpr(a, names); break;
             }
+        }
+
+        // ---- LLEvents:on collection (literal event names) + dispatcher generation ----
+        private static void CollectLLEvents(List<Stmt> body, HashSet<string> evs) { foreach (var s in body) LLEStmt(s, evs); }
+        private static void LLEStmt(Stmt s, HashSet<string> evs)
+        {
+            switch (s)
+            {
+                case LocalDecl ld: LLEExpr(ld.Init, evs); break;
+                case LocalMulti lm: foreach (var v in lm.Values) LLEExpr(v, evs); break;
+                case Assign a: LLEExpr(a.Value, evs); break;
+                case AssignMulti am: foreach (var v in am.Values) LLEExpr(v, evs); break;
+                case IndexAssign ia: LLEExpr(ia.Target, evs); LLEExpr(ia.Key, evs); LLEExpr(ia.Value, evs); break;
+                case TableInsert ti: LLEExpr(ti.Table, evs); LLEExpr(ti.Value, evs); break;
+                case ExprStmt es: LLEExpr(es.Call, evs); break;
+                case CallStmt cs: LLEExpr(cs.Call, evs); break;
+                case IfStmt ifs: LLEExpr(ifs.Cond, evs); CollectLLEvents(ifs.Then, evs); if (ifs.Else != null) CollectLLEvents(ifs.Else, evs); break;
+                case WhileStmt w: LLEExpr(w.Cond, evs); CollectLLEvents(w.Body, evs); break;
+                case ForIn fi: LLEExpr(fi.TableExpr, evs); CollectLLEvents(fi.Body, evs); break;
+                case ForNum fn: LLEExpr(fn.Start, evs); LLEExpr(fn.Stop, evs); if (fn.Step != null) LLEExpr(fn.Step, evs); CollectLLEvents(fn.Body, evs); break;
+                case ReturnStmt r: foreach (var v in r.Values) LLEExpr(v, evs); break;
+                case FuncDecl fd: CollectLLEvents(fd.Body, evs); break;
+            }
+        }
+        private static void LLEExpr(Expr e, HashSet<string> evs)
+        {
+            switch (e)
+            {
+                case MethodCall mc:
+                    if (mc.Target is NameRef nr && nr.Name == "LLEvents" && mc.Method == "on" && mc.Args.Count >= 1 && mc.Args[0] is StringLit sl)
+                        evs.Add(sl.Value);
+                    LLEExpr(mc.Target, evs); foreach (var a in mc.Args) LLEExpr(a, evs); break;
+                case FuncExpr fe: CollectLLEvents(fe.Body, evs); break;
+                case Binary b: LLEExpr(b.L, evs); LLEExpr(b.R, evs); break;
+                case Unary u: LLEExpr(u.E, evs); break;
+                case LlCall c: foreach (var a in c.Args) LLEExpr(a, evs); break;
+                case LibCall lc: foreach (var a in lc.Args) LLEExpr(a, evs); break;
+                case UserCall uc: foreach (var a in uc.Args) LLEExpr(a, evs); break;
+                case Index ix: LLEExpr(ix.Target, evs); LLEExpr(ix.Key, evs); break;
+                case Len ln: LLEExpr(ln.E, evs); break;
+                case TableLit tl: foreach (var f in tl.Fields) { if (f.Key != null) LLEExpr(f.Key, evs); LLEExpr(f.Value, evs); } break;
+                case Builtin bi: LLEExpr(bi.Arg, evs); break;
+            }
+        }
+
+        // Synthesize a .evt that dispatches registered LLEvents:on handlers for an event.
+        private void EmitLLEventDispatcher(string ev)
+        {
+            if (!_events.HasEventByName(ev))
+                throw new SLuaException("LLEvents:on: unknown event '" + ev + "'", 0);
+            int argc = new List<VarType>(_events.GetArguments(ev)).Count;
+            Line(".evt default/" + ev + ": args=" + argc + ", locals=0");
+            Line("gload " + _lleventsSlot);                 // registry table
+            for (int i = 0; i < argc; i++) Line("load " + i); // the event's args
+            Line("firellevents \"" + EscapeString(ev) + "\", " + argc);
+            Line("ret");
+            Line("");
+        }
+
+        // obj:method(args). LLEvents:on -> registration; otherwise a runtime method dispatch.
+        private VarType EmitMethodCall(MethodCall mc)
+        {
+            if (mc.Target is NameRef tnr && tnr.Name == "LLEvents" && mc.Method == "on")
+            {
+                if (mc.Args.Count != 2 || !(mc.Args[0] is StringLit))
+                    throw new SLuaException("LLEvents:on expects (\"eventName\", handler) with a literal event name in Tier-2", mc.Line);
+                Line("gload " + _lleventsSlot);   // registry
+                EmitExpr(mc.Args[0]);             // event name
+                EmitExpr(mc.Args[1]);             // handler closure
+                Line("regevent");
+                return VarType.Void;
+            }
+            EmitExpr(mc.Target);
+            foreach (var a in mc.Args) EmitExpr(a);
+            Line("methcall \"" + EscapeString(mc.Method) + "\", " + mc.Args.Count);
+            return Dynamic;
         }
 
         // ---- unified call emission: produce exactly `wanted` values from any call expression ----
@@ -1121,8 +1213,14 @@ namespace InWorldz.Phlox.SLua
             if (explicitStateEntry && execStmts.Count > 0)
                 throw new SLuaException("top-level code and an explicit state_entry() are both present; not supported (use one)", execStmts[0].Line);
 
+            // ---- LLEvents:on pre-scan: collect registered event names; reserve a registry global ----
+            CollectLLEvents(chunk, _lleventsUsed);
+            bool useLLEvents = _lleventsUsed.Count > 0;
+            if (useLLEvents) _lleventsSlot = topLocals.Count; // one extra global slot for the registry
+            int globalCount = topLocals.Count + (useLLEvents ? 1 : 0);
+
             // ---- header + globals-init block ----
-            Line(".globals " + topLocals.Count);
+            Line(".globals " + globalCount);
             Line(".statedef default");
             Line("");
             _scope = null; // global-init runs in no function frame
@@ -1135,16 +1233,29 @@ namespace InWorldz.Phlox.SLua
                 _globals[ld.Name] = new VarVar(i, t);   // global keeps its declared/init type
                 Line("gstore " + i);                    // store natural value (no forced cast)
             }
+            if (useLLEvents) { Line("buildtable 0"); Line("gstore " + _lleventsSlot); } // empty registry table
             Line("halt");
             Line("");
+
+            // events for which the script defines a Form-1 global handler (those win per-event)
+            var form1Events = new HashSet<string>();
+            foreach (var f in events) form1Events.Add(f.Name);
 
             // ---- synthesized state_entry from top-level code ----
             if (execStmts.Count > 0)
                 EmitHandler("state_entry", new List<string>(), execStmts, execStmts[0].Line);
 
-            // ---- event handlers ----
+            // ---- event handlers (Form-1 global functions) ----
             foreach (var f in events)
                 EmitHandler(f.Name, f.Params, f.Body, f.Line);
+
+            // ---- LLEvents:on dispatchers (Form-2) for events without a Form-1 handler ----
+            foreach (var ev in _lleventsUsed)
+            {
+                if (form1Events.Contains(ev)) continue; // Form-1 wins per-event
+                if (ev == "state_entry" && execStmts.Count > 0) continue;
+                EmitLLEventDispatcher(ev);
+            }
 
             // ---- user functions ----
             foreach (var f in userFuncs)
@@ -1462,6 +1573,7 @@ namespace InWorldz.Phlox.SLua
                 case LibCall lc when IsMultiLib(lc): EmitCallTo(lc, 0); break;  // discard
                 case LibCall lc2: EmitLibCall(lc2); Line("pop"); break;         // single-result: discard
                 case UserCall uc: EmitCallTo(uc, 0); break;                     // discard all returns
+                case MethodCall mc: { var t = EmitMethodCall(mc); if (t != VarType.Void) Line("pop"); break; }
                 default: throw new SLuaException("invalid call statement", cs.Line);
             }
         }
@@ -1614,6 +1726,12 @@ namespace InWorldz.Phlox.SLua
                     return Dynamic;
                 case FuncExpr fe:
                     return EmitFuncExpr(fe);
+                case MethodCall mc:
+                {
+                    var t = EmitMethodCall(mc);
+                    if (t == VarType.Void) Line("pushnil"); // method-call as a value must leave 1
+                    return Dynamic;
+                }
                 default:
                     throw new SLuaException("unsupported expression", e.Line);
             }

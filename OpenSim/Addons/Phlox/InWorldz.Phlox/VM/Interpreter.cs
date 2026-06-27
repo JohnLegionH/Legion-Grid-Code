@@ -814,6 +814,15 @@ namespace InWorldz.Phlox.VM
                     case OpCode.callv:
                         Op_CallV();
                         break;
+                    case OpCode.regevent:
+                        Op_RegEvent();
+                        break;
+                    case OpCode.methcall:
+                        Op_MethCall();
+                        break;
+                    case OpCode.firellevents:
+                        Op_FireLLEvents();
+                        break;
 
                     default:
                         throw new VMException("Unhandled opcode: " + opcode);
