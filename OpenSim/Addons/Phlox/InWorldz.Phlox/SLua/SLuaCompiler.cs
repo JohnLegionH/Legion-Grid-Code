@@ -268,7 +268,7 @@ namespace InWorldz.Phlox.SLua
     internal sealed class FuncDecl : Stmt { public string Name; public List<string> Params; public List<Stmt> Body; }
     // Tier-2 table statements
     internal sealed class IndexAssign : Stmt { public Expr Target; public Expr Key; public Expr Value; } // t[k]=v / t.x=v
-    internal sealed class ForIn : Stmt { public List<string> Vars; public Expr TableExpr; public List<Stmt> Body; } // for k,v in pairs(t)
+    internal sealed class ForIn : Stmt { public List<string> Vars; public Expr TableExpr; public List<Stmt> Body; public bool Gmatch; } // for k,v in pairs(t) / for w in gmatch(..)
     internal sealed class TableInsert : Stmt { public Expr Table; public Expr Value; } // table.insert(t, v)
     // Tier-2 essentials statements
     internal sealed class ForNum : Stmt { public string Var; public Expr Start; public Expr Stop; public Expr Step; public List<Stmt> Body; }
@@ -391,20 +391,33 @@ namespace InWorldz.Phlox.SLua
                 return new ForNum { Var = first, Start = start, Stop = stop, Step = step, Body = nbody, Line = line };
             }
 
-            // generic for: first [, more] in pairs(expr) do
+            // generic for: first [, more] in (pairs(expr) | ipairs(expr) | string.gmatch(s,p)) do
             var vars = new List<string> { first };
             while (IsOp(",")) { Eat(); if (Cur.Type != TT.Name) Err("expected loop variable name"); vars.Add(Eat().Text); }
             ExpectKw("in");
-            if (!(Cur.Type == TT.Name && (Cur.Text == "pairs" || Cur.Text == "ipairs")))
-                throw new SLuaException("for-in requires pairs(...) or ipairs(...) in the Tier-2 subset", Cur.Line);
-            Eat(); // 'pairs' / 'ipairs'
-            ExpectOp("(");
-            var iter = ParseExpr();
-            ExpectOp(")");
+
+            bool gmatch = false;
+            Expr iter;
+            if (Cur.Type == TT.Name && (Cur.Text == "pairs" || Cur.Text == "ipairs"))
+            {
+                Eat();
+                ExpectOp("(");
+                iter = ParseExpr();
+                ExpectOp(")");
+            }
+            else if (Cur.Type == TT.Name && Cur.Text == "string" && Next.Type == TT.Op && Next.Text == ".")
+            {
+                Expr lc = ParseLibAccess();
+                if (!(lc is LibCall g && g.Fn == "gmatch"))
+                    throw new SLuaException("for-in iterator must be pairs/ipairs or string.gmatch in the Tier-2 subset", line);
+                iter = lc; gmatch = true;
+            }
+            else throw new SLuaException("for-in requires pairs(...), ipairs(...), or string.gmatch(...) in the Tier-2 subset", Cur.Line);
+
             ExpectKw("do");
             var body = ParseBlock();
             ExpectKw("end");
-            return new ForIn { Vars = vars, TableExpr = iter, Body = body, Line = line };
+            return new ForIn { Vars = vars, TableExpr = iter, Body = body, Gmatch = gmatch, Line = line };
         }
 
         // table.insert(t, v)  (Tier-2: t must be a simple name)
@@ -1049,6 +1062,7 @@ namespace InWorldz.Phlox.SLua
 
         private void EmitForIn(ForIn f)
         {
+            if (f.Gmatch) { EmitForGmatch(f); return; }
             // for k [, v] in pairs(t) do ... end  (insertion-ordered next() protocol)
             int tSlot = AllocTempLocal();   // _t : the table
             int kSlot = AllocTempLocal();   // _k : iteration cursor
@@ -1074,6 +1088,31 @@ namespace InWorldz.Phlox.SLua
             Line("brt " + end);       // cursor exhausted -> done
             Line("load " + kSlot);
             Line("store " + var0);    // k = _k
+            EmitBlock(f.Body);
+            Line("jmp " + top);
+            Label(end);
+        }
+
+        // for v1[..vK] in string.gmatch(s, p) do ... end  (mirrors pairs/tabnext via gmatchnext)
+        private void EmitForGmatch(ForIn f)
+        {
+            var lc = (LibCall)f.TableExpr;
+            int itSlot = AllocTempLocal();
+            var varSlots = new int[f.Vars.Count];
+            for (int i = 0; i < f.Vars.Count; i++) varSlots[i] = AllocNamedLocal(f.Vars[i], Dynamic);
+
+            int id = LibFuncId(lc.Lib, lc.Fn, lc.Line); // StrGmatch -> single LuaGmatch
+            foreach (var a in lc.Args) EmitExpr(a);      // s, p
+            Line("luacall " + id + ", " + lc.Args.Count);
+            Line("store " + itSlot);
+
+            string top = NewLabel("gm");
+            string end = NewLabel("gmend");
+            Label(top);
+            Line("load " + itSlot);
+            Line("gmatchnext " + f.Vars.Count);          // [cap1..capK, 1] or [0]
+            Line("brf " + end);                          // pop flag; done when 0
+            for (int i = f.Vars.Count - 1; i >= 0; i--) Line("store " + varSlots[i]); // top = capK
             EmitBlock(f.Body);
             Line("jmp " + top);
             Label(end);
@@ -1137,15 +1176,25 @@ namespace InWorldz.Phlox.SLua
         // expands to its full multiplicity (a user call's R values); earlier ones adjust to 1.
         private void EmitValuesAdjusted(List<Expr> values, int target, int line)
         {
-            int produced = 0;
-            for (int i = 0; i < values.Count; i++)
+            int n = values.Count;
+            if (n == 0) { for (int k = 0; k < target; k++) Line("pushnil"); return; }
+            for (int i = 0; i < n - 1; i++) EmitExpr(values[i]); // earlier exprs: 1 value each
+            int earlier = n - 1;
+            Expr last = values[n - 1];
+            if (IsMultiCall(last))
             {
-                if (i == values.Count - 1 && values[i] is UserCall uc)
-                    produced += EmitUserCallMulti(uc);
-                else { EmitExpr(values[i]); produced++; }
+                int need = target - earlier;
+                EmitMultiCall(last);                 // [vals..., count]
+                if (need >= 0) Line("adjustm " + need);
+                else { Line("adjustm 0"); for (int k = 0; k < -need; k++) Line("pop"); }
             }
-            if (produced > target) for (int k = 0; k < produced - target; k++) Line("pop");
-            else for (int k = 0; k < target - produced; k++) Line("pushnil");
+            else
+            {
+                EmitExpr(last);                       // 1 value
+                int produced = earlier + 1;
+                if (produced > target) for (int k = 0; k < produced - target; k++) Line("pop");
+                else for (int k = 0; k < target - produced; k++) Line("pushnil");
+            }
         }
 
         // Emit a user-function call, leaving its R return values on the stack. Returns R.
@@ -1167,19 +1216,16 @@ namespace InWorldz.Phlox.SLua
             switch (cs.Call)
             {
                 case LlCall ll: EmitLlCall(ll, statementLevel: true); break;
-                case LibCall lc: EmitLibCall(lc); Line("pop"); break;        // discard result
-                case UserCall uc:
-                {
-                    int r = EmitUserCallMulti(uc);
-                    for (int k = 0; k < r; k++) Line("pop");                  // discard all returns
-                    break;
-                }
+                case LibCall lc when IsMultiLib(lc): EmitMultiCall(lc); Line("adjustm 0"); break; // discard
+                case LibCall lc2: EmitLibCall(lc2); Line("pop"); break;                           // single-result: discard
+                case UserCall uc: EmitMultiCall(uc); Line("adjustm 0"); break;                    // discard all returns
                 default: throw new SLuaException("invalid call statement", cs.Line);
             }
         }
 
         private VarType EmitLibCall(LibCall lc)
         {
+            if (IsMultiLib(lc)) { EmitMultiCall(lc); Line("adjustm 1"); return Dynamic; }
             int id = LibFuncId(lc.Lib, lc.Fn, lc.Line);
             foreach (var a in lc.Args) EmitExpr(a);
             Line("luacall " + id + ", " + lc.Args.Count);
@@ -1214,9 +1260,42 @@ namespace InWorldz.Phlox.SLua
                 case "math.sqrt":     return (int)LuaLib.Func.MathSqrt;
                 case "math.random":   return (int)LuaLib.Func.MathRandom;
                 case "math.randomseed": return (int)LuaLib.Func.MathRandomSeed;
+                case "string.find":   return (int)LuaLib.Func.StrFind;
+                case "string.match":  return (int)LuaLib.Func.StrMatch;
+                case "string.gsub":   return (int)LuaLib.Func.StrGsub;
+                case "string.gmatch": return (int)LuaLib.Func.StrGmatch;
                 default:
                     throw new SLuaException("unsupported stdlib function '" + key + "' in the Tier-2 subset", line);
             }
+        }
+
+        // find/match/gsub return a runtime-variable number of values (captures).
+        private static bool IsMultiLib(LibCall lc)
+        {
+            return lc.Lib == "string" && (lc.Fn == "find" || lc.Fn == "match" || lc.Fn == "gsub");
+        }
+
+        // Leave [values..., count] on the stack for a multi-value call (user fn or multi-lib).
+        // For user functions the count is the static return arity; for multi-lib it is runtime.
+        private void EmitMultiCall(Expr e)
+        {
+            if (e is UserCall uc)
+            {
+                int r = EmitUserCallMulti(uc);  // leaves R values
+                Line("iconst " + r);            // ...then the (static) count
+            }
+            else if (e is LibCall lc && IsMultiLib(lc))
+            {
+                int id = LibFuncId(lc.Lib, lc.Fn, lc.Line);
+                foreach (var a in lc.Args) EmitExpr(a);
+                Line("luacallm " + id + ", " + lc.Args.Count); // leaves [values..., count]
+            }
+            else throw new SLuaException("not a multi-value call", e.Line);
+        }
+
+        private static bool IsMultiCall(Expr e)
+        {
+            return e is UserCall || (e is LibCall lc && IsMultiLib(lc));
         }
 
         private void EmitIf(IfStmt ifs)
@@ -1311,12 +1390,9 @@ namespace InWorldz.Phlox.SLua
                 case LibValue lv:
                     return EmitLibValue(lv);
                 case UserCall uc:
-                {
-                    int r = EmitUserCallMulti(uc);   // R values on stack
-                    if (r == 0) Line("pushnil");      // single-value context wants 1
-                    else for (int k = 0; k < r - 1; k++) Line("pop");
+                    EmitMultiCall(uc);   // [vals..., count]
+                    Line("adjustm 1");   // single-value context
                     return Dynamic;
-                }
                 default:
                     throw new SLuaException("unsupported expression", e.Line);
             }

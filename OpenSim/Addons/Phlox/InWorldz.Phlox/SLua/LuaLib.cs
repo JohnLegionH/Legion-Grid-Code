@@ -24,7 +24,9 @@ namespace InWorldz.Phlox.SLua
             // math.* (functions)
             MathFloor, MathCeil, MathAbs, MathMin, MathMax, MathSqrt, MathRandom, MathRandomSeed,
             // math.* (value, exposed as a 0-arg call)
-            MathHuge
+            MathHuge,
+            // pattern matching (find/match/gsub are multi-result -> CallMulti; gmatch -> Call)
+            StrFind, StrMatch, StrGsub, StrGmatch
         }
 
         // Not part of RuntimeState: math.random's sequence is not reproduced across serialization
@@ -54,9 +56,44 @@ namespace InWorldz.Phlox.SLua
                 case Func.MathRandomSeed: _rng = new Random((int)Num(At(args, 0))); return LuaNil.Instance;
                 case Func.MathHuge:       return float.PositiveInfinity;
 
+                case Func.StrGmatch:      return new LuaGmatch(Str(At(args, 0)), Str(At(args, 1)));
+
                 default: throw new CheckException("unknown lua stdlib function id " + funcId);
             }
         }
+
+        // Multi-result functions: return the actual (runtime-variable) value list.
+        public static object[] CallMulti(int funcId, object[] args)
+        {
+            switch ((Func)funcId)
+            {
+                case Func.StrFind:
+                {
+                    var r = LuaPattern.Find(Str(At(args, 0)), Str(At(args, 1)), IntArg(At(args, 2), 1), Truthy(At(args, 3)));
+                    return r == null ? new object[] { LuaNil.Instance } : r.ToArray();
+                }
+                case Func.StrMatch:
+                {
+                    var r = LuaPattern.MatchOne(Str(At(args, 0)), Str(At(args, 1)), IntArg(At(args, 2), 1));
+                    return r == null ? new object[] { LuaNil.Instance } : r.ToArray();
+                }
+                case Func.StrGsub:
+                {
+                    string s = Str(At(args, 0)), p = Str(At(args, 1));
+                    object repl = At(args, 2);
+                    int maxN = (args.Length >= 4 && args[3] != null && !(args[3] is LuaNil)) ? (int)Num(args[3]) : int.MaxValue;
+                    if (!(repl is string))
+                        throw new CheckException("string.gsub: only string replacement is supported in Tier-2 " +
+                                                 "(function/table replacement needs first-class functions; coming with closures)");
+                    string result; int count;
+                    LuaPattern.GSubString(s, p, (string)repl, maxN, out result, out count);
+                    return new object[] { result, (float)count };
+                }
+                default: throw new CheckException("not a multi-result lua function id " + funcId);
+            }
+        }
+
+        private static bool Truthy(object o) { return !(o == null || o is LuaNil || (o is bool b && !b)); }
 
         // ---- argument / coercion helpers ----
         private static object At(object[] a, int i) { return (i < a.Length) ? a[i] : null; }

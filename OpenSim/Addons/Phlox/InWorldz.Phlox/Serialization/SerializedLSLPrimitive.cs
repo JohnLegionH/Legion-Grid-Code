@@ -114,6 +114,13 @@ namespace InWorldz.Phlox.Serialization
             set { if (value.HasValue) Value = value.Value; }
         }
 
+        [ProtoMember(13)]
+        private SerializedLuaGmatch ValueGmatch
+        {
+            get { return (Value is Types.LuaGmatch g) ? new SerializedLuaGmatch(g) : null; }
+            set { if (value != null) Value = value.ToGmatch(); }
+        }
+
 		[ProtoMember(8)]
         private SerializedVector3 ValueVector
         {
@@ -280,6 +287,9 @@ namespace InWorldz.Phlox.Serialization
             if (Value is Types.LuaNil)
                 return true;
 
+            if (Value is Types.LuaGmatch)
+                return true;
+
 			if (Value is VM.FunctionInfo)
 				return true;
             if (Value is SerializedStackFrame)
@@ -290,6 +300,17 @@ namespace InWorldz.Phlox.Serialization
             */
             return false;
         }
+    }
+
+    [ProtoContract]
+    public class SerializedLuaGmatch
+    {
+        [ProtoMember(1)] public string Src;
+        [ProtoMember(2)] public string Pat;
+        [ProtoMember(3)] public int Pos;
+        public SerializedLuaGmatch() { }
+        public SerializedLuaGmatch(Types.LuaGmatch g) { Src = g.Src; Pat = g.Pat; Pos = g.Pos; }
+        public Types.LuaGmatch ToGmatch() { return new Types.LuaGmatch { Src = Src, Pat = Pat, Pos = Pos }; }
     }
 
     [ProtoContract]

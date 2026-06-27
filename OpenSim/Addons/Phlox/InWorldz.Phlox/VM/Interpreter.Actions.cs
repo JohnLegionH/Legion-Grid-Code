@@ -1733,6 +1733,47 @@ namespace InWorldz.Phlox.VM
             SafeOperandsPush(result ?? (object)LuaNil.Instance);
         }
 
+        // Multi-result stdlib (find/match/gsub): pop argc args; push N results then push N (count).
+        private void Op_LuaCallM()
+        {
+            int funcId = this.GetIntOperand();
+            int argc = this.GetIntOperand();
+            object[] args = new object[argc];
+            for (int i = argc - 1; i >= 0; --i) args[i] = _state.Operands.Pop();
+            object[] res = SLua.LuaLib.CallMulti(funcId, args);
+            for (int i = 0; i < res.Length; i++) _state.Operands.Push(res[i] ?? (object)LuaNil.Instance);
+            SafeOperandsPush(res.Length); // runtime count on top
+        }
+
+        // Reconcile a runtime-counted value group to exactly T values. Operand T; pops the count.
+        private void Op_AdjustM()
+        {
+            int target = this.GetIntOperand();
+            int k = ConvToInt(_state.Operands.Pop());
+            if (k > target) for (int i = 0; i < k - target; i++) _state.Operands.Pop();
+            else for (int i = 0; i < target - k; i++) SafeOperandsPush(LuaNil.Instance);
+        }
+
+        // gmatch iteration step. Operand K = number of for-loop variables.
+        // Pop the LuaGmatch, advance it; on a match push K captures (pad/truncate) then int 1;
+        // when exhausted push only int 0.
+        private void Op_GmatchNext()
+        {
+            int k = this.GetIntOperand();
+            object o = _state.Operands.Pop();
+            if (!(o is LuaGmatch gm))
+                throw new CheckException("gmatch iterator expected");
+
+            int pos = gm.Pos;
+            var caps = SLua.LuaPattern.GMatchStep(gm.Src, gm.Pat, ref pos);
+            gm.Pos = pos; // mutate in place (the slot keeps the same reference)
+
+            if (caps == null) { SafeOperandsPush(0); return; }
+            for (int i = 0; i < k; i++)
+                _state.Operands.Push(i < caps.Count ? (caps[i] ?? (object)LuaNil.Instance) : LuaNil.Instance);
+            SafeOperandsPush(1);
+        }
+
         private void Op_Trace()
         {
             object top = _state.Operands.Pop();

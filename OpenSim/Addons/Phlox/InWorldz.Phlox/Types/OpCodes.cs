@@ -165,7 +165,12 @@ namespace InWorldz.Phlox.Types
         dup,            // duplicate the top operand (for and/or short-circuit)
 
         // ---- SLua Tier-2: stdlib dispatch (operands: lib-func id, arg count) ----
-        luacall          // pop argc args, call LuaLib.Call(funcid, args), push the result
+        luacall,         // pop argc args, call LuaLib.Call(funcid, args), push the result
+
+        // ---- SLua Tier-2: pattern matching plumbing (multi-result + gmatch iterator) ----
+        luacallm,        // pop argc args, call LuaLib.CallMulti -> push N results then push N (count)
+        adjustm,         // operand T: pop count k, adjust the k values on top to exactly T (pad nil/pop)
+        gmatchnext       // operand K: pop LuaGmatch, advance; push K captures + int 1, or just int 0 (done)
     }
 
 
