@@ -2261,6 +2261,89 @@ namespace InWorldz.Phlox.VM
             SafeOperandsPush(LuaNil.Instance);
         }
 
+        // ============================================================
+        // SLua conformance pass: error handling (error/pcall) + table.sort
+        // ============================================================
+        private void Op_LuaError()
+        {
+            object v = _state.Operands.Pop();
+            throw new LuaError(IsNilValue(v) ? null : v);
+        }
+
+        // pcall(f, ...): run f protected. Pushes exactly two values: (true, firstResult) on success,
+        // (false, errValue) on a script error. (First-result only is a documented minor simplification
+        // vs Luau's full multi-return -- covers the canonical `local ok, r = pcall(...)`.)
+        private void Op_LuaPcall()
+        {
+            int argc = this.GetIntOperand();
+            object[] argv = new object[argc];
+            for (int i = argc - 1; i >= 0; --i) argv[i] = _state.Operands.Pop();
+            object f = _state.Operands.Pop();
+
+            int baseCalls = _state.Calls.Count;
+            int baseStack = _state.Operands.Count;
+            int savedIP = _state.IP;
+            StackFrame savedTop = _state.TopFrame;
+
+            try
+            {
+                if (!(f is LuaClosure cl)) throw new LuaError("attempt to call a non-function value");
+                object res = InvokeClosureSync(cl, argv);
+                SafeOperandsPush(true);
+                SafeOperandsPush(res ?? (object)LuaNil.Instance);
+            }
+            catch (LuaError le)      { PcallUnwind(baseCalls, baseStack, savedIP, savedTop); SafeOperandsPush(false); SafeOperandsPush(le.Value ?? (object)LuaNil.Instance); }
+            catch (CheckException ce){ PcallUnwind(baseCalls, baseStack, savedIP, savedTop); SafeOperandsPush(false); SafeOperandsPush(ce.Message ?? "error"); }
+            catch (VMException ve)   { PcallUnwind(baseCalls, baseStack, savedIP, savedTop); SafeOperandsPush(false); SafeOperandsPush(ve.Message ?? "error"); }
+        }
+
+        // Restore VM state after a trapped error: discard frames/operands created during the protected
+        // call (balancing MemInfo as Op_Ret does), and reset IP/TopFrame to the pcall site.
+        private void PcallUnwind(int baseCalls, int baseStack, int savedIP, StackFrame savedTop)
+        {
+            while (_state.Calls.Count > baseCalls) _state.MemInfo.CompleteCall(_state.Calls.Pop());
+            while (_state.Operands.Count > baseStack) _state.Operands.Pop();
+            _state.IP = savedIP;
+            _state.TopFrame = savedTop;
+        }
+
+        // table.sort(t [, comp]): in-place ascending sort of the array part; comp(a,b) is a closure
+        // returning truthy when a should come before b (else default Lua '<'). Pushes the table back.
+        private void Op_LuaSort()
+        {
+            object cmp = _state.Operands.Pop();
+            object t = _state.Operands.Pop();
+            if (!(t is LSLTable table)) throw new CheckException("table.sort: table expected");
+
+            int n = table.Length;
+            var items = new List<object>(n);
+            for (int i = 1; i <= n; i++) items.Add(table.Get(i));
+
+            LuaClosure comp = cmp as LuaClosure;
+            Comparison<object> less;
+            if (comp != null)
+                less = (a, b) =>
+                {
+                    if (LuaIsTruthy(InvokeClosureSync(comp, new object[] { a, b }))) return -1;
+                    if (LuaIsTruthy(InvokeClosureSync(comp, new object[] { b, a }))) return 1;
+                    return 0;
+                };
+            else
+                less = (a, b) => DefaultLuaCompare(a, b);
+
+            items.Sort(less);
+            for (int i = 0; i < n; i++) table.Set(i + 1, items[i]);
+            SafeOperandsPush(table);
+        }
+
+        // Default order for table.sort with no comparator: numbers by value, strings lexicographically.
+        private static int DefaultLuaCompare(object a, object b)
+        {
+            if (IsLuaNumber(a) && IsLuaNumber(b)) return ConvToFloat(a).CompareTo(ConvToFloat(b));
+            if (a is string sa && b is string sb) return string.CompareOrdinal(sa, sb);
+            throw new CheckException("table.sort: attempt to compare incompatible values");
+        }
+
         private void Op_Trace()
         {
             object top = _state.Operands.Pop();

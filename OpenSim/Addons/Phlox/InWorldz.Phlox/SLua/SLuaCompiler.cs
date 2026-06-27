@@ -261,6 +261,7 @@ namespace InWorldz.Phlox.SLua
     internal sealed class MethodCall : Expr { public Expr Target; public string Method; public List<Expr> Args; } // obj:method(args)
     internal sealed class MetaCall : Expr { public string Name; public List<Expr> Args; }                   // setmetatable/getmetatable
     internal sealed class VecCtor : Expr { public bool IsRot; public List<Expr> Args; }                      // vector(x,y,z) / rotation(x,y,z,s)
+    internal sealed class CoreCall : Expr { public string Name; public List<Expr> Args; }                    // print/error/assert/pcall
 
     internal abstract class Stmt : Node { }
     internal sealed class LocalDecl : Stmt { public string Name; public Expr Init; }
@@ -336,10 +337,6 @@ namespace InWorldz.Phlox.SLua
             // Name-led statements.
             if (Cur.Type == TT.Name)
             {
-                // table.insert(t, v) library statement (special-cased: statement-only)
-                if (Cur.Text == "table" && Next.Type == TT.Op && Next.Text == ".")
-                    return ParseTableLibCall();
-
                 Expr first = ParsePrimary();  // NameRef / Index / LlCall / LibCall / UserCall
 
                 // single index-assign: t[k] = v
@@ -365,7 +362,7 @@ namespace InWorldz.Phlox.SLua
                 }
 
                 // call statement (result discarded)
-                if (first is LlCall || first is UserCall || first is LibCall || first is MethodCall)
+                if (first is LlCall || first is UserCall || first is LibCall || first is MethodCall || first is CoreCall)
                     return new CallStmt { Call = first, Line = line };
 
                 throw new SLuaException("expected '=' (assignment) or a call statement", line);
@@ -692,7 +689,7 @@ namespace InWorldz.Phlox.SLua
             {
                 if (t.Text == "ll" && Next.Type == TT.Op && Next.Text == ".")
                     return ParseLlCall();
-                if ((t.Text == "string" || t.Text == "math") && Next.Type == TT.Op && Next.Text == ".")
+                if ((t.Text == "string" || t.Text == "math" || t.Text == "table") && Next.Type == TT.Op && Next.Text == ".")
                     return ParseLibAccess();
                 if ((t.Text == "type" || t.Text == "tostring" || t.Text == "tonumber")
                     && Next.Type == TT.Op && Next.Text == "(")
@@ -717,6 +714,13 @@ namespace InWorldz.Phlox.SLua
                     Eat();                  // constructor name
                     var vargs = ParseCallArgs();
                     return ParsePostfix(new VecCtor { IsRot = isRot, Args = vargs, Line = t.Line });
+                }
+                if ((t.Text == "print" || t.Text == "error" || t.Text == "assert" || t.Text == "pcall")
+                    && Next.Type == TT.Op && Next.Text == "(")
+                {
+                    Eat();                  // core builtin name
+                    var cargs = ParseCallArgs();
+                    return ParsePostfix(new CoreCall { Name = t.Text, Args = cargs, Line = t.Line });
                 }
                 Eat();
                 if (IsOp("("))   // user function call: name(args)
@@ -1038,6 +1042,7 @@ namespace InWorldz.Phlox.SLua
                 case MethodCall mc: ScanExprForNested(mc.Target, names); foreach (var a in mc.Args) ScanExprForNested(a, names); break;
                 case MetaCall mtc: foreach (var a in mtc.Args) ScanExprForNested(a, names); break;
                 case VecCtor vtc: foreach (var a in vtc.Args) ScanExprForNested(a, names); break;
+                case CoreCall cc: foreach (var a in cc.Args) ScanExprForNested(a, names); break;
             }
         }
         private static void AllNamesList(List<Stmt> body, HashSet<string> names) { foreach (var s in body) AllNamesStmt(s, names); }
@@ -1079,6 +1084,7 @@ namespace InWorldz.Phlox.SLua
                 case MethodCall mc: AllNamesExpr(mc.Target, names); foreach (var a in mc.Args) AllNamesExpr(a, names); break;
                 case MetaCall mtc: foreach (var a in mtc.Args) AllNamesExpr(a, names); break;
                 case VecCtor vtc: foreach (var a in vtc.Args) AllNamesExpr(a, names); break;
+                case CoreCall cc: foreach (var a in cc.Args) AllNamesExpr(a, names); break;
             }
         }
 
@@ -1124,6 +1130,7 @@ namespace InWorldz.Phlox.SLua
                 case Builtin bi: LLEExpr(bi.Arg, evs); break;
                 case MetaCall mtc: foreach (var a in mtc.Args) LLEExpr(a, evs); break;
                 case VecCtor vtc: foreach (var a in vtc.Args) LLEExpr(a, evs); break;
+                case CoreCall cc: foreach (var a in cc.Args) LLEExpr(a, evs); break;
             }
         }
 
@@ -1161,7 +1168,7 @@ namespace InWorldz.Phlox.SLua
         }
 
         // ---- unified call emission: produce exactly `wanted` values from any call expression ----
-        private static bool IsCallExpr(Expr e) { return e is UserCall || (e is LibCall lc && IsMultiLib(lc)); }
+        private static bool IsCallExpr(Expr e) { return e is UserCall || (e is LibCall lc && IsMultiLib(lc)) || e is CoreCall; }
 
         private void EmitCallTo(Expr e, int wanted)
         {
@@ -1173,6 +1180,7 @@ namespace InWorldz.Phlox.SLua
                 Line("adjustm " + wanted);
                 return;
             }
+            if (e is CoreCall cc) { EmitCoreCall(cc, wanted); return; }
             if (e is UserCall uc)
             {
                 var r = Resolve(uc.Name);
@@ -1218,12 +1226,22 @@ namespace InWorldz.Phlox.SLua
                 else execStmts.Add(s);
             }
 
+            // SL semantics: when top-level code is present it IS the rez handler, and a user-defined
+            // `function state_entry()` is an ORDINARY function the author calls explicitly (NOT auto-fired).
+            // So with top-level code, state_entry is reclassified out of the event set into user functions
+            // (no auto-fire, no double-fire, no rejection). With NO top-level code we keep the LSL-parity
+            // convenience of auto-firing a `state_entry` event. SL's canonical default script (function
+            // state_entry + LLEvents:on + an explicit state_entry() call) thus compiles and behaves as on SL.
+            bool hasTopLevel = execStmts.Count > 0;
+
             // partition: event handlers vs user functions; pre-register user-function signatures
             var events = new List<FuncDecl>();
             var userFuncs = new List<FuncDecl>();
             foreach (var f in funcs)
             {
-                if (_events.HasEventByName(f.Name)) events.Add(f);
+                bool isEvent = _events.HasEventByName(f.Name)
+                               && !(hasTopLevel && f.Name == "state_entry"); // SL: state_entry is a plain fn here
+                if (isEvent) events.Add(f);
                 else
                 {
                     userFuncs.Add(f);
@@ -1231,10 +1249,6 @@ namespace InWorldz.Phlox.SLua
                     _userReturns[f.Name] = AnalyzeReturnCount(f.Body);
                 }
             }
-
-            bool explicitStateEntry = events.Exists(f => f.Name == "state_entry");
-            if (explicitStateEntry && execStmts.Count > 0)
-                throw new SLuaException("top-level code and an explicit state_entry() are both present; not supported (use one)", execStmts[0].Line);
 
             // ---- LLEvents:on pre-scan: collect registered event names; reserve a registry global ----
             CollectLLEvents(chunk, _lleventsUsed);
@@ -1597,6 +1611,7 @@ namespace InWorldz.Phlox.SLua
                 case LibCall lc2: EmitLibCall(lc2); Line("pop"); break;         // single-result: discard
                 case UserCall uc: EmitCallTo(uc, 0); break;                     // discard all returns
                 case MethodCall mc: { var t = EmitMethodCall(mc); if (t != VarType.Void) Line("pop"); break; }
+                case CoreCall cc: EmitCoreCall(cc, 0); break;          // discard result(s)
                 default: throw new SLuaException("invalid call statement", cs.Line);
             }
         }
@@ -1604,6 +1619,15 @@ namespace InWorldz.Phlox.SLua
         private VarType EmitLibCall(LibCall lc)
         {
             if (IsMultiLib(lc)) { EmitCallTo(lc, 1); return Dynamic; }
+            // table.sort needs a comparator closure invoked by the VM -> dedicated 'luasort' op.
+            if (lc.Lib == "table" && lc.Fn == "sort")
+            {
+                if (lc.Args.Count < 1) throw new SLuaException("table.sort expects (table [, comparator])", lc.Line);
+                EmitExpr(lc.Args[0]);                               // the table
+                if (lc.Args.Count >= 2) EmitExpr(lc.Args[1]); else Line("pushnil"); // comparator or nil
+                Line("luasort");                                    // sorts in place, pushes the table back
+                return Dynamic;
+            }
             int id = LibFuncId(lc.Lib, lc.Fn, lc.Line);
             foreach (var a in lc.Args) EmitExpr(a);
             Line("luacall " + id + ", " + lc.Args.Count);
@@ -1642,6 +1666,31 @@ namespace InWorldz.Phlox.SLua
                 case "string.match":  return (int)LuaLib.Func.StrMatch;
                 case "string.gsub":   return (int)LuaLib.Func.StrGsub;
                 case "string.gmatch": return (int)LuaLib.Func.StrGmatch;
+                // ---- conformance pass: math breadth ----
+                case "math.sin":      return (int)LuaLib.Func.MathSin;
+                case "math.cos":      return (int)LuaLib.Func.MathCos;
+                case "math.tan":      return (int)LuaLib.Func.MathTan;
+                case "math.asin":     return (int)LuaLib.Func.MathAsin;
+                case "math.acos":     return (int)LuaLib.Func.MathAcos;
+                case "math.atan":     return (int)LuaLib.Func.MathAtan;
+                case "math.atan2":    return (int)LuaLib.Func.MathAtan;   // atan2(y,x) == atan(y,x)
+                case "math.exp":      return (int)LuaLib.Func.MathExp;
+                case "math.log":      return (int)LuaLib.Func.MathLog;
+                case "math.pow":      return (int)LuaLib.Func.MathPow;
+                case "math.fmod":     return (int)LuaLib.Func.MathFmod;
+                case "math.deg":      return (int)LuaLib.Func.MathDeg;
+                case "math.rad":      return (int)LuaLib.Func.MathRad;
+                case "math.round":    return (int)LuaLib.Func.MathRound;
+                case "math.sign":     return (int)LuaLib.Func.MathSign;
+                case "math.clamp":    return (int)LuaLib.Func.MathClamp;
+                case "math.modf":     return (int)LuaLib.Func.MathModf;
+                // ---- conformance pass: string / table breadth ----
+                case "string.reverse": return (int)LuaLib.Func.StrReverse;
+                case "string.split":   return (int)LuaLib.Func.StrSplit;
+                case "table.insert":   return (int)LuaLib.Func.TblInsert;
+                case "table.remove":   return (int)LuaLib.Func.TblRemove;
+                case "table.concat":   return (int)LuaLib.Func.TblConcat;
+                case "table.unpack":   return (int)LuaLib.Func.TblUnpack;
                 default:
                     throw new SLuaException("unsupported stdlib function '" + key + "' in the Tier-2 subset", line);
             }
@@ -1650,7 +1699,9 @@ namespace InWorldz.Phlox.SLua
         // find/match/gsub return a runtime-variable number of values (captures).
         private static bool IsMultiLib(LibCall lc)
         {
-            return lc.Lib == "string" && (lc.Fn == "find" || lc.Fn == "match" || lc.Fn == "gsub");
+            return (lc.Lib == "string" && (lc.Fn == "find" || lc.Fn == "match" || lc.Fn == "gsub"))
+                || (lc.Lib == "math" && lc.Fn == "modf")
+                || (lc.Lib == "table" && lc.Fn == "unpack");
         }
 
         private void EmitIf(IfStmt ifs)
@@ -1725,6 +1776,9 @@ namespace InWorldz.Phlox.SLua
                     return EmitMetaCall(mc);
                 case VecCtor vc:
                     return EmitVecCtor(vc);
+                case CoreCall cc:
+                    EmitCoreCall(cc, 1);
+                    return Dynamic;
                 case Binary bin:
                     return EmitBinary(bin);
                 case LlCall c:
@@ -1803,6 +1857,63 @@ namespace InWorldz.Phlox.SLua
             }
             Line("mkclosure " + name + "(), " + upvals.Count);
             return Dynamic;
+        }
+
+        // print/error/assert/pcall. `wanted` = how many values the context consumes.
+        private void EmitCoreCall(CoreCall cc, int wanted)
+        {
+            switch (cc.Name)
+            {
+                case "print":
+                    // tostring each arg, tab-separated, -> llOwnerSay (debug/owner channel). Returns nothing.
+                    if (cc.Args.Count == 0) Line("sconst \"\"");
+                    else
+                    {
+                        EmitExpr(cc.Args[0]); Line("luatostr");
+                        for (int i = 1; i < cc.Args.Count; i++)
+                        {
+                            Line("sconst \"\\t\""); Line("concat");
+                            EmitExpr(cc.Args[i]); Line("luatostr"); Line("concat");
+                        }
+                    }
+                    Line("syscall llOwnerSay()");
+                    for (int k = 0; k < wanted; k++) Line("pushnil");   // print returns nothing
+                    return;
+
+                case "error":
+                    if (cc.Args.Count > 0) EmitExpr(cc.Args[0]); else Line("pushnil");
+                    Line("luaerror");                                   // never returns
+                    for (int k = 0; k < wanted; k++) Line("pushnil");   // keep stack shape (unreachable)
+                    return;
+
+                case "assert":
+                {
+                    if (cc.Args.Count < 1) throw new SLuaException("assert expects (value [, message])", cc.Line);
+                    EmitExpr(cc.Args[0]);                               // [v]
+                    Line("dup");                                       // [v, v]
+                    Line("luatruthy");                                 // [v, int]
+                    string ok = NewLabel("assert");
+                    Line("brt " + ok);                                 // pops int; truthy -> ok ([v])
+                    Line("pop");                                       // drop v
+                    if (cc.Args.Count >= 2) EmitExpr(cc.Args[1]); else Line("sconst \"assertion failed!\"");
+                    Line("luaerror");
+                    Label(ok);                                         // [v]
+                    if (wanted == 0) Line("pop"); else for (int k = 1; k < wanted; k++) Line("pushnil");
+                    return;
+                }
+
+                case "pcall":
+                {
+                    if (cc.Args.Count < 1) throw new SLuaException("pcall expects (function [, args...])", cc.Line);
+                    EmitExpr(cc.Args[0]);                               // the function value
+                    for (int i = 1; i < cc.Args.Count; i++) EmitExpr(cc.Args[i]);
+                    Line("luapcall " + (cc.Args.Count - 1));           // pushes exactly 2: (ok, result)
+                    if (wanted < 2) for (int k = 0; k < 2 - wanted; k++) Line("pop");
+                    else for (int k = 0; k < wanted - 2; k++) Line("pushnil");
+                    return;
+                }
+            }
+            throw new SLuaException("unknown core builtin '" + cc.Name + "'", cc.Line);
         }
 
         // vector(x,y,z) -> buildvec ; rotation/quaternion(x,y,z,s) -> buildrot. Args coerced to float by

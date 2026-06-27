@@ -218,6 +218,9 @@
     <Compile Include="Types\LuaNil.cs">
       <SubType>Code</SubType>
     </Compile>
+    <Compile Include="Types\LuaError.cs">
+      <SubType>Code</SubType>
+    </Compile>
     <Compile Include="Serialization\SerializedLSLTable.cs">
       <SubType>Code</SubType>
     </Compile>

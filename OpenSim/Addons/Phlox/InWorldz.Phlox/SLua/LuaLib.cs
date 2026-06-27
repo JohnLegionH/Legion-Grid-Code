@@ -26,7 +26,14 @@ namespace InWorldz.Phlox.SLua
             // math.* (value, exposed as a 0-arg call)
             MathHuge,
             // pattern matching (find/match/gsub are multi-result -> CallMulti; gmatch -> Call)
-            StrFind, StrMatch, StrGsub, StrGmatch
+            StrFind, StrMatch, StrGsub, StrGmatch,
+            // ---- conformance pass: math.* breadth (Luau) ----
+            MathSin, MathCos, MathTan, MathAsin, MathAcos, MathAtan, MathExp, MathLog,
+            MathPow, MathFmod, MathDeg, MathRad, MathRound, MathSign, MathClamp,
+            // ---- conformance pass: string.* / table.* (single-return) ----
+            StrSplit, StrReverse, TblRemove, TblConcat, TblInsert,
+            // ---- conformance pass: multi-return (CallMulti) ----
+            MathModf, TblUnpack
         }
 
         // Not part of RuntimeState: math.random's sequence is not reproduced across serialization
@@ -57,6 +64,38 @@ namespace InWorldz.Phlox.SLua
                 case Func.MathHuge:       return float.PositiveInfinity;
 
                 case Func.StrGmatch:      return new LuaGmatch(Str(At(args, 0)), Str(At(args, 1)));
+
+                // ---- math.* breadth (radians, like Luau/Lua) ----
+                case Func.MathSin:        return (float)Math.Sin(Num(At(args, 0)));
+                case Func.MathCos:        return (float)Math.Cos(Num(At(args, 0)));
+                case Func.MathTan:        return (float)Math.Tan(Num(At(args, 0)));
+                case Func.MathAsin:       return (float)Math.Asin(Num(At(args, 0)));
+                case Func.MathAcos:       return (float)Math.Acos(Num(At(args, 0)));
+                case Func.MathAtan:       // Luau: atan(y) or atan(y, x); also covers atan2(y, x)
+                    return (args.Length >= 2 && !(args[1] is LuaNil) && args[1] != null)
+                        ? (float)Math.Atan2(Num(At(args, 0)), Num(At(args, 1)))
+                        : (float)Math.Atan(Num(At(args, 0)));
+                case Func.MathExp:        return (float)Math.Exp(Num(At(args, 0)));
+                case Func.MathLog:        // log(x) natural; log(x, base) optional
+                    return (args.Length >= 2 && !(args[1] is LuaNil) && args[1] != null)
+                        ? (float)Math.Log(Num(At(args, 0)), Num(At(args, 1)))
+                        : (float)Math.Log(Num(At(args, 0)));
+                case Func.MathPow:        return (float)Math.Pow(Num(At(args, 0)), Num(At(args, 1)));
+                case Func.MathFmod:       return (float)(Num(At(args, 0)) % Num(At(args, 1))); // C fmod: same sign as x
+                case Func.MathDeg:        return (float)(Num(At(args, 0)) * (180.0 / Math.PI));
+                case Func.MathRad:        return (float)(Num(At(args, 0)) * (Math.PI / 180.0));
+                case Func.MathRound:      return (float)Math.Round(Num(At(args, 0)), MidpointRounding.AwayFromZero); // Luau: half away from zero
+                case Func.MathSign:       { double d = Num(At(args, 0)); return (float)(d > 0 ? 1 : (d < 0 ? -1 : 0)); }
+                case Func.MathClamp:      { double v = Num(At(args, 0)), lo = Num(At(args, 1)), hi = Num(At(args, 2)); return (float)Math.Max(lo, Math.Min(v, hi)); }
+
+                // ---- string.* breadth ----
+                case Func.StrReverse:     { char[] c = Str(At(args, 0)).ToCharArray(); Array.Reverse(c); return new string(c); }
+                case Func.StrSplit:       return Split(args);
+
+                // ---- table.* (mutate/read the passed LSLTable reference) ----
+                case Func.TblInsert:      return TblInsertFn(args);
+                case Func.TblRemove:      return TblRemoveFn(args);
+                case Func.TblConcat:      return TblConcatFn(args);
 
                 default: throw new CheckException("unknown lua stdlib function id " + funcId);
             }
@@ -89,8 +128,87 @@ namespace InWorldz.Phlox.SLua
                     LuaPattern.GSubString(s, p, (string)repl, maxN, out result, out count);
                     return new object[] { result, (float)count };
                 }
+                case Func.MathModf:
+                {
+                    double d = Num(At(args, 0));
+                    double ip = Math.Truncate(d);
+                    return new object[] { (float)ip, (float)(d - ip) }; // integral part, fractional part
+                }
+                case Func.TblUnpack:
+                {
+                    if (!(At(args, 0) is LSLTable t)) throw new CheckException("table.unpack: table expected");
+                    int i = IntArg(At(args, 1), 1);
+                    int j = IntArg(At(args, 2), t.Length);
+                    if (i > j) return new object[] { LuaNil.Instance };
+                    var outv = new object[j - i + 1];
+                    for (int k = i; k <= j; k++) { object e = t.Get(k); outv[k - i] = e ?? LuaNil.Instance; }
+                    return outv;
+                }
                 default: throw new CheckException("not a multi-result lua function id " + funcId);
             }
+        }
+
+        // ---- table.* helpers (operate on the boxed LSLTable reference; Lua array part = keys 1..n) ----
+        private static object TblInsertFn(object[] a)
+        {
+            if (!(At(a, 0) is LSLTable t)) throw new CheckException("table.insert: table expected");
+            int n = t.Length;
+            if (a.Length >= 3)                         // insert(t, pos, v): shift up, set
+            {
+                int pos = (int)Num(a[1]);
+                for (int k = n; k >= pos; k--) t.Set(k + 1, t.Get(k));
+                t.Set(pos, a[2]);
+            }
+            else                                       // insert(t, v): append
+            {
+                t.Set(n + 1, At(a, 1));
+            }
+            return LuaNil.Instance;                    // Lua returns nothing
+        }
+
+        private static object TblRemoveFn(object[] a)
+        {
+            if (!(At(a, 0) is LSLTable t)) throw new CheckException("table.remove: table expected");
+            int n = t.Length;
+            if (n == 0) return LuaNil.Instance;
+            int pos = IntArg(At(a, 1), n);
+            object removed = t.Get(pos);
+            for (int k = pos; k < n; k++) t.Set(k, t.Get(k + 1)); // shift down
+            t.Set(n, null);                                        // null removes the last key
+            return removed ?? LuaNil.Instance;
+        }
+
+        private static string TblConcatFn(object[] a)
+        {
+            if (!(At(a, 0) is LSLTable t)) throw new CheckException("table.concat: table expected");
+            string sep = (a.Length >= 2 && a[1] != null && !(a[1] is LuaNil)) ? Str(a[1]) : "";
+            int i = IntArg(At(a, 2), 1);
+            int j = IntArg(At(a, 3), t.Length);
+            var sb = new StringBuilder();
+            for (int k = i; k <= j; k++)
+            {
+                if (k > i) sb.Append(sep);
+                sb.Append(Str(t.Get(k)));
+            }
+            return sb.ToString();
+        }
+
+        // string.split(s, sep) -> table of pieces (Luau; default sep ",")
+        private static object Split(object[] a)
+        {
+            string s = Str(At(a, 0));
+            string sep = (a.Length >= 2 && a[1] != null && !(a[1] is LuaNil)) ? Str(a[1]) : ",";
+            var t = new LSLTable();
+            int idx = 1;
+            if (sep.Length == 0) { foreach (char c in s) t.Set(idx++, c.ToString()); return t; }
+            int start = 0, p;
+            while ((p = s.IndexOf(sep, start, StringComparison.Ordinal)) >= 0)
+            {
+                t.Set(idx++, s.Substring(start, p - start));
+                start = p + sep.Length;
+            }
+            t.Set(idx, s.Substring(start));
+            return t;
         }
 
         private static bool Truthy(object o) { return !(o == null || o is LuaNil || (o is bool b && !b)); }

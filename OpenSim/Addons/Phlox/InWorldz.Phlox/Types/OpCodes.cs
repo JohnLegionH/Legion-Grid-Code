@@ -191,7 +191,12 @@ namespace InWorldz.Phlox.Types
         luabinop,        // operand sel: pop b,a; metamethod (__add..__le) if a/b is a table, else numeric
         luaunm,          // pop a; __unm if table, else numeric negate
         setmeta,         // pop mt, t; t.Metatable = mt; push t
-        getmeta          // pop t; push t.Metatable (or nil)
+        getmeta,         // pop t; push t.Metatable (or nil)
+
+        // ---- SLua conformance pass: error handling + table.sort ----
+        luaerror,        // pop value; raise a LuaError carrying it (error())
+        luapcall,        // operand argc: pop argc args + fn; protected call; push (ok, result)
+        luasort          // pop comparator(or nil), pop table; in-place sort; push the table
     }
 
 

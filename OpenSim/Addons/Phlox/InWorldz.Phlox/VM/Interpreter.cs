@@ -838,6 +838,17 @@ namespace InWorldz.Phlox.VM
                         Op_GetMeta();
                         break;
 
+                    // ---- SLua conformance pass: error handling + table.sort ----
+                    case OpCode.luaerror:
+                        Op_LuaError();
+                        break;
+                    case OpCode.luapcall:
+                        Op_LuaPcall();
+                        break;
+                    case OpCode.luasort:
+                        Op_LuaSort();
+                        break;
+
                     default:
                         throw new VMException("Unhandled opcode: " + opcode);
                 }
