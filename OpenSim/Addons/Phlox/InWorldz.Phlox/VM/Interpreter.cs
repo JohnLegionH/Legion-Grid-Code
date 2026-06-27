@@ -776,6 +776,9 @@ namespace InWorldz.Phlox.VM
                     case OpCode.dup:
                         Op_Dup();
                         break;
+                    case OpCode.luacall:
+                        Op_LuaCall();
+                        break;
 
                     default:
                         throw new VMException("Unhandled opcode: " + opcode);

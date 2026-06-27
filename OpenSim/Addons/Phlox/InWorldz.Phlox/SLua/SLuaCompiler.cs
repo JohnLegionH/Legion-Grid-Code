@@ -253,6 +253,10 @@ namespace InWorldz.Phlox.SLua
     internal sealed class Index : Expr { public Expr Target; public Expr Key; }   // t[k] / t.x
     internal sealed class Len : Expr { public Expr E; }                            // #t
     internal sealed class Builtin : Expr { public string Name; public Expr Arg; }  // type/tostring/tonumber
+    // Tier-2 essentials expressions
+    internal sealed class LibCall : Expr { public string Lib; public string Fn; public List<Expr> Args; } // string.X(..)/math.X(..)
+    internal sealed class LibValue : Expr { public string Lib; public string Name; }                       // math.pi / math.huge
+    internal sealed class UserCall : Expr { public string Name; public List<Expr> Args; }                  // user function call
 
     internal abstract class Stmt : Node { }
     internal sealed class LocalDecl : Stmt { public string Name; public Expr Init; }
@@ -260,12 +264,17 @@ namespace InWorldz.Phlox.SLua
     internal sealed class ExprStmt : Stmt { public LlCall Call; }
     internal sealed class IfStmt : Stmt { public Expr Cond; public List<Stmt> Then; public List<Stmt> Else; }
     internal sealed class WhileStmt : Stmt { public Expr Cond; public List<Stmt> Body; }
-    internal sealed class ReturnStmt : Stmt { public Expr Value; }
+    internal sealed class ReturnStmt : Stmt { public List<Expr> Values; }
     internal sealed class FuncDecl : Stmt { public string Name; public List<string> Params; public List<Stmt> Body; }
     // Tier-2 table statements
     internal sealed class IndexAssign : Stmt { public Expr Target; public Expr Key; public Expr Value; } // t[k]=v / t.x=v
     internal sealed class ForIn : Stmt { public List<string> Vars; public Expr TableExpr; public List<Stmt> Body; } // for k,v in pairs(t)
     internal sealed class TableInsert : Stmt { public Expr Table; public Expr Value; } // table.insert(t, v)
+    // Tier-2 essentials statements
+    internal sealed class ForNum : Stmt { public string Var; public Expr Start; public Expr Stop; public Expr Step; public List<Stmt> Body; }
+    internal sealed class LocalMulti : Stmt { public List<string> Names; public List<Expr> Values; }      // local a,b = ...
+    internal sealed class AssignMulti : Stmt { public List<string> Names; public List<Expr> Values; }     // a,b = ...
+    internal sealed class CallStmt : Stmt { public Expr Call; }                                           // f(...) / lib.x(...) / ll.X(...) statement
 
     // ======================================================================================
     // Parser (recursive descent)
@@ -317,54 +326,75 @@ namespace InWorldz.Phlox.SLua
             if (IsKw("function")) return ParseFunction();
             if (IsKw("if")) return ParseIf();
             if (IsKw("while")) return ParseWhile();
-            if (IsKw("for")) return ParseForIn();
+            if (IsKw("for")) return ParseFor();
             if (IsKw("return")) return ParseReturn();
 
             // Name-led statements.
             if (Cur.Type == TT.Name)
             {
-                // ll.X(...) call statement
-                if (Cur.Text == "ll" && Next.Type == TT.Op && Next.Text == ".")
-                {
-                    var call = ParseLlCall();
-                    return new ExprStmt { Call = call, Line = line };
-                }
-                // table.insert(t, v) library call statement
+                // table.insert(t, v) library statement (special-cased: statement-only)
                 if (Cur.Text == "table" && Next.Type == TT.Op && Next.Text == ".")
-                {
                     return ParseTableLibCall();
-                }
 
-                // A prefix expression (Name + postfix .x / [k]) used as an assignment target.
-                Expr target = ParsePrefixExpr();
-                if (IsOp("="))
+                Expr first = ParsePrimary();  // NameRef / Index / LlCall / LibCall / UserCall
+
+                // single index-assign: t[k] = v
+                if (first is Index ix && IsOp("="))
                 {
                     Eat();
-                    var val = ParseExpr();
-                    if (target is NameRef nr)
-                        return new Assign { Name = nr.Name, Value = val, Line = line };
-                    if (target is Index ix)
-                        return new IndexAssign { Target = ix.Target, Key = ix.Key, Value = val, Line = line };
-                    throw new SLuaException("invalid assignment target", line);
+                    var v = ParseExpr();
+                    return new IndexAssign { Target = ix.Target, Key = ix.Key, Value = v, Line = line };
                 }
-                if (target is NameRef && IsOp("("))
-                    throw new SLuaException("user function calls are not supported in the Tier-2 subset", line);
-                throw new SLuaException("expected '=' (assignment) or a supported call", line);
+
+                // name assignment (single or multi): a = ...  /  a, b = ...
+                if (IsOp(",") || IsOp("="))
+                {
+                    if (!(first is NameRef nr0))
+                        throw new SLuaException("assignment target must be a variable", line);
+                    var names = new List<string> { nr0.Name };
+                    while (IsOp(",")) { Eat(); if (Cur.Type != TT.Name) Err("expected variable name"); names.Add(Eat().Text); }
+                    ExpectOp("=");
+                    var vals = ParseExprList();
+                    if (names.Count == 1 && vals.Count == 1)
+                        return new Assign { Name = names[0], Value = vals[0], Line = line };
+                    return new AssignMulti { Names = names, Values = vals, Line = line };
+                }
+
+                // call statement (result discarded)
+                if (first is LlCall || first is UserCall || first is LibCall)
+                    return new CallStmt { Call = first, Line = line };
+
+                throw new SLuaException("expected '=' (assignment) or a call statement", line);
             }
             Err("unexpected statement");
             return null;
         }
 
-        // for k [, v] in pairs(t) do ... end   (generic-for; pairs only in Tier-2)
-        private Stmt ParseForIn()
+        // Numeric for (for i = a, b [, c] do) or generic for (for k[,v] in pairs(t) do).
+        private Stmt ParseFor()
         {
             int line = Cur.Line; ExpectKw("for");
-            var vars = new List<string>();
             if (Cur.Type != TT.Name) Err("expected loop variable name");
-            vars.Add(Eat().Text);
+            string first = Eat().Text;
+
+            if (IsOp("="))  // numeric for
+            {
+                Eat();
+                var start = ParseExpr();
+                ExpectOp(",");
+                var stop = ParseExpr();
+                Expr step = null;
+                if (IsOp(",")) { Eat(); step = ParseExpr(); }
+                ExpectKw("do");
+                var nbody = ParseBlock();
+                ExpectKw("end");
+                return new ForNum { Var = first, Start = start, Stop = stop, Step = step, Body = nbody, Line = line };
+            }
+
+            // generic for: first [, more] in pairs(expr) do
+            var vars = new List<string> { first };
             while (IsOp(",")) { Eat(); if (Cur.Type != TT.Name) Err("expected loop variable name"); vars.Add(Eat().Text); }
             ExpectKw("in");
-            // Tier-2: the iterator must be pairs(expr) or ipairs(expr) (both iterate insertion order)
             if (!(Cur.Type == TT.Name && (Cur.Text == "pairs" || Cur.Text == "ipairs")))
                 throw new SLuaException("for-in requires pairs(...) or ipairs(...) in the Tier-2 subset", Cur.Line);
             Eat(); // 'pairs' / 'ipairs'
@@ -398,13 +428,43 @@ namespace InWorldz.Phlox.SLua
         private Stmt ParseLocal()
         {
             int line = Cur.Line; ExpectKw("local");
-            if (Cur.Type != TT.Name) Err("expected name after 'local'");
-            string name = Eat().Text;
-            // optional Luau type annotation:  local x: number
-            if (IsOp(":")) { Eat(); SkipTypeAnnotation(); }
-            ExpectOp("=");
-            var init = ParseExpr();
-            return new LocalDecl { Name = name, Init = init, Line = line };
+            var names = new List<string>();
+            while (true)
+            {
+                if (Cur.Type != TT.Name) Err("expected name after 'local'");
+                names.Add(Eat().Text);
+                if (IsOp(":")) { Eat(); SkipTypeAnnotation(); } // optional Luau type annotation
+                if (IsOp(",")) { Eat(); continue; }
+                break;
+            }
+            var vals = new List<Expr>();
+            if (IsOp("="))
+            {
+                Eat();
+                vals = ParseExprList();
+            }
+            if (names.Count == 1)
+            {
+                Expr init = (vals.Count == 1) ? vals[0] : new NilLit { Line = line };
+                return new LocalDecl { Name = names[0], Init = init, Line = line };
+            }
+            return new LocalMulti { Names = names, Values = vals, Line = line };
+        }
+
+        private List<Expr> ParseExprList()
+        {
+            var list = new List<Expr> { ParseExpr() };
+            while (IsOp(",")) { Eat(); list.Add(ParseExpr()); }
+            return list;
+        }
+
+        private List<Expr> ParseCallArgs()
+        {
+            ExpectOp("(");
+            var args = new List<Expr>();
+            if (!IsOp(")")) { args.Add(ParseExpr()); while (IsOp(",")) { Eat(); args.Add(ParseExpr()); } }
+            ExpectOp(")");
+            return args;
         }
 
         private Stmt ParseFunction()
@@ -484,10 +544,10 @@ namespace InWorldz.Phlox.SLua
         private Stmt ParseReturn()
         {
             int line = Cur.Line; ExpectKw("return");
-            Expr val = null;
+            var vals = new List<Expr>();
             if (Cur.Type != TT.EOF && !IsKw("end") && !IsKw("else") && !IsKw("elseif") && !IsOp(";"))
-                val = ParseExpr();
-            return new ReturnStmt { Value = val, Line = line };
+                vals = ParseExprList();
+            return new ReturnStmt { Values = vals, Line = line };
         }
 
         // ---- expressions (Lua precedence: or < and < comparison < .. < add < mul < unary) ----
@@ -598,6 +658,8 @@ namespace InWorldz.Phlox.SLua
             {
                 if (t.Text == "ll" && Next.Type == TT.Op && Next.Text == ".")
                     return ParseLlCall();
+                if ((t.Text == "string" || t.Text == "math") && Next.Type == TT.Op && Next.Text == ".")
+                    return ParseLibAccess();
                 if ((t.Text == "type" || t.Text == "tostring" || t.Text == "tonumber")
                     && Next.Type == TT.Op && Next.Text == "(")
                 {
@@ -607,10 +669,25 @@ namespace InWorldz.Phlox.SLua
                     ExpectOp(")");
                     return new Builtin { Name = t.Text, Arg = arg, Line = t.Line };
                 }
-                return ParsePrefixExpr();
+                Eat();
+                if (IsOp("("))   // user function call: name(args)
+                    return new UserCall { Name = t.Text, Args = ParseCallArgs(), Line = t.Line };
+                return ParsePostfix(new NameRef { Name = t.Text, Line = t.Line });
             }
             Err("expected expression");
             return null;
+        }
+
+        // string.fn(...) / math.fn(...)  -> LibCall ;  math.pi / math.huge -> LibValue
+        private Expr ParseLibAccess()
+        {
+            var lib = Eat();           // 'string' / 'math'
+            ExpectOp(".");
+            if (Cur.Type != TT.Name) Err("expected library member name");
+            string member = Eat().Text;
+            if (IsOp("("))
+                return new LibCall { Lib = lib.Text, Fn = member, Args = ParseCallArgs(), Line = lib.Line };
+            return new LibValue { Lib = lib.Text, Name = member, Line = lib.Line };
         }
 
         // A prefix expression: a Name followed by a postfix chain of .field / [key] indexing.
@@ -723,6 +800,12 @@ namespace InWorldz.Phlox.SLua
         private Dictionary<string, VarVar> _locals;
         private int _nextLocalSlot;
 
+        // user functions: name -> declared param count / return count (computed in a pre-pass so
+        // call sites know the calling convention). Return values live on the shared operand stack.
+        private readonly Dictionary<string, int> _userParams = new Dictionary<string, int>();
+        private readonly Dictionary<string, int> _userReturns = new Dictionary<string, int>();
+        private int _currentReturns; // return count of the function/handler being emitted (events = 0)
+
         // Pseudo-type for dynamically-typed values (table reads, nil, table literals). No static
         // cast is emitted for these; the VM coerces at consumption (ConvToFloat/Int in arithmetic
         // ops, the syscall shim for ll args). This is the seam to the future dynamic-typing piece.
@@ -746,7 +829,21 @@ namespace InWorldz.Phlox.SLua
                 else execStmts.Add(s);
             }
 
-            bool explicitStateEntry = funcs.Exists(f => f.Name == "state_entry");
+            // partition: event handlers vs user functions; pre-register user-function signatures
+            var events = new List<FuncDecl>();
+            var userFuncs = new List<FuncDecl>();
+            foreach (var f in funcs)
+            {
+                if (_events.HasEventByName(f.Name)) events.Add(f);
+                else
+                {
+                    userFuncs.Add(f);
+                    _userParams[f.Name] = f.Params.Count;
+                    _userReturns[f.Name] = AnalyzeReturnCount(f.Body);
+                }
+            }
+
+            bool explicitStateEntry = events.Exists(f => f.Name == "state_entry");
             if (explicitStateEntry && execStmts.Count > 0)
                 throw new SLuaException("top-level code and an explicit state_entry() are both present; not supported (use one)", execStmts[0].Line);
 
@@ -772,14 +869,59 @@ namespace InWorldz.Phlox.SLua
                 EmitHandler("state_entry", new List<string>(), execStmts, execStmts[0].Line);
 
             // ---- event handlers ----
-            foreach (var f in funcs)
-            {
-                if (!_events.HasEventByName(f.Name))
-                    throw new SLuaException("'" + f.Name + "' is not a known event; user functions are Tier-2+", f.Line);
+            foreach (var f in events)
                 EmitHandler(f.Name, f.Params, f.Body, f.Line);
-            }
+
+            // ---- user functions ----
+            foreach (var f in userFuncs)
+                EmitUserFunction(f);
 
             return _sb.ToString();
+        }
+
+        // Return count = max arity among the function's `return` statements (0 if none).
+        private static int AnalyzeReturnCount(List<Stmt> body)
+        {
+            int max = 0;
+            void Walk(List<Stmt> list)
+            {
+                foreach (var s in list)
+                {
+                    if (s is ReturnStmt r) max = Math.Max(max, r.Values.Count);
+                    else if (s is IfStmt ifs) { Walk(ifs.Then); if (ifs.Else != null) Walk(ifs.Else); }
+                    else if (s is WhileStmt w) Walk(w.Body);
+                    else if (s is ForIn fi) Walk(fi.Body);
+                    else if (s is ForNum fn) Walk(fn.Body);
+                }
+            }
+            Walk(body);
+            return max;
+        }
+
+        private void EmitUserFunction(FuncDecl f)
+        {
+            int R = _userReturns[f.Name];
+            _locals = new Dictionary<string, VarVar>();
+            for (int i = 0; i < f.Params.Count; i++)
+                _locals[f.Params[i]] = new VarVar(i, Dynamic);
+            _nextLocalSlot = f.Params.Count;
+            _currentReturns = R;
+
+            StringBuilder outer = _sb;
+            StringBuilder bodyBuf = new StringBuilder();
+            _sb = bodyBuf;
+            try { EmitBlock(f.Body); }
+            finally { _sb = outer; }
+
+            int innerLocals = _nextLocalSlot - f.Params.Count;
+            Line(".def " + f.Name + ": args=" + f.Params.Count + ", locals=" + innerLocals);
+            _sb.Append(bodyBuf.ToString());
+            // fall-off: a function always leaves exactly R values, so pad with nils then ret
+            for (int i = 0; i < R; i++) Line("pushnil");
+            Line("ret");
+            Line("");
+            _locals = null;
+            _currentReturns = 0;
         }
 
         private void EmitHandler(string eventName, List<string> declaredParams, List<Stmt> body, int line)
@@ -794,6 +936,7 @@ namespace InWorldz.Phlox.SLua
             for (int i = 0; i < declaredParams.Count; i++)
                 _locals[declaredParams[i]] = new VarVar(i, eventArgs[i]);
             _nextLocalSlot = eventArgs.Count;
+            _currentReturns = 0; // events return no values
 
             // Two-pass: emit the body into a temp buffer while allocating locals/temps on demand,
             // then emit the header with the final locals count (the .evt header precedes the body).
@@ -859,6 +1002,9 @@ namespace InWorldz.Phlox.SLua
                 case ExprStmt es:
                     EmitLlCall(es.Call, statementLevel: true);
                     break;
+                case CallStmt cs:
+                    EmitCallStmt(cs);
+                    break;
                 case IfStmt ifs:
                     EmitIf(ifs);
                     break;
@@ -868,8 +1014,17 @@ namespace InWorldz.Phlox.SLua
                 case ForIn fi:
                     EmitForIn(fi);
                     break;
+                case ForNum fn:
+                    EmitForNum(fn);
+                    break;
+                case LocalMulti lm:
+                    EmitLocalMulti(lm);
+                    break;
+                case AssignMulti am:
+                    EmitAssignMulti(am);
+                    break;
                 case ReturnStmt r:
-                    if (r.Value != null) EmitExpr(r.Value); // value discarded for void events
+                    EmitValuesAdjusted(r.Values, _currentReturns, r.Line); // adjust to this fn's return count
                     Line("ret");
                     break;
                 default:
@@ -922,6 +1077,146 @@ namespace InWorldz.Phlox.SLua
             EmitBlock(f.Body);
             Line("jmp " + top);
             Label(end);
+        }
+
+        // Numeric for: for i = start, stop [, step] do ... end.
+        // Continue condition (no sign branching): (i - stop) * step <= 0.
+        private void EmitForNum(ForNum f)
+        {
+            int iSlot = AllocNamedLocal(f.Var, Dynamic);
+            int stopSlot = AllocTempLocal();
+            int stepSlot = AllocTempLocal();
+
+            EmitExpr(f.Start); Line("store " + iSlot);
+            EmitExpr(f.Stop);  Line("store " + stopSlot);
+            if (f.Step != null) EmitExpr(f.Step); else Line("fconst 1.0");
+            Line("store " + stepSlot);
+
+            string top = NewLabel("fornum");
+            string end = NewLabel("fornend");
+            Label(top);
+            Line("load " + iSlot);
+            Line("load " + stopSlot);
+            Line("fsub");
+            Line("load " + stepSlot);
+            Line("fmul");
+            Line("fconst 0.0");
+            Line("flte");             // (i-stop)*step <= 0 ? 1 : 0
+            Line("brf " + end);       // exit when condition false
+            EmitBlock(f.Body);
+            Line("load " + iSlot);
+            Line("load " + stepSlot);
+            Line("fadd");
+            Line("store " + iSlot);   // i = i + step
+            Line("jmp " + top);
+            Label(end);
+        }
+
+        private void EmitLocalMulti(LocalMulti lm)
+        {
+            // evaluate RHS (in the OUTER scope) first, then declare + bind the new locals
+            EmitValuesAdjusted(lm.Values, lm.Names.Count, lm.Line);
+            var slots = new int[lm.Names.Count];
+            for (int i = 0; i < lm.Names.Count; i++) slots[i] = AllocNamedLocal(lm.Names[i], Dynamic);
+            for (int i = lm.Names.Count - 1; i >= 0; i--) Line("store " + slots[i]); // top = last value
+        }
+
+        private void EmitAssignMulti(AssignMulti am)
+        {
+            EmitValuesAdjusted(am.Values, am.Names.Count, am.Line);
+            for (int i = am.Names.Count - 1; i >= 0; i--)
+            {
+                string name = am.Names[i];
+                if (_locals != null && _locals.TryGetValue(name, out var lv)) Line("store " + lv.Slot);
+                else if (_globals.TryGetValue(name, out var gv)) Line("gstore " + gv.Slot);
+                else throw new SLuaException("assignment to undeclared variable '" + name + "'", am.Line);
+            }
+        }
+
+        // Emit a value list leaving exactly `target` values on the stack. Only the LAST expression
+        // expands to its full multiplicity (a user call's R values); earlier ones adjust to 1.
+        private void EmitValuesAdjusted(List<Expr> values, int target, int line)
+        {
+            int produced = 0;
+            for (int i = 0; i < values.Count; i++)
+            {
+                if (i == values.Count - 1 && values[i] is UserCall uc)
+                    produced += EmitUserCallMulti(uc);
+                else { EmitExpr(values[i]); produced++; }
+            }
+            if (produced > target) for (int k = 0; k < produced - target; k++) Line("pop");
+            else for (int k = 0; k < target - produced; k++) Line("pushnil");
+        }
+
+        // Emit a user-function call, leaving its R return values on the stack. Returns R.
+        private int EmitUserCallMulti(UserCall uc)
+        {
+            if (!_userParams.TryGetValue(uc.Name, out int p))
+                throw new SLuaException("call to undefined function '" + uc.Name + "'", uc.Line);
+            // push exactly p args (adjust the supplied list)
+            int produced = 0;
+            for (int i = 0; i < uc.Args.Count; i++) { EmitExpr(uc.Args[i]); produced++; }
+            if (produced > p) for (int k = 0; k < produced - p; k++) Line("pop");
+            else for (int k = 0; k < p - produced; k++) Line("pushnil");
+            Line("call " + uc.Name + "()");
+            return _userReturns[uc.Name];
+        }
+
+        private void EmitCallStmt(CallStmt cs)
+        {
+            switch (cs.Call)
+            {
+                case LlCall ll: EmitLlCall(ll, statementLevel: true); break;
+                case LibCall lc: EmitLibCall(lc); Line("pop"); break;        // discard result
+                case UserCall uc:
+                {
+                    int r = EmitUserCallMulti(uc);
+                    for (int k = 0; k < r; k++) Line("pop");                  // discard all returns
+                    break;
+                }
+                default: throw new SLuaException("invalid call statement", cs.Line);
+            }
+        }
+
+        private VarType EmitLibCall(LibCall lc)
+        {
+            int id = LibFuncId(lc.Lib, lc.Fn, lc.Line);
+            foreach (var a in lc.Args) EmitExpr(a);
+            Line("luacall " + id + ", " + lc.Args.Count);
+            return Dynamic;
+        }
+
+        private VarType EmitLibValue(LibValue lv)
+        {
+            if (lv.Lib == "math" && lv.Name == "pi") { Line("fconst 3.14159265358979"); return VarType.Float; }
+            if (lv.Lib == "math" && lv.Name == "huge") { Line("luacall " + (int)LuaLib.Func.MathHuge + ", 0"); return Dynamic; }
+            throw new SLuaException("unsupported library value '" + lv.Lib + "." + lv.Name + "'", lv.Line);
+        }
+
+        private static int LibFuncId(string lib, string fn, int line)
+        {
+            string key = lib + "." + fn;
+            switch (key)
+            {
+                case "string.format": return (int)LuaLib.Func.StrFormat;
+                case "string.sub":    return (int)LuaLib.Func.StrSub;
+                case "string.len":    return (int)LuaLib.Func.StrLen;
+                case "string.upper":  return (int)LuaLib.Func.StrUpper;
+                case "string.lower":  return (int)LuaLib.Func.StrLower;
+                case "string.rep":    return (int)LuaLib.Func.StrRep;
+                case "string.byte":   return (int)LuaLib.Func.StrByte;
+                case "string.char":   return (int)LuaLib.Func.StrChar;
+                case "math.floor":    return (int)LuaLib.Func.MathFloor;
+                case "math.ceil":     return (int)LuaLib.Func.MathCeil;
+                case "math.abs":      return (int)LuaLib.Func.MathAbs;
+                case "math.min":      return (int)LuaLib.Func.MathMin;
+                case "math.max":      return (int)LuaLib.Func.MathMax;
+                case "math.sqrt":     return (int)LuaLib.Func.MathSqrt;
+                case "math.random":   return (int)LuaLib.Func.MathRandom;
+                case "math.randomseed": return (int)LuaLib.Func.MathRandomSeed;
+                default:
+                    throw new SLuaException("unsupported stdlib function '" + key + "' in the Tier-2 subset", line);
+            }
         }
 
         private void EmitIf(IfStmt ifs)
@@ -1011,6 +1306,17 @@ namespace InWorldz.Phlox.SLua
                     EmitExpr(len.E);       // table
                     Line("tablen");
                     return VarType.Integer;
+                case LibCall lc:
+                    return EmitLibCall(lc);
+                case LibValue lv:
+                    return EmitLibValue(lv);
+                case UserCall uc:
+                {
+                    int r = EmitUserCallMulti(uc);   // R values on stack
+                    if (r == 0) Line("pushnil");      // single-value context wants 1
+                    else for (int k = 0; k < r - 1; k++) Line("pop");
+                    return Dynamic;
+                }
                 default:
                     throw new SLuaException("unsupported expression", e.Line);
             }

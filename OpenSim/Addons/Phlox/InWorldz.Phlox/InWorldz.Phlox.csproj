@@ -197,6 +197,9 @@
     <Compile Include="SLua\SLuaCompiler.cs">
       <SubType>Code</SubType>
     </Compile>
+    <Compile Include="SLua\LuaLib.cs">
+      <SubType>Code</SubType>
+    </Compile>
     <Compile Include="Types\LSLTable.cs">
       <SubType>Code</SubType>
     </Compile>

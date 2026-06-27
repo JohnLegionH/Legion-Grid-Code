@@ -1722,6 +1722,17 @@ namespace InWorldz.Phlox.VM
             SafeOperandsPush(LuaNil.Instance); // tonumber() returns nil on failure
         }
 
+        // SLua stdlib dispatch: operands [funcid, argc]; pops argc args, pushes 1 result.
+        private void Op_LuaCall()
+        {
+            int funcId = this.GetIntOperand();
+            int argc = this.GetIntOperand();
+            object[] args = new object[argc];
+            for (int i = argc - 1; i >= 0; --i) args[i] = _state.Operands.Pop();
+            object result = SLua.LuaLib.Call(funcId, args);
+            SafeOperandsPush(result ?? (object)LuaNil.Instance);
+        }
+
         private void Op_Trace()
         {
             object top = _state.Operands.Pop();

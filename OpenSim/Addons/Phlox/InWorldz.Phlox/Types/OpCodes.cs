@@ -162,7 +162,10 @@ namespace InWorldz.Phlox.Types
         luatype,        // pop value, push its Lua type name string
         luatostr,       // pop value, push Lua tostring() form
         luatonum,       // pop value, push number, or nil if not number-coercible
-        dup             // duplicate the top operand (for and/or short-circuit)
+        dup,            // duplicate the top operand (for and/or short-circuit)
+
+        // ---- SLua Tier-2: stdlib dispatch (operands: lib-func id, arg count) ----
+        luacall          // pop argc args, call LuaLib.Call(funcid, args), push the result
     }
 
 
