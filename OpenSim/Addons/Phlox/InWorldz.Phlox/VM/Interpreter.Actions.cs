@@ -1250,6 +1250,18 @@ namespace InWorldz.Phlox.VM
 
             _state.MemInfo.CompleteCall(frame);
 
+            // Value-call (callv) result adjustment: bring the produced return count to exactly the
+            // caller's wanted count. Inert for named-call/event frames (Wanted == -1) -> existing
+            // behavior is byte-for-byte unchanged.
+            if (frame.Wanted >= 0)
+            {
+                int produced = _state.Operands.Count - frame.OperandBase;
+                if (produced > frame.Wanted)
+                    for (int i = 0; i < produced - frame.Wanted; i++) _state.Operands.Pop();
+                else
+                    for (int i = 0; i < frame.Wanted - produced; i++) SafeOperandsPush(LuaNil.Instance);
+            }
+
             //return address is 0 indicates an event call
             if (frame.ReturnAddress == 0)
             {
@@ -1849,6 +1861,7 @@ namespace InWorldz.Phlox.VM
         private void Op_CallV()
         {
             int argc = this.GetIntOperand();
+            int wanted = this.GetIntOperand();
             object[] argv = new object[argc];
             for (int i = argc - 1; i >= 0; --i) argv[i] = _state.Operands.Pop();
             object cv = _state.Operands.Pop();
@@ -1858,6 +1871,8 @@ namespace InWorldz.Phlox.VM
             FunctionInfo fi = cl.Fn;
             StackFrame f = new StackFrame(fi, _state.IP);
             f.Closure = cl;
+            f.Wanted = wanted;
+            f.OperandBase = _state.Operands.Count; // base for return-value count
             _state.Calls.Push(f);
             for (int i = 0; i < fi.NumberOfArguments; i++)
                 f.Locals[i] = (i < argc) ? argv[i] : (object)LuaNil.Instance;

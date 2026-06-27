@@ -17,6 +17,12 @@ namespace InWorldz.Phlox.VM
         // upvalue cells for the getupval/setupval opcodes. Set by callv.
         public Types.LuaClosure Closure;
 
+        // Value-call (callv) result adjustment: Wanted = how many results the caller wants
+        // (-1 = named-call/event frame, no adjustment -> existing behavior unchanged); OperandBase =
+        // operand-stack depth at call entry, so Op_Ret can compute how many results were produced.
+        public int Wanted = -1;
+        public int OperandBase;
+
         public StackFrame(FunctionInfo funcInfo, int returnAddress)
         {
             FunctionInfo = funcInfo;

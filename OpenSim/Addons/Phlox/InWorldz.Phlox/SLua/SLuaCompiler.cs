@@ -257,6 +257,7 @@ namespace InWorldz.Phlox.SLua
     internal sealed class LibCall : Expr { public string Lib; public string Fn; public List<Expr> Args; } // string.X(..)/math.X(..)
     internal sealed class LibValue : Expr { public string Lib; public string Name; }                       // math.pi / math.huge
     internal sealed class UserCall : Expr { public string Name; public List<Expr> Args; }                  // user function call
+    internal sealed class FuncExpr : Expr { public List<string> Params; public List<Stmt> Body; }          // anonymous function
 
     internal abstract class Stmt : Node { }
     internal sealed class LocalDecl : Stmt { public string Name; public Expr Init; }
@@ -441,6 +442,15 @@ namespace InWorldz.Phlox.SLua
         private Stmt ParseLocal()
         {
             int line = Cur.Line; ExpectKw("local");
+            // local function name(...) ... end  ==  local name; name = function(...)...end
+            if (IsKw("function"))
+            {
+                Eat();
+                if (Cur.Type != TT.Name) Err("expected function name");
+                string fname = Eat().Text;
+                var fe = ParseFuncRest(line);
+                return new LocalDecl { Name = fname, Init = fe, Line = line };
+            }
             var names = new List<string>();
             while (true)
             {
@@ -485,6 +495,13 @@ namespace InWorldz.Phlox.SLua
             int line = Cur.Line; ExpectKw("function");
             if (Cur.Type != TT.Name) Err("expected function name");
             string name = Eat().Text;
+            var fe = ParseFuncRest(line);
+            return new FuncDecl { Name = name, Params = fe.Params, Body = fe.Body, Line = line };
+        }
+
+        // Parse the part after 'function' [name]: ( params ) [: rettype] block end -> FuncExpr.
+        private FuncExpr ParseFuncRest(int line)
+        {
             ExpectOp("(");
             var pars = new List<string>();
             if (!IsOp(")"))
@@ -502,7 +519,7 @@ namespace InWorldz.Phlox.SLua
             if (IsOp(":")) { Eat(); SkipTypeAnnotation(); } // optional return type
             var body = ParseBlock();
             ExpectKw("end");
-            return new FuncDecl { Name = name, Params = pars, Body = body, Line = line };
+            return new FuncExpr { Params = pars, Body = body, Line = line };
         }
 
         // Consume a (simple) Luau type annotation token-wise: a Name optionally followed by
@@ -659,6 +676,7 @@ namespace InWorldz.Phlox.SLua
             if (IsKw("true")) { Eat(); return new BoolLit { Value = true, Line = t.Line }; }
             if (IsKw("false")) { Eat(); return new BoolLit { Value = false, Line = t.Line }; }
             if (IsKw("nil")) { Eat(); return new NilLit { Line = t.Line }; }
+            if (IsKw("function")) { Eat(); return ParseFuncRest(t.Line); } // anonymous function expression
             if (IsOp("{")) return ParseTableLit();
             if (IsOp("("))
             {
@@ -809,25 +827,268 @@ namespace InWorldz.Phlox.SLua
         private readonly Dictionary<string, VarVar> _globals = new Dictionary<string, VarVar>();
         private int _labelCounter;
 
-        // current function/handler local scope (param + inner local -> slot/type)
-        private Dictionary<string, VarVar> _locals;
-        private int _nextLocalSlot;
-
         // user functions: name -> declared param count / return count (computed in a pre-pass so
         // call sites know the calling convention). Return values live on the shared operand stack.
         private readonly Dictionary<string, int> _userParams = new Dictionary<string, int>();
         private readonly Dictionary<string, int> _userReturns = new Dictionary<string, int>();
-        private int _currentReturns; // return count of the function/handler being emitted (events = 0)
 
-        // Pseudo-type for dynamically-typed values (table reads, nil, table literals). No static
-        // cast is emitted for these; the VM coerces at consumption (ConvToFloat/Int in arithmetic
-        // ops, the syscall shim for ll args). This is the seam to the future dynamic-typing piece.
+        // Pseudo-type for dynamically-typed values (table reads, nil, table literals, closures).
         private const VarType Dynamic = (VarType)99;
 
         private struct VarVar { public int Slot; public VarType Type; public VarVar(int s, VarType t) { Slot = s; Type = t; } }
 
-        private int AllocNamedLocal(string name, VarType type) { int s = _nextLocalSlot++; _locals[name] = new VarVar(s, type); return s; }
-        private int AllocTempLocal() { return _nextLocalSlot++; }
+        // ---- closures: nested function scope + upvalue resolution ----
+        private sealed class LocalVar { public int Slot; public VarType Type; public bool IsCell; }
+        private struct UpvalDesc { public bool FromParentLocal; public int Index; } // Index = parent local slot OR parent upval index
+        private sealed class FuncScope
+        {
+            public FuncScope Parent;
+            public Dictionary<string, LocalVar> Locals = new Dictionary<string, LocalVar>();
+            public int NextSlot;
+            public int Returns;
+            public List<UpvalDesc> Upvals = new List<UpvalDesc>();
+            public Dictionary<string, int> UpvalIdx = new Dictionary<string, int>();
+            public HashSet<string> Captured = new HashSet<string>(); // own locals captured by nested fns -> cells
+        }
+        private FuncScope _scope;                                  // current function scope (null in globals-init)
+        private readonly List<string> _lambdaDefs = new List<string>(); // flattened .def blocks for anon functions
+        private int _lambdaSeq;
+
+        // Allocate a named local in the current scope; a captured name becomes a cell.
+        private LocalVar AllocLocal(string name, VarType type)
+        {
+            var lv = new LocalVar { Slot = _scope.NextSlot++, Type = type, IsCell = _scope.Captured.Contains(name) };
+            _scope.Locals[name] = lv;
+            return lv;
+        }
+        private int AllocTempLocal() { return _scope.NextSlot++; } // compiler temp (never captured)
+
+        // ---- variable resolution (local / upvalue / global / top-level function) ----
+        private enum RKind { Local, Upval, Global, TopFunc, None }
+        private struct Resolved { public RKind Kind; public LocalVar Local; public int UpvalIdx; public VarVar Global; }
+
+        private Resolved Resolve(string name)
+        {
+            var r = new Resolved();
+            if (_scope != null && _scope.Locals.TryGetValue(name, out var lv)) { r.Kind = RKind.Local; r.Local = lv; return r; }
+            if (_scope != null) { int u = ResolveUpval(_scope, name); if (u >= 0) { r.Kind = RKind.Upval; r.UpvalIdx = u; return r; } }
+            if (_globals.TryGetValue(name, out var gv)) { r.Kind = RKind.Global; r.Global = gv; return r; }
+            if (_userParams.ContainsKey(name)) { r.Kind = RKind.TopFunc; return r; }
+            r.Kind = RKind.None; return r;
+        }
+
+        // Register (transitively) an upvalue for `scope` resolving `name` in an ancestor; returns its index.
+        private int ResolveUpval(FuncScope scope, string name)
+        {
+            if (scope.UpvalIdx.TryGetValue(name, out var ex)) return ex;
+            if (scope.Parent == null) return -1;
+            if (scope.Parent.Locals.TryGetValue(name, out var pl))
+            {
+                int idx = scope.Upvals.Count;
+                scope.Upvals.Add(new UpvalDesc { FromParentLocal = true, Index = pl.Slot });
+                scope.UpvalIdx[name] = idx;
+                return idx;
+            }
+            int p = ResolveUpval(scope.Parent, name);
+            if (p < 0) return -1;
+            int i2 = scope.Upvals.Count;
+            scope.Upvals.Add(new UpvalDesc { FromParentLocal = false, Index = p });
+            scope.UpvalIdx[name] = i2;
+            return i2;
+        }
+
+        private VarType EmitLoadName(string name, int line)
+        {
+            var r = Resolve(name);
+            switch (r.Kind)
+            {
+                case RKind.Local:
+                    Line("load " + r.Local.Slot);
+                    if (r.Local.IsCell) { Line("cellget"); return Dynamic; }
+                    return r.Local.Type;
+                case RKind.Upval: Line("getupval " + r.UpvalIdx); return Dynamic;
+                case RKind.Global: Line("gload " + r.Global.Slot); return r.Global.Type;
+                case RKind.TopFunc: Line("mkclosure " + name + "(), 0"); return Dynamic; // function as a value
+                default: throw new SLuaException("reference to undeclared variable '" + name + "'", line);
+            }
+        }
+
+        private void EmitAssignName(string name, System.Func<VarType> emitValue, int line)
+        {
+            var r = Resolve(name);
+            switch (r.Kind)
+            {
+                case RKind.Local:
+                    if (r.Local.IsCell) { Line("load " + r.Local.Slot); emitValue(); Line("cellput"); }
+                    else { VarType t = emitValue(); Coerce(t, r.Local.Type, line); Line("store " + r.Local.Slot); }
+                    break;
+                case RKind.Upval: emitValue(); Line("setupval " + r.UpvalIdx); break;
+                case RKind.Global: { VarType t = emitValue(); Coerce(t, r.Global.Type, line); Line("gstore " + r.Global.Slot); } break;
+                default: throw new SLuaException("assignment to undeclared variable '" + name + "'", line);
+            }
+        }
+
+        // Emit a function body as a flattened .def (appended at top level). For a lambda, `parent` is
+        // the enclosing scope and the resolved upvalue descriptors are returned via `outUpvals`.
+        private void EmitFunctionDef(string defName, List<string> pars, List<Stmt> body, int R, FuncScope parent, List<UpvalDesc> outUpvals)
+        {
+            FuncScope savedScope = _scope;
+            StringBuilder savedSb = _sb;
+
+            _scope = new FuncScope { Parent = parent };
+            _scope.Captured = CollectCaptured(body);
+            _scope.Returns = R;
+            for (int i = 0; i < pars.Count; i++)
+                _scope.Locals[pars[i]] = new LocalVar { Slot = i, Type = Dynamic, IsCell = _scope.Captured.Contains(pars[i]) };
+            _scope.NextSlot = pars.Count;
+
+            StringBuilder bodyBuf = new StringBuilder();
+            _sb = bodyBuf;
+            // wrap captured params into cells at entry
+            foreach (var p in pars) { var lv = _scope.Locals[p]; if (lv.IsCell) { Line("load " + lv.Slot); Line("mkcell"); Line("store " + lv.Slot); } }
+            EmitBlock(body);
+            for (int i = 0; i < R; i++) Line("pushnil"); // fall-off: always leave exactly R values
+
+            int inner = _scope.NextSlot - pars.Count;
+            var upvals = _scope.Upvals;
+            _scope = savedScope;
+            _sb = savedSb;
+
+            var def = new StringBuilder();
+            def.Append(".def " + defName + ": args=" + pars.Count + ", locals=" + inner + "\n");
+            def.Append(bodyBuf.ToString());
+            def.Append("ret\n\n");
+            _lambdaDefs.Add(def.ToString());
+
+            if (outUpvals != null) outUpvals.AddRange(upvals);
+        }
+
+        // ---- free-variable analysis: names referenced inside nested functions (-> captured cells) ----
+        private static HashSet<string> CollectCaptured(List<Stmt> body)
+        {
+            var names = new HashSet<string>();
+            foreach (var s in body) ScanStmtForNested(s, names);
+            return names;
+        }
+        private static void ScanStmtForNested(Stmt s, HashSet<string> names)
+        {
+            switch (s)
+            {
+                case LocalDecl ld: ScanExprForNested(ld.Init, names); break;
+                case LocalMulti lm: foreach (var v in lm.Values) ScanExprForNested(v, names); break;
+                case Assign a: ScanExprForNested(a.Value, names); break;
+                case AssignMulti am: foreach (var v in am.Values) ScanExprForNested(v, names); break;
+                case IndexAssign ia: ScanExprForNested(ia.Target, names); ScanExprForNested(ia.Key, names); ScanExprForNested(ia.Value, names); break;
+                case TableInsert ti: ScanExprForNested(ti.Table, names); ScanExprForNested(ti.Value, names); break;
+                case ExprStmt es: ScanExprForNested(es.Call, names); break;
+                case CallStmt cs: ScanExprForNested(cs.Call, names); break;
+                case IfStmt ifs: ScanExprForNested(ifs.Cond, names); foreach (var st in ifs.Then) ScanStmtForNested(st, names); if (ifs.Else != null) foreach (var st in ifs.Else) ScanStmtForNested(st, names); break;
+                case WhileStmt w: ScanExprForNested(w.Cond, names); foreach (var st in w.Body) ScanStmtForNested(st, names); break;
+                case ForIn fi: ScanExprForNested(fi.TableExpr, names); foreach (var st in fi.Body) ScanStmtForNested(st, names); break;
+                case ForNum fn: ScanExprForNested(fn.Start, names); ScanExprForNested(fn.Stop, names); if (fn.Step != null) ScanExprForNested(fn.Step, names); foreach (var st in fn.Body) ScanStmtForNested(st, names); break;
+                case ReturnStmt r: foreach (var v in r.Values) ScanExprForNested(v, names); break;
+                case FuncDecl fd: AllNamesList(fd.Body, names); break;
+            }
+        }
+        private static void ScanExprForNested(Expr e, HashSet<string> names)
+        {
+            switch (e)
+            {
+                case FuncExpr fe: AllNamesList(fe.Body, names); break;
+                case Binary b: ScanExprForNested(b.L, names); ScanExprForNested(b.R, names); break;
+                case Unary u: ScanExprForNested(u.E, names); break;
+                case LlCall c: foreach (var a in c.Args) ScanExprForNested(a, names); break;
+                case LibCall lc: foreach (var a in lc.Args) ScanExprForNested(a, names); break;
+                case UserCall uc: foreach (var a in uc.Args) ScanExprForNested(a, names); break;
+                case Index ix: ScanExprForNested(ix.Target, names); ScanExprForNested(ix.Key, names); break;
+                case Len ln: ScanExprForNested(ln.E, names); break;
+                case TableLit tl: foreach (var f in tl.Fields) { if (f.Key != null) ScanExprForNested(f.Key, names); ScanExprForNested(f.Value, names); } break;
+                case Builtin bi: ScanExprForNested(bi.Arg, names); break;
+            }
+        }
+        private static void AllNamesList(List<Stmt> body, HashSet<string> names) { foreach (var s in body) AllNamesStmt(s, names); }
+        private static void AllNamesStmt(Stmt s, HashSet<string> names)
+        {
+            switch (s)
+            {
+                case LocalDecl ld: AllNamesExpr(ld.Init, names); break;
+                case LocalMulti lm: foreach (var v in lm.Values) AllNamesExpr(v, names); break;
+                case Assign a: names.Add(a.Name); AllNamesExpr(a.Value, names); break;
+                case AssignMulti am: foreach (var n in am.Names) names.Add(n); foreach (var v in am.Values) AllNamesExpr(v, names); break;
+                case IndexAssign ia: AllNamesExpr(ia.Target, names); AllNamesExpr(ia.Key, names); AllNamesExpr(ia.Value, names); break;
+                case TableInsert ti: AllNamesExpr(ti.Table, names); AllNamesExpr(ti.Value, names); break;
+                case ExprStmt es: AllNamesExpr(es.Call, names); break;
+                case CallStmt cs: AllNamesExpr(cs.Call, names); break;
+                case IfStmt ifs: AllNamesExpr(ifs.Cond, names); AllNamesList(ifs.Then, names); if (ifs.Else != null) AllNamesList(ifs.Else, names); break;
+                case WhileStmt w: AllNamesExpr(w.Cond, names); AllNamesList(w.Body, names); break;
+                case ForIn fi: AllNamesExpr(fi.TableExpr, names); AllNamesList(fi.Body, names); break;
+                case ForNum fn: AllNamesExpr(fn.Start, names); AllNamesExpr(fn.Stop, names); if (fn.Step != null) AllNamesExpr(fn.Step, names); AllNamesList(fn.Body, names); break;
+                case ReturnStmt r: foreach (var v in r.Values) AllNamesExpr(v, names); break;
+                case FuncDecl fd: AllNamesList(fd.Body, names); break;
+            }
+        }
+        private static void AllNamesExpr(Expr e, HashSet<string> names)
+        {
+            switch (e)
+            {
+                case NameRef nr: names.Add(nr.Name); break;
+                case UserCall uc: names.Add(uc.Name); foreach (var a in uc.Args) AllNamesExpr(a, names); break;
+                case Binary b: AllNamesExpr(b.L, names); AllNamesExpr(b.R, names); break;
+                case Unary u: AllNamesExpr(u.E, names); break;
+                case LlCall c: foreach (var a in c.Args) AllNamesExpr(a, names); break;
+                case LibCall lc: foreach (var a in lc.Args) AllNamesExpr(a, names); break;
+                case Index ix: AllNamesExpr(ix.Target, names); AllNamesExpr(ix.Key, names); break;
+                case Len ln: AllNamesExpr(ln.E, names); break;
+                case TableLit tl: foreach (var f in tl.Fields) { if (f.Key != null) AllNamesExpr(f.Key, names); AllNamesExpr(f.Value, names); } break;
+                case Builtin bi: AllNamesExpr(bi.Arg, names); break;
+                case FuncExpr fe: AllNamesList(fe.Body, names); break;
+            }
+        }
+
+        // ---- unified call emission: produce exactly `wanted` values from any call expression ----
+        private static bool IsCallExpr(Expr e) { return e is UserCall || (e is LibCall lc && IsMultiLib(lc)); }
+
+        private void EmitCallTo(Expr e, int wanted)
+        {
+            if (e is LibCall lc && IsMultiLib(lc))
+            {
+                int id = LibFuncId(lc.Lib, lc.Fn, lc.Line);
+                foreach (var a in lc.Args) EmitExpr(a);
+                Line("luacallm " + id + ", " + lc.Args.Count);
+                Line("adjustm " + wanted);
+                return;
+            }
+            if (e is UserCall uc)
+            {
+                var r = Resolve(uc.Name);
+                if (r.Kind == RKind.TopFunc)
+                {
+                    int R = _userReturns[uc.Name];
+                    EmitArgsAdjusted(uc.Args, _userParams[uc.Name]);
+                    Line("call " + uc.Name + "()");
+                    if (R > wanted) for (int k = 0; k < R - wanted; k++) Line("pop");
+                    else for (int k = 0; k < wanted - R; k++) Line("pushnil");
+                }
+                else
+                {
+                    EmitLoadName(uc.Name, uc.Line);          // the closure value
+                    foreach (var a in uc.Args) EmitExpr(a);  // callv pads/truncates args to callee arity
+                    Line("callv " + uc.Args.Count + ", " + wanted);
+                }
+                return;
+            }
+            // a non-call expression in a value-list position: 1 value, padded to `wanted`
+            EmitExpr(e);
+            if (wanted == 0) Line("pop");
+            else for (int k = 1; k < wanted; k++) Line("pushnil");
+        }
+
+        private void EmitArgsAdjusted(List<Expr> args, int p)
+        {
+            for (int i = 0; i < args.Count; i++) EmitExpr(args[i]);
+            if (args.Count > p) for (int k = 0; k < args.Count - p; k++) Line("pop");
+            else for (int k = 0; k < p - args.Count; k++) Line("pushnil");
+        }
 
         public string Generate(List<Stmt> chunk)
         {
@@ -864,7 +1125,7 @@ namespace InWorldz.Phlox.SLua
             Line(".globals " + topLocals.Count);
             Line(".statedef default");
             Line("");
-            _locals = null; // global-init runs in no local frame
+            _scope = null; // global-init runs in no function frame
             for (int i = 0; i < topLocals.Count; i++)
             {
                 var ld = topLocals[i];
@@ -888,6 +1149,9 @@ namespace InWorldz.Phlox.SLua
             // ---- user functions ----
             foreach (var f in userFuncs)
                 EmitUserFunction(f);
+
+            // ---- flattened .def blocks (user functions + anonymous lambdas) ----
+            foreach (var def in _lambdaDefs) _sb.Append(def);
 
             return _sb.ToString();
         }
@@ -913,28 +1177,7 @@ namespace InWorldz.Phlox.SLua
 
         private void EmitUserFunction(FuncDecl f)
         {
-            int R = _userReturns[f.Name];
-            _locals = new Dictionary<string, VarVar>();
-            for (int i = 0; i < f.Params.Count; i++)
-                _locals[f.Params[i]] = new VarVar(i, Dynamic);
-            _nextLocalSlot = f.Params.Count;
-            _currentReturns = R;
-
-            StringBuilder outer = _sb;
-            StringBuilder bodyBuf = new StringBuilder();
-            _sb = bodyBuf;
-            try { EmitBlock(f.Body); }
-            finally { _sb = outer; }
-
-            int innerLocals = _nextLocalSlot - f.Params.Count;
-            Line(".def " + f.Name + ": args=" + f.Params.Count + ", locals=" + innerLocals);
-            _sb.Append(bodyBuf.ToString());
-            // fall-off: a function always leaves exactly R values, so pad with nils then ret
-            for (int i = 0; i < R; i++) Line("pushnil");
-            Line("ret");
-            Line("");
-            _locals = null;
-            _currentReturns = 0;
+            EmitFunctionDef(f.Name, f.Params, f.Body, _userReturns[f.Name], null, null);
         }
 
         private void EmitHandler(string eventName, List<string> declaredParams, List<Stmt> body, int line)
@@ -944,27 +1187,27 @@ namespace InWorldz.Phlox.SLua
                 throw new SLuaException("event '" + eventName + "' takes " + eventArgs.Count +
                                         " parameter(s); " + declaredParams.Count + " declared", line);
 
-            _locals = new Dictionary<string, VarVar>();
-            // params occupy slots 0..eventArgs.Count-1 with the event's arg types
+            _scope = new FuncScope { Parent = null };
+            _scope.Captured = CollectCaptured(body);
+            _scope.Returns = 0; // events return no values
             for (int i = 0; i < declaredParams.Count; i++)
-                _locals[declaredParams[i]] = new VarVar(i, eventArgs[i]);
-            _nextLocalSlot = eventArgs.Count;
-            _currentReturns = 0; // events return no values
+                _scope.Locals[declaredParams[i]] = new LocalVar { Slot = i, Type = eventArgs[i], IsCell = _scope.Captured.Contains(declaredParams[i]) };
+            _scope.NextSlot = eventArgs.Count;
 
-            // Two-pass: emit the body into a temp buffer while allocating locals/temps on demand,
-            // then emit the header with the final locals count (the .evt header precedes the body).
+            // Two-pass: emit body to a temp buffer, then emit the .evt header (precedes the body).
             StringBuilder outer = _sb;
             StringBuilder bodyBuf = new StringBuilder();
             _sb = bodyBuf;
+            foreach (var p in declaredParams) { var lv = _scope.Locals[p]; if (lv.IsCell) { Line("load " + lv.Slot); Line("mkcell"); Line("store " + lv.Slot); } }
             try { EmitBlock(body); }
             finally { _sb = outer; }
 
-            int innerLocals = _nextLocalSlot - eventArgs.Count;
+            int innerLocals = _scope.NextSlot - eventArgs.Count;
             Line(".evt default/" + eventName + ": args=" + eventArgs.Count + ", locals=" + innerLocals);
             _sb.Append(bodyBuf.ToString());
             Line("ret");
             Line("");
-            _locals = null;
+            _scope = null;
         }
 
         private void EmitBlock(List<Stmt> stmts)
@@ -978,29 +1221,23 @@ namespace InWorldz.Phlox.SLua
             {
                 case LocalDecl ld:
                 {
-                    VarType t = EmitExpr(ld.Init);
-                    int slot = _locals.TryGetValue(ld.Name, out var ex) ? ex.Slot : AllocNamedLocal(ld.Name, t);
-                    // record the local's type (re-decl in the flat model just updates type)
-                    _locals[ld.Name] = new VarVar(slot, t);
-                    Line("store " + slot);
+                    LocalVar lv = _scope.Locals.TryGetValue(ld.Name, out var ex) ? ex : AllocLocal(ld.Name, Dynamic);
+                    if (lv.IsCell)
+                    {
+                        // pre-create the cell (so a self-referencing init / later capture share it),
+                        // then assign the value through it
+                        Line("pushnil"); Line("mkcell"); Line("store " + lv.Slot);
+                        Line("load " + lv.Slot); EmitExpr(ld.Init); Line("cellput");
+                    }
+                    else
+                    {
+                        VarType t = EmitExpr(ld.Init); lv.Type = t; Line("store " + lv.Slot);
+                    }
                     break;
                 }
                 case Assign a:
-                {
-                    VarType t = EmitExpr(a.Value);
-                    if (_locals != null && _locals.TryGetValue(a.Name, out var lv))
-                    {
-                        Coerce(t, lv.Type, a.Line);
-                        Line("store " + lv.Slot);
-                    }
-                    else if (_globals.TryGetValue(a.Name, out var gv))
-                    {
-                        Coerce(t, gv.Type, a.Line);
-                        Line("gstore " + gv.Slot);
-                    }
-                    else throw new SLuaException("assignment to undeclared variable '" + a.Name + "'", a.Line);
+                    EmitAssignName(a.Name, () => EmitExpr(a.Value), a.Line);
                     break;
-                }
                 case IndexAssign ia:
                 {
                     EmitExpr(ia.Target);   // table
@@ -1037,8 +1274,12 @@ namespace InWorldz.Phlox.SLua
                     EmitAssignMulti(am);
                     break;
                 case ReturnStmt r:
-                    EmitValuesAdjusted(r.Values, _currentReturns, r.Line); // adjust to this fn's return count
+                    EmitValuesAdjusted(r.Values, _scope.Returns, r.Line); // adjust to this fn's return count
                     Line("ret");
+                    break;
+                case FuncDecl fd:
+                    // nested named function -> treat as a local function value
+                    EmitStmt(new LocalDecl { Name = fd.Name, Init = new FuncExpr { Params = fd.Params, Body = fd.Body, Line = fd.Line }, Line = fd.Line });
                     break;
                 default:
                     throw new SLuaException("unsupported statement", s.Line);
@@ -1066,8 +1307,8 @@ namespace InWorldz.Phlox.SLua
             // for k [, v] in pairs(t) do ... end  (insertion-ordered next() protocol)
             int tSlot = AllocTempLocal();   // _t : the table
             int kSlot = AllocTempLocal();   // _k : iteration cursor
-            int var0 = AllocNamedLocal(f.Vars[0], Dynamic);
-            int var1 = (f.Vars.Count >= 2) ? AllocNamedLocal(f.Vars[1], Dynamic) : -1;
+            int var0 = AllocLoopVar(f.Vars[0], f.Line);
+            int var1 = (f.Vars.Count >= 2) ? AllocLoopVar(f.Vars[1], f.Line) : -1;
 
             EmitExpr(f.TableExpr);
             Line("store " + tSlot);   // _t = table
@@ -1099,7 +1340,7 @@ namespace InWorldz.Phlox.SLua
             var lc = (LibCall)f.TableExpr;
             int itSlot = AllocTempLocal();
             var varSlots = new int[f.Vars.Count];
-            for (int i = 0; i < f.Vars.Count; i++) varSlots[i] = AllocNamedLocal(f.Vars[i], Dynamic);
+            for (int i = 0; i < f.Vars.Count; i++) varSlots[i] = AllocLoopVar(f.Vars[i], f.Line);
 
             int id = LibFuncId(lc.Lib, lc.Fn, lc.Line); // StrGmatch -> single LuaGmatch
             foreach (var a in lc.Args) EmitExpr(a);      // s, p
@@ -1120,9 +1361,16 @@ namespace InWorldz.Phlox.SLua
 
         // Numeric for: for i = start, stop [, step] do ... end.
         // Continue condition (no sign branching): (i - stop) * step <= 0.
+        private int AllocLoopVar(string name, int line)
+        {
+            var lv = AllocLocal(name, Dynamic);
+            if (lv.IsCell) throw new SLuaException("capturing a loop variable in a nested function is not supported in Tier-2", line);
+            return lv.Slot;
+        }
+
         private void EmitForNum(ForNum f)
         {
-            int iSlot = AllocNamedLocal(f.Var, Dynamic);
+            int iSlot = AllocLoopVar(f.Var, f.Line);
             int stopSlot = AllocTempLocal();
             int stepSlot = AllocTempLocal();
 
@@ -1154,26 +1402,36 @@ namespace InWorldz.Phlox.SLua
         private void EmitLocalMulti(LocalMulti lm)
         {
             // evaluate RHS (in the OUTER scope) first, then declare + bind the new locals
-            EmitValuesAdjusted(lm.Values, lm.Names.Count, lm.Line);
-            var slots = new int[lm.Names.Count];
-            for (int i = 0; i < lm.Names.Count; i++) slots[i] = AllocNamedLocal(lm.Names[i], Dynamic);
-            for (int i = lm.Names.Count - 1; i >= 0; i--) Line("store " + slots[i]); // top = last value
+            EmitValuesAdjusted(lm.Values, lm.Names.Count, lm.Line);  // N values on stack (top = last)
+            var lvs = new LocalVar[lm.Names.Count];
+            for (int i = 0; i < lm.Names.Count; i++) lvs[i] = AllocLocal(lm.Names[i], Dynamic);
+            for (int i = lm.Names.Count - 1; i >= 0; i--)
+            {
+                if (lvs[i].IsCell) Line("mkcell"); // wrap the value into a fresh cell
+                Line("store " + lvs[i].Slot);
+            }
         }
 
         private void EmitAssignMulti(AssignMulti am)
         {
-            EmitValuesAdjusted(am.Values, am.Names.Count, am.Line);
+            EmitValuesAdjusted(am.Values, am.Names.Count, am.Line); // N values, top = last
             for (int i = am.Names.Count - 1; i >= 0; i--)
             {
-                string name = am.Names[i];
-                if (_locals != null && _locals.TryGetValue(name, out var lv)) Line("store " + lv.Slot);
-                else if (_globals.TryGetValue(name, out var gv)) Line("gstore " + gv.Slot);
-                else throw new SLuaException("assignment to undeclared variable '" + name + "'", am.Line);
+                var r = Resolve(am.Names[i]);
+                switch (r.Kind)
+                {
+                    case RKind.Local:
+                        if (r.Local.IsCell) throw new SLuaException("multi-assignment to a captured variable is not supported in Tier-2", am.Line);
+                        Line("store " + r.Local.Slot); break;
+                    case RKind.Upval: Line("setupval " + r.UpvalIdx); break;
+                    case RKind.Global: Line("gstore " + r.Global.Slot); break;
+                    default: throw new SLuaException("assignment to undeclared variable '" + am.Names[i] + "'", am.Line);
+                }
             }
         }
 
         // Emit a value list leaving exactly `target` values on the stack. Only the LAST expression
-        // expands to its full multiplicity (a user call's R values); earlier ones adjust to 1.
+        // expands to its full multiplicity (a call's results); earlier ones adjust to 1.
         private void EmitValuesAdjusted(List<Expr> values, int target, int line)
         {
             int n = values.Count;
@@ -1181,12 +1439,11 @@ namespace InWorldz.Phlox.SLua
             for (int i = 0; i < n - 1; i++) EmitExpr(values[i]); // earlier exprs: 1 value each
             int earlier = n - 1;
             Expr last = values[n - 1];
-            if (IsMultiCall(last))
+            if (IsCallExpr(last))
             {
                 int need = target - earlier;
-                EmitMultiCall(last);                 // [vals..., count]
-                if (need >= 0) Line("adjustm " + need);
-                else { Line("adjustm 0"); for (int k = 0; k < -need; k++) Line("pop"); }
+                if (need >= 0) EmitCallTo(last, need);
+                else { EmitCallTo(last, 0); for (int k = 0; k < -need; k++) Line("pop"); }
             }
             else
             {
@@ -1197,35 +1454,21 @@ namespace InWorldz.Phlox.SLua
             }
         }
 
-        // Emit a user-function call, leaving its R return values on the stack. Returns R.
-        private int EmitUserCallMulti(UserCall uc)
-        {
-            if (!_userParams.TryGetValue(uc.Name, out int p))
-                throw new SLuaException("call to undefined function '" + uc.Name + "'", uc.Line);
-            // push exactly p args (adjust the supplied list)
-            int produced = 0;
-            for (int i = 0; i < uc.Args.Count; i++) { EmitExpr(uc.Args[i]); produced++; }
-            if (produced > p) for (int k = 0; k < produced - p; k++) Line("pop");
-            else for (int k = 0; k < p - produced; k++) Line("pushnil");
-            Line("call " + uc.Name + "()");
-            return _userReturns[uc.Name];
-        }
-
         private void EmitCallStmt(CallStmt cs)
         {
             switch (cs.Call)
             {
                 case LlCall ll: EmitLlCall(ll, statementLevel: true); break;
-                case LibCall lc when IsMultiLib(lc): EmitMultiCall(lc); Line("adjustm 0"); break; // discard
-                case LibCall lc2: EmitLibCall(lc2); Line("pop"); break;                           // single-result: discard
-                case UserCall uc: EmitMultiCall(uc); Line("adjustm 0"); break;                    // discard all returns
+                case LibCall lc when IsMultiLib(lc): EmitCallTo(lc, 0); break;  // discard
+                case LibCall lc2: EmitLibCall(lc2); Line("pop"); break;         // single-result: discard
+                case UserCall uc: EmitCallTo(uc, 0); break;                     // discard all returns
                 default: throw new SLuaException("invalid call statement", cs.Line);
             }
         }
 
         private VarType EmitLibCall(LibCall lc)
         {
-            if (IsMultiLib(lc)) { EmitMultiCall(lc); Line("adjustm 1"); return Dynamic; }
+            if (IsMultiLib(lc)) { EmitCallTo(lc, 1); return Dynamic; }
             int id = LibFuncId(lc.Lib, lc.Fn, lc.Line);
             foreach (var a in lc.Args) EmitExpr(a);
             Line("luacall " + id + ", " + lc.Args.Count);
@@ -1273,29 +1516,6 @@ namespace InWorldz.Phlox.SLua
         private static bool IsMultiLib(LibCall lc)
         {
             return lc.Lib == "string" && (lc.Fn == "find" || lc.Fn == "match" || lc.Fn == "gsub");
-        }
-
-        // Leave [values..., count] on the stack for a multi-value call (user fn or multi-lib).
-        // For user functions the count is the static return arity; for multi-lib it is runtime.
-        private void EmitMultiCall(Expr e)
-        {
-            if (e is UserCall uc)
-            {
-                int r = EmitUserCallMulti(uc);  // leaves R values
-                Line("iconst " + r);            // ...then the (static) count
-            }
-            else if (e is LibCall lc && IsMultiLib(lc))
-            {
-                int id = LibFuncId(lc.Lib, lc.Fn, lc.Line);
-                foreach (var a in lc.Args) EmitExpr(a);
-                Line("luacallm " + id + ", " + lc.Args.Count); // leaves [values..., count]
-            }
-            else throw new SLuaException("not a multi-value call", e.Line);
-        }
-
-        private static bool IsMultiCall(Expr e)
-        {
-            return e is UserCall || (e is LibCall lc && IsMultiLib(lc));
         }
 
         private void EmitIf(IfStmt ifs)
@@ -1390,9 +1610,10 @@ namespace InWorldz.Phlox.SLua
                 case LibValue lv:
                     return EmitLibValue(lv);
                 case UserCall uc:
-                    EmitMultiCall(uc);   // [vals..., count]
-                    Line("adjustm 1");   // single-value context
+                    EmitCallTo(uc, 1);   // single-value context
                     return Dynamic;
+                case FuncExpr fe:
+                    return EmitFuncExpr(fe);
                 default:
                     throw new SLuaException("unsupported expression", e.Line);
             }
@@ -1420,17 +1641,24 @@ namespace InWorldz.Phlox.SLua
 
         private VarType EmitNameRef(NameRef nr)
         {
-            if (_locals != null && _locals.TryGetValue(nr.Name, out var lv))
+            return EmitLoadName(nr.Name, nr.Line);
+        }
+
+        // Anonymous function expression: emit a flattened .def, then build a closure capturing the
+        // resolved upvalue cells from the current (defining) scope.
+        private VarType EmitFuncExpr(FuncExpr fe)
+        {
+            string name = "slua_lam_" + (_lambdaSeq++); // valid assembler identifier (no '$')
+            int R = AnalyzeReturnCount(fe.Body);
+            var upvals = new List<UpvalDesc>();
+            EmitFunctionDef(name, fe.Params, fe.Body, R, _scope, upvals);
+            foreach (var ud in upvals)
             {
-                Line("load " + lv.Slot);
-                return lv.Type;
+                if (ud.FromParentLocal) Line("load " + ud.Index);   // parent's cell-local slot holds the cell
+                else Line("pushupval " + ud.Index);                 // transitive: current closure's upval cell
             }
-            if (_globals.TryGetValue(nr.Name, out var gv))
-            {
-                Line("gload " + gv.Slot);
-                return gv.Type;
-            }
-            throw new SLuaException("reference to undeclared variable '" + nr.Name + "'", nr.Line);
+            Line("mkclosure " + name + "(), " + upvals.Count);
+            return Dynamic;
         }
 
         private VarType EmitBinary(Binary bin)
