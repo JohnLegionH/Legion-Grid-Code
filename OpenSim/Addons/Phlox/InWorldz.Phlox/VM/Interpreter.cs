@@ -742,6 +742,41 @@ namespace InWorldz.Phlox.VM
                         Op_IsNil();
                         break;
 
+                    // ---- SLua Tier-2: dynamic typing ----
+                    case OpCode.pushtrue:
+                        SafeOperandsPush(true);
+                        break;
+                    case OpCode.pushfalse:
+                        SafeOperandsPush(false);
+                        break;
+                    case OpCode.luatruthy:
+                        Op_LuaTruthy();
+                        break;
+                    case OpCode.lnot:
+                        Op_LNot();
+                        break;
+                    case OpCode.tobool:
+                        Op_ToBool();
+                        break;
+                    case OpCode.luaeq:
+                        Op_LuaEq();
+                        break;
+                    case OpCode.concat:
+                        Op_Concat();
+                        break;
+                    case OpCode.luatype:
+                        Op_LuaType();
+                        break;
+                    case OpCode.luatostr:
+                        Op_LuaToStr();
+                        break;
+                    case OpCode.luatonum:
+                        Op_LuaToNum();
+                        break;
+                    case OpCode.dup:
+                        Op_Dup();
+                        break;
+
                     default:
                         throw new VMException("Unhandled opcode: " + opcode);
                 }

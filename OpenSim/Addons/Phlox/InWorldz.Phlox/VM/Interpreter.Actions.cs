@@ -1599,6 +1599,129 @@ namespace InWorldz.Phlox.VM
             SafeOperandsPush(IsNilValue(v) ? 1 : 0);
         }
 
+        // ============================================================
+        // SLua Tier-2: dynamic typing (additive; Lua boolean = boxed .NET bool)
+        // ============================================================
+        // Lua truthiness: ONLY nil and false are falsy; everything else (incl. 0, "", tables) true.
+        private static bool LuaIsTruthy(object v)
+        {
+            if (IsNilValue(v)) return false;
+            if (v is bool b) return b;
+            return true;
+        }
+
+        private static bool IsLuaNumber(object v) { return v is int || v is float; }
+
+        private void Op_LuaTruthy()
+        {
+            object v = _state.Operands.Pop();
+            SafeOperandsPush(LuaIsTruthy(v) ? 1 : 0);   // int for brf/brt
+        }
+
+        private void Op_LNot()
+        {
+            object v = _state.Operands.Pop();
+            SafeOperandsPush(!LuaIsTruthy(v));          // boxed bool
+        }
+
+        private void Op_ToBool()
+        {
+            int i = ConvToInt(_state.Operands.Pop());
+            SafeOperandsPush(i != 0);                   // relational int result -> boolean
+        }
+
+        private void Op_Dup()
+        {
+            SafeOperandsPush(_state.Operands.Peek());
+        }
+
+        private void Op_LuaEq()
+        {
+            object b = _state.Operands.Pop();
+            object a = _state.Operands.Pop();
+            SafeOperandsPush(LuaEquals(a, b));          // boxed bool
+        }
+
+        // Lua ==: different types are never equal; numbers compare by value; tables by identity.
+        private static bool LuaEquals(object a, object b)
+        {
+            bool aNil = IsNilValue(a), bNil = IsNilValue(b);
+            if (aNil || bNil) return aNil && bNil;
+            if (a is bool ab && b is bool bb) return ab == bb;
+            if (IsLuaNumber(a) && IsLuaNumber(b)) return ConvToFloat(a) == ConvToFloat(b);
+            if (a is string sa && b is string sb) return sa == sb;
+            if (a is LSLTable && b is LSLTable) return ReferenceEquals(a, b);
+            return false;
+        }
+
+        private void Op_Concat()
+        {
+            object b = _state.Operands.Pop();
+            object a = _state.Operands.Pop();
+            SafeOperandsPush(ConcatStr(a) + ConcatStr(b));
+        }
+
+        // Lua '..' coerces only numbers and strings; other types error.
+        private static string ConcatStr(object v)
+        {
+            if (v is string s) return s;
+            if (IsLuaNumber(v)) return LuaNumToStr(v);
+            throw new CheckException("attempt to concatenate a " + LuaTypeName(v) + " value");
+        }
+
+        private void Op_LuaType()
+        {
+            SafeOperandsPush(LuaTypeName(_state.Operands.Pop()));
+        }
+
+        private static string LuaTypeName(object v)
+        {
+            if (IsNilValue(v)) return "nil";
+            if (v is bool) return "boolean";
+            if (IsLuaNumber(v)) return "number";
+            if (v is string) return "string";
+            if (v is LSLTable) return "table";
+            if (v is FunctionInfo) return "function";
+            return "userdata";
+        }
+
+        private void Op_LuaToStr()
+        {
+            SafeOperandsPush(LuaToString(_state.Operands.Pop()));
+        }
+
+        private static string LuaToString(object v)
+        {
+            if (IsNilValue(v)) return "nil";
+            if (v is bool b) return b ? "true" : "false";
+            if (IsLuaNumber(v)) return LuaNumToStr(v);
+            if (v is string s) return s;
+            if (v is LSLTable) return "table";
+            if (v is FunctionInfo) return "function";
+            return v.ToString();
+        }
+
+        // Luau prints integral numbers without a fraction (5.0 -> "5", 2.5 -> "2.5").
+        private static string LuaNumToStr(object v)
+        {
+            double d = (v is int i) ? i : (float)v;
+            if (d == System.Math.Floor(d) && !double.IsInfinity(d))
+                return ((long)d).ToString(System.Globalization.CultureInfo.InvariantCulture);
+            return d.ToString("0.0###############", System.Globalization.CultureInfo.InvariantCulture);
+        }
+
+        private void Op_LuaToNum()
+        {
+            object v = _state.Operands.Pop();
+            if (IsLuaNumber(v)) { SafeOperandsPush(v); return; }
+            if (v is string s && float.TryParse(s, System.Globalization.NumberStyles.Float,
+                System.Globalization.CultureInfo.InvariantCulture, out float f))
+            {
+                SafeOperandsPush(f); return;
+            }
+            SafeOperandsPush(LuaNil.Instance); // tonumber() returns nil on failure
+        }
+
         private void Op_Trace()
         {
             object top = _state.Operands.Pop();

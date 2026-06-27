@@ -149,7 +149,20 @@ namespace InWorldz.Phlox.Types
         tabset,         // pop value, pop key, pop table, set table[key]=value (nil value removes)
         tablen,         // pop table, push Lua length (#t) as int
         tabnext,        // pop key, pop table, push (value, key) of next entry; (nil,nil) when done
-        isnil           // pop value, push int 1 if it is nil, else 0
+        isnil,          // pop value, push int 1 if it is nil, else 0
+
+        // ---- SLua Tier-2: dynamic typing (additive; boolean = boxed .NET bool) ----
+        pushtrue,       // push boolean true
+        pushfalse,      // push boolean false
+        luatruthy,      // pop value, push int 1 if Lua-truthy (not nil/false), else 0  (for brf/brt)
+        lnot,           // pop value, push boolean (Lua 'not': true iff value is falsy)
+        tobool,         // pop int, push boolean (nonzero -> true)  (relational result -> boolean)
+        luaeq,          // pop b,a, push boolean Lua-equality (different types => false)
+        concat,         // pop b,a, push string (Lua '..': coerces number/string, errors otherwise)
+        luatype,        // pop value, push its Lua type name string
+        luatostr,       // pop value, push Lua tostring() form
+        luatonum,       // pop value, push number, or nil if not number-coercible
+        dup             // duplicate the top operand (for and/or short-circuit)
     }
 
 

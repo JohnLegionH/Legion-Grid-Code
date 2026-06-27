@@ -252,6 +252,7 @@ namespace InWorldz.Phlox.SLua
     internal sealed class TableLit : Expr { public List<TableField> Fields; }
     internal sealed class Index : Expr { public Expr Target; public Expr Key; }   // t[k] / t.x
     internal sealed class Len : Expr { public Expr E; }                            // #t
+    internal sealed class Builtin : Expr { public string Name; public Expr Arg; }  // type/tostring/tonumber
 
     internal abstract class Stmt : Node { }
     internal sealed class LocalDecl : Stmt { public string Name; public Expr Init; }
@@ -489,17 +490,43 @@ namespace InWorldz.Phlox.SLua
             return new ReturnStmt { Value = val, Line = line };
         }
 
-        // ---- expressions (precedence: comparison < add < mul < unary < primary) ----
-        private Expr ParseExpr() { return ParseComparison(); }
+        // ---- expressions (Lua precedence: or < and < comparison < .. < add < mul < unary) ----
+        private Expr ParseExpr() { return ParseOr(); }
+
+        private Expr ParseOr()
+        {
+            var l = ParseAnd();
+            while (IsKw("or")) { Eat(); var r = ParseAnd(); l = new Binary { Op = "or", L = l, R = r, Line = l.Line }; }
+            return l;
+        }
+
+        private Expr ParseAnd()
+        {
+            var l = ParseComparison();
+            while (IsKw("and")) { Eat(); var r = ParseComparison(); l = new Binary { Op = "and", L = l, R = r, Line = l.Line }; }
+            return l;
+        }
 
         private Expr ParseComparison()
         {
-            var l = ParseAdd();
+            var l = ParseConcat();
             while (IsOp("<") || IsOp(">") || IsOp("<=") || IsOp(">=") || IsOp("==") || IsOp("~="))
             {
                 string op = Eat().Text;
-                var r = ParseAdd();
+                var r = ParseConcat();
                 l = new Binary { Op = op, L = l, R = r, Line = l.Line };
+            }
+            return l;
+        }
+
+        private Expr ParseConcat()
+        {
+            var l = ParseAdd();
+            if (IsOp(".."))   // right-associative
+            {
+                Eat();
+                var r = ParseConcat();
+                return new Binary { Op = "..", L = l, R = r, Line = l.Line };
             }
             return l;
         }
@@ -542,6 +569,12 @@ namespace InWorldz.Phlox.SLua
                 var e = ParseUnary();
                 return new Len { E = e, Line = line };
             }
+            if (IsKw("not"))
+            {
+                int line = Cur.Line; Eat();
+                var e = ParseUnary();
+                return new Unary { Op = "not", E = e, Line = line };
+            }
             return ParsePrimary();
         }
 
@@ -565,6 +598,15 @@ namespace InWorldz.Phlox.SLua
             {
                 if (t.Text == "ll" && Next.Type == TT.Op && Next.Text == ".")
                     return ParseLlCall();
+                if ((t.Text == "type" || t.Text == "tostring" || t.Text == "tonumber")
+                    && Next.Type == TT.Op && Next.Text == "(")
+                {
+                    Eat();                  // builtin name
+                    ExpectOp("(");
+                    var arg = ParseExpr();
+                    ExpectOp(")");
+                    return new Builtin { Name = t.Text, Arg = arg, Line = t.Line };
+                }
                 return ParsePrefixExpr();
             }
             Err("expected expression");
@@ -915,15 +957,12 @@ namespace InWorldz.Phlox.SLua
         }
 
         // Emit a condition leaving an integer boolean on the stack (for brf/brt).
+        // Emit a condition leaving an int 1/0 on the stack (for brf/brt), using correct Lua
+        // truthiness (only nil and false are falsy; 0 and "" are truthy).
         private void EmitCondBool(Expr cond)
         {
-            VarType t = EmitExpr(cond);
-            if (t == VarType.Integer) return;                                  // comparison/bool (0/1)
-            if (t == VarType.Float) { Line("pop"); Line("iconst 1"); return; } // Lua: any number is truthy
-            // Dynamic / String / other: truthy iff not nil (Tier-2 approximation; a `false` stored
-            // in a dynamic slot is not distinguished from 0 here — full truthiness is the
-            // dynamic-typing piece).
-            Line("isnil"); Line("iconst 0"); Line("ieq");
+            EmitExpr(cond);
+            Line("luatruthy");
         }
 
         // ---- expressions ----
@@ -938,17 +977,22 @@ namespace InWorldz.Phlox.SLua
                     Line("sconst \"" + EscapeString(s.Value) + "\"");
                     return VarType.String;
                 case BoolLit b:
-                    Line("iconst " + (b.Value ? "1" : "0"));
-                    return VarType.Integer;
+                    Line(b.Value ? "pushtrue" : "pushfalse");
+                    return Dynamic;
                 case NameRef nr:
                     return EmitNameRef(nr);
                 case Unary u:
                 {
+                    if (u.Op == "not") { EmitExpr(u.E); Line("lnot"); return Dynamic; }
                     VarType t = EmitExpr(u.E);
                     Coerce(t, VarType.Float, u.Line);
                     Line("fneg");
                     return VarType.Float;
                 }
+                case Builtin bi:
+                    EmitExpr(bi.Arg);
+                    Line(bi.Name == "type" ? "luatype" : bi.Name == "tostring" ? "luatostr" : "luatonum");
+                    return bi.Name == "tonumber" ? Dynamic : VarType.String;
                 case Binary bin:
                     return EmitBinary(bin);
                 case LlCall c:
@@ -1009,21 +1053,42 @@ namespace InWorldz.Phlox.SLua
 
         private VarType EmitBinary(Binary bin)
         {
-            // nil comparison: x == nil / x ~= nil  (cannot coerce nil to a number)
+            // short-circuit logical operators return a value (not necessarily boolean)
+            if (bin.Op == "and" || bin.Op == "or") return EmitAndOr(bin);
+
+            // string concat: '..' coerces number/string operands in the VM
+            if (bin.Op == "..")
+            {
+                EmitExpr(bin.L);
+                EmitExpr(bin.R);
+                Line("concat");
+                return VarType.String;
+            }
+
+            // nil comparison: x == nil / x ~= nil
             if ((bin.Op == "==" || bin.Op == "~=") && (bin.L is NilLit || bin.R is NilLit))
             {
                 Expr other = (bin.L is NilLit) ? bin.R : bin.L;
                 EmitExpr(other);
-                Line("isnil");                       // 1 if nil
-                if (bin.Op == "~=") { Line("iconst 0"); Line("ieq"); }  // -> 1 if NOT nil
-                return VarType.Integer;
+                Line("isnil");
+                Line("tobool");                  // -> boolean (is nil)
+                if (bin.Op == "~=") Line("lnot");
+                return Dynamic;
             }
 
-            VarType lt = EmitExpr(bin.L);
-            Coerce(lt, VarType.Float, bin.Line);
-            VarType rt = EmitExpr(bin.R);
-            Coerce(rt, VarType.Float, bin.Line);
+            // Lua equality (type-aware: different types are never equal)
+            if (bin.Op == "==" || bin.Op == "~=")
+            {
+                EmitExpr(bin.L);
+                EmitExpr(bin.R);
+                Line("luaeq");                   // -> boolean
+                if (bin.Op == "~=") Line("lnot");
+                return Dynamic;
+            }
 
+            // arithmetic + relational: operands coerced to number by the VM ops at consumption
+            EmitExpr(bin.L);
+            EmitExpr(bin.R);
             switch (bin.Op)
             {
                 case "+": Line("fadd"); return VarType.Float;
@@ -1031,14 +1096,26 @@ namespace InWorldz.Phlox.SLua
                 case "*": Line("fmul"); return VarType.Float;
                 case "/": Line("fdiv"); return VarType.Float;
                 case "%": Line("fmod"); return VarType.Float;
-                case "<": Line("flt"); return VarType.Integer;
-                case ">": Line("fgt"); return VarType.Integer;
-                case "<=": Line("flte"); return VarType.Integer;
-                case ">=": Line("fgte"); return VarType.Integer;
-                case "==": Line("feq"); return VarType.Integer;
-                case "~=": Line("fneq"); return VarType.Integer;
+                case "<": Line("flt"); Line("tobool"); return Dynamic;
+                case ">": Line("fgt"); Line("tobool"); return Dynamic;
+                case "<=": Line("flte"); Line("tobool"); return Dynamic;
+                case ">=": Line("fgte"); Line("tobool"); return Dynamic;
                 default: throw new SLuaException("unsupported operator '" + bin.Op + "'", bin.Line);
             }
+        }
+
+        // a and b: a if a is falsy, else b.   a or b: a if a is truthy, else b.  (short-circuit)
+        private VarType EmitAndOr(Binary bin)
+        {
+            string skip = NewLabel(bin.Op == "and" ? "and" : "or");
+            EmitExpr(bin.L);                                   // [a]
+            Line("dup");                                       // [a, a]
+            Line("luatruthy");                                 // [a, t]
+            Line((bin.Op == "and" ? "brf " : "brt ") + skip);  // and: keep a if falsy; or: keep a if truthy
+            Line("pop");                                       // discard a
+            EmitExpr(bin.R);                                   // [b]
+            Label(skip);
+            return Dynamic;
         }
 
         private VarType EmitLlCall(LlCall c, bool statementLevel)

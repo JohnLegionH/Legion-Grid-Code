@@ -107,6 +107,13 @@ namespace InWorldz.Phlox.Serialization
             set { if (value) Value = Types.LuaNil.Instance; }
         }
 
+        [ProtoMember(12)]
+        private bool? ValueBool
+        {
+            get { return (Value is bool b) ? (bool?)b : null; }
+            set { if (value.HasValue) Value = value.Value; }
+        }
+
 		[ProtoMember(8)]
         private SerializedVector3 ValueVector
         {
@@ -265,6 +272,12 @@ namespace InWorldz.Phlox.Serialization
                 return true;
 
             if (Value is SerializedLSLTable)
+                return true;
+
+            if (Value is bool)
+                return true;
+
+            if (Value is Types.LuaNil)
                 return true;
 
 			if (Value is VM.FunctionInfo)
