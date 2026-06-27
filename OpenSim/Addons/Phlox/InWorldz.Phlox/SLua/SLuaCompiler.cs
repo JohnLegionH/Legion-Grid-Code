@@ -262,6 +262,7 @@ namespace InWorldz.Phlox.SLua
     internal sealed class MetaCall : Expr { public string Name; public List<Expr> Args; }                   // setmetatable/getmetatable
     internal sealed class VecCtor : Expr { public bool IsRot; public List<Expr> Args; }                      // vector(x,y,z) / rotation(x,y,z,s)
     internal sealed class CoreCall : Expr { public string Name; public List<Expr> Args; }                    // print/error/assert/pcall
+    internal sealed class CallExpr : Expr { public Expr Callee; public List<Expr> Args; }                     // <expr>(args) -- e.g. T.f(args)
 
     internal abstract class Stmt : Node { }
     internal sealed class LocalDecl : Stmt { public string Name; public Expr Init; }
@@ -362,7 +363,7 @@ namespace InWorldz.Phlox.SLua
                 }
 
                 // call statement (result discarded)
-                if (first is LlCall || first is UserCall || first is LibCall || first is MethodCall || first is CoreCall)
+                if (first is LlCall || first is UserCall || first is LibCall || first is MethodCall || first is CoreCall || first is CallExpr)
                     return new CallStmt { Call = first, Line = line };
 
                 throw new SLuaException("expected '=' (assignment) or a call statement", line);
@@ -494,9 +495,47 @@ namespace InWorldz.Phlox.SLua
         {
             int line = Cur.Line; ExpectKw("function");
             if (Cur.Type != TT.Name) Err("expected function name");
-            string name = Eat().Text;
+            string baseName = Eat().Text;
+
+            // Luau funcname:  Name ('.' Name)* (':' Name)?
+            var dots = new List<string>();
+            string method = null;
+            while (IsOp(".")) { Eat(); if (Cur.Type != TT.Name && Cur.Type != TT.Keyword) Err("expected field name after '.'"); dots.Add(Eat().Text); }
+            if (IsOp(":")) { Eat(); if (Cur.Type != TT.Name && Cur.Type != TT.Keyword) Err("expected method name after ':'"); method = Eat().Text; }
+
+            // bare  function name(...)  -> existing local/global function declaration (unchanged)
+            if (dots.Count == 0 && method == null)
+            {
+                var fe0 = ParseFuncRest(line);
+                return new FuncDecl { Name = baseName, Params = fe0.Params, Body = fe0.Body, Line = line };
+            }
+
+            // table-field / method form: desugar to  <table-chain>.<field> = function(...) ... end
             var fe = ParseFuncRest(line);
-            return new FuncDecl { Name = name, Params = fe.Params, Body = fe.Body, Line = line };
+            var pars = fe.Params;
+            if (method != null) { pars = new List<string> { "self" }; pars.AddRange(fe.Params); } // colon -> implicit self
+
+            // names that form the TABLE expression vs the final field key:
+            //   dot form  T.a.b   -> table = T.a,        field = b
+            //   colon form T.a:m  -> table = T.a,        field = m (the full dot chain is the table)
+            var chain = new List<string> { baseName };
+            chain.AddRange(dots);
+            string field;
+            int tableNames; // count of leading names forming the table expr
+            if (method != null) { field = method; tableNames = chain.Count; }
+            else { field = chain[chain.Count - 1]; tableNames = chain.Count - 1; }
+
+            Expr target = new NameRef { Name = chain[0], Line = line };
+            for (int i = 1; i < tableNames; i++)
+                target = new Index { Target = target, Key = new StringLit { Value = chain[i], Line = line }, Line = line };
+
+            return new IndexAssign
+            {
+                Target = target,
+                Key = new StringLit { Value = field, Line = line },
+                Value = new FuncExpr { Params = pars, Body = fe.Body, Line = line },
+                Line = line
+            };
         }
 
         // Parse the part after 'function' [name]: ( params ) [: rettype] block end -> FuncExpr.
@@ -779,6 +818,12 @@ namespace InWorldz.Phlox.SLua
                     var margs = ParseCallArgs();
                     e = new MethodCall { Target = e, Method = method, Args = margs, Line = line };
                 }
+                else if (IsOp("("))   // call a computed function value: T.f(args), g()(args), etc.
+                {
+                    int line = Cur.Line;
+                    var cargs = ParseCallArgs();
+                    e = new CallExpr { Callee = e, Args = cargs, Line = line };
+                }
                 else break;
             }
             return e;
@@ -1043,6 +1088,7 @@ namespace InWorldz.Phlox.SLua
                 case MetaCall mtc: foreach (var a in mtc.Args) ScanExprForNested(a, names); break;
                 case VecCtor vtc: foreach (var a in vtc.Args) ScanExprForNested(a, names); break;
                 case CoreCall cc: foreach (var a in cc.Args) ScanExprForNested(a, names); break;
+                case CallExpr ce: ScanExprForNested(ce.Callee, names); foreach (var a in ce.Args) ScanExprForNested(a, names); break;
             }
         }
         private static void AllNamesList(List<Stmt> body, HashSet<string> names) { foreach (var s in body) AllNamesStmt(s, names); }
@@ -1085,6 +1131,7 @@ namespace InWorldz.Phlox.SLua
                 case MetaCall mtc: foreach (var a in mtc.Args) AllNamesExpr(a, names); break;
                 case VecCtor vtc: foreach (var a in vtc.Args) AllNamesExpr(a, names); break;
                 case CoreCall cc: foreach (var a in cc.Args) AllNamesExpr(a, names); break;
+                case CallExpr ce: AllNamesExpr(ce.Callee, names); foreach (var a in ce.Args) AllNamesExpr(a, names); break;
             }
         }
 
@@ -1131,6 +1178,7 @@ namespace InWorldz.Phlox.SLua
                 case MetaCall mtc: foreach (var a in mtc.Args) LLEExpr(a, evs); break;
                 case VecCtor vtc: foreach (var a in vtc.Args) LLEExpr(a, evs); break;
                 case CoreCall cc: foreach (var a in cc.Args) LLEExpr(a, evs); break;
+                case CallExpr ce: LLEExpr(ce.Callee, evs); foreach (var a in ce.Args) LLEExpr(a, evs); break;
             }
         }
 
@@ -1168,7 +1216,7 @@ namespace InWorldz.Phlox.SLua
         }
 
         // ---- unified call emission: produce exactly `wanted` values from any call expression ----
-        private static bool IsCallExpr(Expr e) { return e is UserCall || (e is LibCall lc && IsMultiLib(lc)) || e is CoreCall; }
+        private static bool IsCallExpr(Expr e) { return e is UserCall || (e is LibCall lc && IsMultiLib(lc)) || e is CoreCall || e is CallExpr; }
 
         private void EmitCallTo(Expr e, int wanted)
         {
@@ -1181,6 +1229,13 @@ namespace InWorldz.Phlox.SLua
                 return;
             }
             if (e is CoreCall cc) { EmitCoreCall(cc, wanted); return; }
+            if (e is CallExpr ce)
+            {
+                EmitExpr(ce.Callee);                      // the function value (closure / __call table)
+                foreach (var a in ce.Args) EmitExpr(a);   // callv pads/truncates to callee arity
+                Line("callv " + ce.Args.Count + ", " + wanted);
+                return;
+            }
             if (e is UserCall uc)
             {
                 var r = Resolve(uc.Name);
@@ -1256,21 +1311,27 @@ namespace InWorldz.Phlox.SLua
             if (useLLEvents) _lleventsSlot = topLocals.Count; // one extra global slot for the registry
             int globalCount = topLocals.Count + (useLLEvents ? 1 : 0);
 
+            // Pre-register every top-level local as a global slot up front, so references resolve
+            // regardless of source order (a later definition seen by an earlier statement is nil,
+            // matching Lua). Top-level `local`s are persistent script state = Phlox globals.
+            for (int i = 0; i < topLocals.Count; i++)
+            {
+                if (_globals.ContainsKey(topLocals[i].Name))
+                    throw new SLuaException("duplicate top-level local '" + topLocals[i].Name + "'", topLocals[i].Line);
+                _globals[topLocals[i].Name] = new VarVar(i, Dynamic);
+            }
+
             // ---- header + globals-init block ----
             Line(".globals " + globalCount);
             Line(".statedef default");
             Line("");
             _scope = null; // global-init runs in no function frame
-            for (int i = 0; i < topLocals.Count; i++)
+            if (useLLEvents) { Line("buildtable 0"); Line("gstore " + _lleventsSlot); } // registry first
+            if (!hasTopLevel)
             {
-                var ld = topLocals[i];
-                if (_globals.ContainsKey(ld.Name))
-                    throw new SLuaException("duplicate top-level local '" + ld.Name + "'", ld.Line);
-                VarType t = EmitExpr(ld.Init);          // register AFTER emit so init can't self-ref
-                _globals[ld.Name] = new VarVar(i, t);   // global keeps its declared/init type
-                Line("gstore " + i);                    // store natural value (no forced cast)
+                // no top-level code: initialize the persistent locals here (Tier-1 / event-script form)
+                for (int i = 0; i < topLocals.Count; i++) { EmitExpr(topLocals[i].Init); Line("gstore " + i); }
             }
-            if (useLLEvents) { Line("buildtable 0"); Line("gstore " + _lleventsSlot); } // empty registry table
             Line("halt");
             Line("");
 
@@ -1278,9 +1339,21 @@ namespace InWorldz.Phlox.SLua
             var form1Events = new HashSet<string>();
             foreach (var f in events) form1Events.Add(f.Name);
 
-            // ---- synthesized state_entry from top-level code ----
-            if (execStmts.Count > 0)
-                EmitHandler("state_entry", new List<string>(), execStmts, execStmts[0].Line);
+            // ---- synthesized state_entry = ALL top-level code in SOURCE ORDER (the rez handler). A
+            //      top-level `local x = e` lowers to a global store; everything else runs as-is, so an
+            //      instance built at top level sees classes/functions defined earlier in source. This
+            //      runs in a real frame, so nested block-locals in top-level control flow work too. ----
+            if (hasTopLevel)
+            {
+                var topBody = new List<Stmt>();
+                foreach (var s in chunk)
+                {
+                    if (s is FuncDecl) continue;
+                    if (s is LocalDecl ld) topBody.Add(new Assign { Name = ld.Name, Value = ld.Init, Line = ld.Line });
+                    else topBody.Add(s);
+                }
+                EmitHandler("state_entry", new List<string>(), topBody, topBody[0].Line);
+            }
 
             // ---- event handlers (Form-1 global functions) ----
             foreach (var f in events)
@@ -1612,6 +1685,7 @@ namespace InWorldz.Phlox.SLua
                 case UserCall uc: EmitCallTo(uc, 0); break;                     // discard all returns
                 case MethodCall mc: { var t = EmitMethodCall(mc); if (t != VarType.Void) Line("pop"); break; }
                 case CoreCall cc: EmitCoreCall(cc, 0); break;          // discard result(s)
+                case CallExpr ce: EmitCallTo(ce, 0); break;            // discard result(s)
                 default: throw new SLuaException("invalid call statement", cs.Line);
             }
         }
@@ -1778,6 +1852,9 @@ namespace InWorldz.Phlox.SLua
                     return EmitVecCtor(vc);
                 case CoreCall cc:
                     EmitCoreCall(cc, 1);
+                    return Dynamic;
+                case CallExpr ce:
+                    EmitCallTo(ce, 1);
                     return Dynamic;
                 case Binary bin:
                     return EmitBinary(bin);
