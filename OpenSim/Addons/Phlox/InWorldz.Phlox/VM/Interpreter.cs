@@ -719,6 +719,29 @@ namespace InWorldz.Phlox.VM
                         Op_Booleval();
                         break;
 
+                    // ---- SLua Tier-2: tables ----
+                    case OpCode.pushnil:
+                        Op_PushNil();
+                        break;
+                    case OpCode.buildtable:
+                        Op_BuildTable();
+                        break;
+                    case OpCode.tabget:
+                        Op_TabGet();
+                        break;
+                    case OpCode.tabset:
+                        Op_TabSet();
+                        break;
+                    case OpCode.tablen:
+                        Op_TabLen();
+                        break;
+                    case OpCode.tabnext:
+                        Op_TabNext();
+                        break;
+                    case OpCode.isnil:
+                        Op_IsNil();
+                        break;
+
                     default:
                         throw new VMException("Unhandled opcode: " + opcode);
                 }

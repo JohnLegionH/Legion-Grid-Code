@@ -140,7 +140,16 @@ namespace InWorldz.Phlox.Types
         lneq,
         kinit_g,
         kinit_l,
-        booleval
+        booleval,
+
+        // ---- SLua Tier-2: tables (additive; appended so existing opcode values are unchanged) ----
+        pushnil,        // push nil (.NET null) onto the operand stack
+        buildtable,     // operand N: pop N key/value pairs (2N operands), push a new LSLTable
+        tabget,         // pop key, pop table, push table[key] (or nil)
+        tabset,         // pop value, pop key, pop table, set table[key]=value (nil value removes)
+        tablen,         // pop table, push Lua length (#t) as int
+        tabnext,        // pop key, pop table, push (value, key) of next entry; (nil,nil) when done
+        isnil           // pop value, push int 1 if it is nil, else 0
     }
 
 

@@ -1509,6 +1509,96 @@ namespace InWorldz.Phlox.VM
             SafeOperandsPush(new LSLList(members));
         }
 
+        // ============================================================
+        // SLua Tier-2: table opcodes (additive; do not affect LSL ops)
+        // ============================================================
+        // SLua nil is the LuaNil sentinel (NOT .NET null, which SafeOperandsPush/_Load forbid).
+        // Tables never store nil internally (a nil value removes the key); LuaNil only lives on the
+        // stack / in slots.
+
+        private static bool IsNilValue(object v)
+        {
+            return v == null || v is LuaNil;
+        }
+
+        private void Op_PushNil()
+        {
+            SafeOperandsPush(LuaNil.Instance);
+        }
+
+        private void Op_BuildTable()
+        {
+            int numPairs = this.GetIntOperand();
+            int count = numPairs * 2;
+
+            object[] kv = new object[count];
+            for (int i = count - 1; i >= 0; --i)
+            {
+                kv[i] = _state.Operands.Pop();
+            }
+
+            LSLTable table = new LSLTable();
+            for (int i = 0; i < count; i += 2)
+            {
+                // kv[i] = key, kv[i+1] = value, in source order; nil value => skip
+                if (!IsNilValue(kv[i]) && !IsNilValue(kv[i + 1]))
+                    table.Set(kv[i], kv[i + 1]);
+            }
+
+            SafeOperandsPush(table);
+        }
+
+        private void Op_TabGet()
+        {
+            object key = _state.Operands.Pop();
+            object t = _state.Operands.Pop();
+            if (!(t is LSLTable table))
+                throw new CheckException("attempt to index a non-table value");
+
+            object v = table.Get(key);
+            SafeOperandsPush(v ?? (object)LuaNil.Instance); // missing key -> nil
+        }
+
+        private void Op_TabSet()
+        {
+            object value = _state.Operands.Pop();
+            object key = _state.Operands.Pop();
+            object t = _state.Operands.Pop();
+            if (!(t is LSLTable table))
+                throw new CheckException("attempt to index a non-table value");
+
+            table.Set(key, IsNilValue(value) ? null : value); // nil value removes the key (Lua)
+        }
+
+        private void Op_TabLen()
+        {
+            object t = _state.Operands.Pop();
+            if (!(t is LSLTable table))
+                throw new CheckException("attempt to get length of a non-table value");
+
+            SafeOperandsPush(table.Length);
+        }
+
+        private void Op_TabNext()
+        {
+            object key = _state.Operands.Pop();
+            object t = _state.Operands.Pop();
+            if (!(t is LSLTable table))
+                throw new CheckException("attempt to iterate a non-table value");
+
+            object nk, nv;
+            table.Next(IsNilValue(key) ? null : key, out nk, out nv);
+            // push value then key (key on top); end-of-iteration pushes nil for both
+            SafeOperandsPush(nv ?? (object)LuaNil.Instance);
+            SafeOperandsPush(nk ?? (object)LuaNil.Instance);
+        }
+
+        private void Op_IsNil()
+        {
+            object v = _state.Operands.Pop();
+            SafeOperandsPush(IsNilValue(v) ? 1 : 0);
+        }
+
         private void Op_Trace()
         {
             object top = _state.Operands.Pop();

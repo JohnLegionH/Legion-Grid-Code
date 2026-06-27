@@ -95,7 +95,7 @@ namespace InWorldz.Phlox.SLua
         private static readonly HashSet<string> Keywords = new HashSet<string>
         {
             "local","function","end","if","then","elseif","else","while","do","return",
-            "true","false","nil","and","or","not"
+            "true","false","nil","and","or","not","for","in"
         };
 
         private readonly string _s;
@@ -246,6 +246,12 @@ namespace InWorldz.Phlox.SLua
     internal sealed class Binary : Expr { public string Op; public Expr L, R; }
     internal sealed class Unary : Expr { public string Op; public Expr E; }
     internal sealed class LlCall : Expr { public string Member; public List<Expr> Args; }
+    // Tier-2 table expressions
+    internal sealed class NilLit : Expr { }
+    internal sealed class TableField { public Expr Key; public Expr Value; } // Key==null => array element
+    internal sealed class TableLit : Expr { public List<TableField> Fields; }
+    internal sealed class Index : Expr { public Expr Target; public Expr Key; }   // t[k] / t.x
+    internal sealed class Len : Expr { public Expr E; }                            // #t
 
     internal abstract class Stmt : Node { }
     internal sealed class LocalDecl : Stmt { public string Name; public Expr Init; }
@@ -255,6 +261,10 @@ namespace InWorldz.Phlox.SLua
     internal sealed class WhileStmt : Stmt { public Expr Cond; public List<Stmt> Body; }
     internal sealed class ReturnStmt : Stmt { public Expr Value; }
     internal sealed class FuncDecl : Stmt { public string Name; public List<string> Params; public List<Stmt> Body; }
+    // Tier-2 table statements
+    internal sealed class IndexAssign : Stmt { public Expr Target; public Expr Key; public Expr Value; } // t[k]=v / t.x=v
+    internal sealed class ForIn : Stmt { public List<string> Vars; public Expr TableExpr; public List<Stmt> Body; } // for k,v in pairs(t)
+    internal sealed class TableInsert : Stmt { public Expr Table; public Expr Value; } // table.insert(t, v)
 
     // ======================================================================================
     // Parser (recursive descent)
@@ -306,29 +316,82 @@ namespace InWorldz.Phlox.SLua
             if (IsKw("function")) return ParseFunction();
             if (IsKw("if")) return ParseIf();
             if (IsKw("while")) return ParseWhile();
+            if (IsKw("for")) return ParseForIn();
             if (IsKw("return")) return ParseReturn();
 
-            // Name-led: either `ll.X(...)` call statement, or `name = expr` assignment.
+            // Name-led statements.
             if (Cur.Type == TT.Name)
             {
+                // ll.X(...) call statement
                 if (Cur.Text == "ll" && Next.Type == TT.Op && Next.Text == ".")
                 {
                     var call = ParseLlCall();
                     return new ExprStmt { Call = call, Line = line };
                 }
-                string name = Eat().Text;
+                // table.insert(t, v) library call statement
+                if (Cur.Text == "table" && Next.Type == TT.Op && Next.Text == ".")
+                {
+                    return ParseTableLibCall();
+                }
+
+                // A prefix expression (Name + postfix .x / [k]) used as an assignment target.
+                Expr target = ParsePrefixExpr();
                 if (IsOp("="))
                 {
                     Eat();
                     var val = ParseExpr();
-                    return new Assign { Name = name, Value = val, Line = line };
+                    if (target is NameRef nr)
+                        return new Assign { Name = nr.Name, Value = val, Line = line };
+                    if (target is Index ix)
+                        return new IndexAssign { Target = ix.Target, Key = ix.Key, Value = val, Line = line };
+                    throw new SLuaException("invalid assignment target", line);
                 }
-                if (IsOp("("))
-                    throw new SLuaException("user function calls are not supported in the Tier-1 subset", line);
-                throw new SLuaException("expected '=' after '" + name + "'", line);
+                if (target is NameRef && IsOp("("))
+                    throw new SLuaException("user function calls are not supported in the Tier-2 subset", line);
+                throw new SLuaException("expected '=' (assignment) or a supported call", line);
             }
             Err("unexpected statement");
             return null;
+        }
+
+        // for k [, v] in pairs(t) do ... end   (generic-for; pairs only in Tier-2)
+        private Stmt ParseForIn()
+        {
+            int line = Cur.Line; ExpectKw("for");
+            var vars = new List<string>();
+            if (Cur.Type != TT.Name) Err("expected loop variable name");
+            vars.Add(Eat().Text);
+            while (IsOp(",")) { Eat(); if (Cur.Type != TT.Name) Err("expected loop variable name"); vars.Add(Eat().Text); }
+            ExpectKw("in");
+            // Tier-2: the iterator must be pairs(expr) or ipairs(expr) (both iterate insertion order)
+            if (!(Cur.Type == TT.Name && (Cur.Text == "pairs" || Cur.Text == "ipairs")))
+                throw new SLuaException("for-in requires pairs(...) or ipairs(...) in the Tier-2 subset", Cur.Line);
+            Eat(); // 'pairs' / 'ipairs'
+            ExpectOp("(");
+            var iter = ParseExpr();
+            ExpectOp(")");
+            ExpectKw("do");
+            var body = ParseBlock();
+            ExpectKw("end");
+            return new ForIn { Vars = vars, TableExpr = iter, Body = body, Line = line };
+        }
+
+        // table.insert(t, v)  (Tier-2: t must be a simple name)
+        private Stmt ParseTableLibCall()
+        {
+            int line = Cur.Line;
+            Eat(); // 'table'
+            ExpectOp(".");
+            if (Cur.Type != TT.Name) Err("expected table library function name");
+            string fn = Eat().Text;
+            if (fn != "insert")
+                throw new SLuaException("table." + fn + " is not supported in the Tier-2 subset (only table.insert)", line);
+            ExpectOp("(");
+            var t = ParseExpr();
+            ExpectOp(",");
+            var v = ParseExpr();
+            ExpectOp(")");
+            return new TableInsert { Table = t, Value = v, Line = line };
         }
 
         private Stmt ParseLocal()
@@ -473,6 +536,12 @@ namespace InWorldz.Phlox.SLua
                 var e = ParseUnary();
                 return new Unary { Op = "-", E = e, Line = line };
             }
+            if (IsOp("#"))
+            {
+                int line = Cur.Line; Eat();
+                var e = ParseUnary();
+                return new Len { E = e, Line = line };
+            }
             return ParsePrimary();
         }
 
@@ -483,24 +552,92 @@ namespace InWorldz.Phlox.SLua
             if (t.Type == TT.String) { Eat(); return new StringLit { Value = t.Text, Line = t.Line }; }
             if (IsKw("true")) { Eat(); return new BoolLit { Value = true, Line = t.Line }; }
             if (IsKw("false")) { Eat(); return new BoolLit { Value = false, Line = t.Line }; }
+            if (IsKw("nil")) { Eat(); return new NilLit { Line = t.Line }; }
+            if (IsOp("{")) return ParseTableLit();
             if (IsOp("("))
             {
                 Eat();
                 var e = ParseExpr();
                 ExpectOp(")");
-                return e;
+                return ParsePostfix(e);
             }
             if (t.Type == TT.Name)
             {
                 if (t.Text == "ll" && Next.Type == TT.Op && Next.Text == ".")
                     return ParseLlCall();
-                Eat();
-                if (IsOp("("))
-                    throw new SLuaException("user function calls are not supported in the Tier-1 subset", t.Line);
-                return new NameRef { Name = t.Text, Line = t.Line };
+                return ParsePrefixExpr();
             }
             Err("expected expression");
             return null;
+        }
+
+        // A prefix expression: a Name followed by a postfix chain of .field / [key] indexing.
+        private Expr ParsePrefixExpr()
+        {
+            var t = Cur;
+            if (t.Type != TT.Name) { Err("expected name"); return null; }
+            Eat();
+            Expr e = new NameRef { Name = t.Text, Line = t.Line };
+            return ParsePostfix(e);
+        }
+
+        private Expr ParsePostfix(Expr e)
+        {
+            while (true)
+            {
+                if (IsOp("."))
+                {
+                    int line = Cur.Line; Eat();
+                    if (Cur.Type != TT.Name && Cur.Type != TT.Keyword) Err("expected field name after '.'");
+                    string field = Eat().Text;
+                    e = new Index { Target = e, Key = new StringLit { Value = field, Line = line }, Line = line };
+                }
+                else if (IsOp("["))
+                {
+                    int line = Cur.Line; Eat();
+                    var key = ParseExpr();
+                    ExpectOp("]");
+                    e = new Index { Target = e, Key = key, Line = line };
+                }
+                else break;
+            }
+            return e;
+        }
+
+        // { } | { e1, e2, ... } | { x = v, ... } | { [k] = v, ... } | mixed
+        private Expr ParseTableLit()
+        {
+            int line = Cur.Line; ExpectOp("{");
+            var fields = new List<TableField>();
+            while (!IsOp("}"))
+            {
+                if (IsOp("["))
+                {
+                    Eat();
+                    var k = ParseExpr();
+                    ExpectOp("]");
+                    ExpectOp("=");
+                    var v = ParseExpr();
+                    fields.Add(new TableField { Key = k, Value = v });
+                }
+                else if (Cur.Type == TT.Name && Next.Type == TT.Op && Next.Text == "=")
+                {
+                    string name = Eat().Text; // field name
+                    Eat();                    // '='
+                    var v = ParseExpr();
+                    fields.Add(new TableField { Key = new StringLit { Value = name, Line = line }, Value = v });
+                }
+                else
+                {
+                    var v = ParseExpr();
+                    fields.Add(new TableField { Key = null, Value = v }); // array element
+                }
+
+                if (IsOp(",") || IsOp(";")) { Eat(); continue; }
+                break;
+            }
+            ExpectOp("}");
+            return new TableLit { Fields = fields, Line = line };
         }
 
         private LlCall ParseLlCall()
@@ -533,17 +670,26 @@ namespace InWorldz.Phlox.SLua
     // ======================================================================================
     internal sealed class SLuaCodeGen
     {
-        private readonly StringBuilder _sb = new StringBuilder();
+        private StringBuilder _sb = new StringBuilder();
         private readonly SupportedEventList _events = new SupportedEventList();
 
-        // top-level locals -> global slots
-        private readonly Dictionary<string, int> _globals = new Dictionary<string, int>();
+        // top-level locals -> global slots (with type)
+        private readonly Dictionary<string, VarVar> _globals = new Dictionary<string, VarVar>();
         private int _labelCounter;
 
         // current function/handler local scope (param + inner local -> slot/type)
         private Dictionary<string, VarVar> _locals;
+        private int _nextLocalSlot;
+
+        // Pseudo-type for dynamically-typed values (table reads, nil, table literals). No static
+        // cast is emitted for these; the VM coerces at consumption (ConvToFloat/Int in arithmetic
+        // ops, the syscall shim for ll args). This is the seam to the future dynamic-typing piece.
+        private const VarType Dynamic = (VarType)99;
 
         private struct VarVar { public int Slot; public VarType Type; public VarVar(int s, VarType t) { Slot = s; Type = t; } }
+
+        private int AllocNamedLocal(string name, VarType type) { int s = _nextLocalSlot++; _locals[name] = new VarVar(s, type); return s; }
+        private int AllocTempLocal() { return _nextLocalSlot++; }
 
         public string Generate(List<Stmt> chunk)
         {
@@ -558,28 +704,23 @@ namespace InWorldz.Phlox.SLua
                 else execStmts.Add(s);
             }
 
-            // assign global slots
-            for (int i = 0; i < topLocals.Count; i++)
-            {
-                if (_globals.ContainsKey(topLocals[i].Name))
-                    throw new SLuaException("duplicate top-level local '" + topLocals[i].Name + "'", topLocals[i].Line);
-                _globals[topLocals[i].Name] = i;
-            }
-
             bool explicitStateEntry = funcs.Exists(f => f.Name == "state_entry");
             if (explicitStateEntry && execStmts.Count > 0)
-                throw new SLuaException("top-level code and an explicit state_entry() are both present; not supported in Tier-1 (use one)", execStmts[0].Line);
+                throw new SLuaException("top-level code and an explicit state_entry() are both present; not supported (use one)", execStmts[0].Line);
 
             // ---- header + globals-init block ----
             Line(".globals " + topLocals.Count);
             Line(".statedef default");
             Line("");
             _locals = null; // global-init runs in no local frame
-            foreach (var ld in topLocals)
+            for (int i = 0; i < topLocals.Count; i++)
             {
-                VarType t = EmitExpr(ld.Init);
-                Coerce(t, VarType.Float, ld.Line); // top-level locals are `number` -> Float
-                Line("gstore " + _globals[ld.Name]);
+                var ld = topLocals[i];
+                if (_globals.ContainsKey(ld.Name))
+                    throw new SLuaException("duplicate top-level local '" + ld.Name + "'", ld.Line);
+                VarType t = EmitExpr(ld.Init);          // register AFTER emit so init can't self-ref
+                _globals[ld.Name] = new VarVar(i, t);   // global keeps its declared/init type
+                Line("gstore " + i);                    // store natural value (no forced cast)
             }
             Line("halt");
             Line("");
@@ -592,7 +733,7 @@ namespace InWorldz.Phlox.SLua
             foreach (var f in funcs)
             {
                 if (!_events.HasEventByName(f.Name))
-                    throw new SLuaException("'" + f.Name + "' is not a known event; user functions are Tier-2", f.Line);
+                    throw new SLuaException("'" + f.Name + "' is not a known event; user functions are Tier-2+", f.Line);
                 EmitHandler(f.Name, f.Params, f.Body, f.Line);
             }
 
@@ -610,40 +751,22 @@ namespace InWorldz.Phlox.SLua
             // params occupy slots 0..eventArgs.Count-1 with the event's arg types
             for (int i = 0; i < declaredParams.Count; i++)
                 _locals[declaredParams[i]] = new VarVar(i, eventArgs[i]);
+            _nextLocalSlot = eventArgs.Count;
 
-            // pre-scan inner locals -> slots after the args region
-            int nextSlot = eventArgs.Count;
-            int innerLocals = 0;
-            foreach (var lname in ScanLocalDecls(body))
-            {
-                if (_locals.ContainsKey(lname))
-                    throw new SLuaException("duplicate local '" + lname + "' in '" + eventName + "'", line);
-                _locals[lname] = new VarVar(nextSlot++, VarType.Float); // `number` -> Float
-                innerLocals++;
-            }
+            // Two-pass: emit the body into a temp buffer while allocating locals/temps on demand,
+            // then emit the header with the final locals count (the .evt header precedes the body).
+            StringBuilder outer = _sb;
+            StringBuilder bodyBuf = new StringBuilder();
+            _sb = bodyBuf;
+            try { EmitBlock(body); }
+            finally { _sb = outer; }
 
+            int innerLocals = _nextLocalSlot - eventArgs.Count;
             Line(".evt default/" + eventName + ": args=" + eventArgs.Count + ", locals=" + innerLocals);
-            EmitBlock(body);
+            _sb.Append(bodyBuf.ToString());
             Line("ret");
             Line("");
             _locals = null;
-        }
-
-        private static IEnumerable<string> ScanLocalDecls(List<Stmt> stmts)
-        {
-            // flat scan (nested blocks share the frame in Tier-1; no block scoping)
-            var result = new List<string>();
-            void Walk(List<Stmt> list)
-            {
-                foreach (var s in list)
-                {
-                    if (s is LocalDecl ld) result.Add(ld.Name);
-                    else if (s is IfStmt ifs) { Walk(ifs.Then); if (ifs.Else != null) Walk(ifs.Else); }
-                    else if (s is WhileStmt w) Walk(w.Body);
-                }
-            }
-            Walk(stmts);
-            return result;
         }
 
         private void EmitBlock(List<Stmt> stmts)
@@ -657,10 +780,11 @@ namespace InWorldz.Phlox.SLua
             {
                 case LocalDecl ld:
                 {
-                    var v = _locals[ld.Name];
                     VarType t = EmitExpr(ld.Init);
-                    Coerce(t, v.Type, ld.Line);
-                    Line("store " + v.Slot);
+                    int slot = _locals.TryGetValue(ld.Name, out var ex) ? ex.Slot : AllocNamedLocal(ld.Name, t);
+                    // record the local's type (re-decl in the flat model just updates type)
+                    _locals[ld.Name] = new VarVar(slot, t);
+                    Line("store " + slot);
                     break;
                 }
                 case Assign a:
@@ -671,14 +795,25 @@ namespace InWorldz.Phlox.SLua
                         Coerce(t, lv.Type, a.Line);
                         Line("store " + lv.Slot);
                     }
-                    else if (_globals.TryGetValue(a.Name, out int gidx))
+                    else if (_globals.TryGetValue(a.Name, out var gv))
                     {
-                        Coerce(t, VarType.Float, a.Line);
-                        Line("gstore " + gidx);
+                        Coerce(t, gv.Type, a.Line);
+                        Line("gstore " + gv.Slot);
                     }
                     else throw new SLuaException("assignment to undeclared variable '" + a.Name + "'", a.Line);
                     break;
                 }
+                case IndexAssign ia:
+                {
+                    EmitExpr(ia.Target);   // table
+                    EmitExpr(ia.Key);      // key (float number keys normalized to int in the VM)
+                    EmitExpr(ia.Value);    // value (stored with its natural type)
+                    Line("tabset");
+                    break;
+                }
+                case TableInsert ti:
+                    EmitTableInsert(ti);
+                    break;
                 case ExprStmt es:
                     EmitLlCall(es.Call, statementLevel: true);
                     break;
@@ -688,13 +823,63 @@ namespace InWorldz.Phlox.SLua
                 case WhileStmt w:
                     EmitWhile(w);
                     break;
+                case ForIn fi:
+                    EmitForIn(fi);
+                    break;
                 case ReturnStmt r:
                     if (r.Value != null) EmitExpr(r.Value); // value discarded for void events
                     Line("ret");
                     break;
                 default:
-                    throw new SLuaException("unsupported statement in Tier-1", s.Line);
+                    throw new SLuaException("unsupported statement", s.Line);
             }
+        }
+
+        private void EmitTableInsert(TableInsert ti)
+        {
+            // table.insert(t, v) == t[#t+1] = v. Tier-2: t must be a simple name (evaluated twice).
+            if (!(ti.Table is NameRef))
+                throw new SLuaException("table.insert's first argument must be a simple variable in the Tier-2 subset", ti.Line);
+
+            EmitExpr(ti.Table);   // table (for tabset, deepest on stack)
+            EmitExpr(ti.Table);   // table (for tablen)
+            Line("tablen");       // -> int length
+            Line("iconst 1");
+            Line("iadd");         // key = #t + 1 (int)
+            EmitExpr(ti.Value);   // value
+            Line("tabset");
+        }
+
+        private void EmitForIn(ForIn f)
+        {
+            // for k [, v] in pairs(t) do ... end  (insertion-ordered next() protocol)
+            int tSlot = AllocTempLocal();   // _t : the table
+            int kSlot = AllocTempLocal();   // _k : iteration cursor
+            int var0 = AllocNamedLocal(f.Vars[0], Dynamic);
+            int var1 = (f.Vars.Count >= 2) ? AllocNamedLocal(f.Vars[1], Dynamic) : -1;
+
+            EmitExpr(f.TableExpr);
+            Line("store " + tSlot);   // _t = table
+            Line("pushnil");
+            Line("store " + kSlot);   // _k = nil (start)
+
+            string top = NewLabel("forin");
+            string end = NewLabel("forend");
+            Label(top);
+            Line("load " + tSlot);
+            Line("load " + kSlot);
+            Line("tabnext");          // stack: [nextValue, nextKey]
+            Line("store " + kSlot);   // _k = nextKey (top)
+            if (var1 >= 0) Line("store " + var1);  // v = nextValue
+            else Line("pop");                      // (single-var for: discard value)
+            Line("load " + kSlot);
+            Line("isnil");
+            Line("brt " + end);       // cursor exhausted -> done
+            Line("load " + kSlot);
+            Line("store " + var0);    // k = _k
+            EmitBlock(f.Body);
+            Line("jmp " + top);
+            Label(end);
         }
 
         private void EmitIf(IfStmt ifs)
@@ -729,13 +914,16 @@ namespace InWorldz.Phlox.SLua
             Label(endL);
         }
 
-        // Emit a condition leaving an integer boolean on the stack (for brf).
+        // Emit a condition leaving an integer boolean on the stack (for brf/brt).
         private void EmitCondBool(Expr cond)
         {
             VarType t = EmitExpr(cond);
-            if (t == VarType.Float) Line("icast");      // nonzero -> truthy (Tier-1 best effort)
-            else if (t != VarType.Integer)
-                throw new SLuaException("unsupported condition type in Tier-1", cond.Line);
+            if (t == VarType.Integer) return;                                  // comparison/bool (0/1)
+            if (t == VarType.Float) { Line("pop"); Line("iconst 1"); return; } // Lua: any number is truthy
+            // Dynamic / String / other: truthy iff not nil (Tier-2 approximation; a `false` stored
+            // in a dynamic slot is not distinguished from 0 here — full truthiness is the
+            // dynamic-typing piece).
+            Line("isnil"); Line("iconst 0"); Line("ieq");
         }
 
         // ---- expressions ----
@@ -765,9 +953,43 @@ namespace InWorldz.Phlox.SLua
                     return EmitBinary(bin);
                 case LlCall c:
                     return EmitLlCall(c, statementLevel: false);
+                case NilLit:
+                    Line("pushnil");
+                    return Dynamic;
+                case TableLit tl:
+                    return EmitTableLit(tl);
+                case Index ix:
+                    EmitExpr(ix.Target);   // table
+                    EmitExpr(ix.Key);      // key
+                    Line("tabget");
+                    return Dynamic;        // value type only known at runtime
+                case Len len:
+                    EmitExpr(len.E);       // table
+                    Line("tablen");
+                    return VarType.Integer;
                 default:
-                    throw new SLuaException("unsupported expression in Tier-1", e.Line);
+                    throw new SLuaException("unsupported expression", e.Line);
             }
+        }
+
+        private VarType EmitTableLit(TableLit tl)
+        {
+            int arrayIndex = 1;
+            foreach (var field in tl.Fields)
+            {
+                if (field.Key == null)
+                {
+                    Line("iconst " + arrayIndex);  // positional key (1-based int)
+                    arrayIndex++;
+                }
+                else
+                {
+                    EmitExpr(field.Key);           // string name, or [k] expr (normalized in VM)
+                }
+                EmitExpr(field.Value);             // value stored with its natural type
+            }
+            Line("buildtable " + tl.Fields.Count);
+            return Dynamic;
         }
 
         private VarType EmitNameRef(NameRef nr)
@@ -777,18 +999,25 @@ namespace InWorldz.Phlox.SLua
                 Line("load " + lv.Slot);
                 return lv.Type;
             }
-            if (_globals.TryGetValue(nr.Name, out int gidx))
+            if (_globals.TryGetValue(nr.Name, out var gv))
             {
-                Line("gload " + gidx);
-                return VarType.Float;
+                Line("gload " + gv.Slot);
+                return gv.Type;
             }
             throw new SLuaException("reference to undeclared variable '" + nr.Name + "'", nr.Line);
         }
 
         private VarType EmitBinary(Binary bin)
         {
-            bool isCompare = bin.Op == "<" || bin.Op == ">" || bin.Op == "<=" ||
-                             bin.Op == ">=" || bin.Op == "==" || bin.Op == "~=";
+            // nil comparison: x == nil / x ~= nil  (cannot coerce nil to a number)
+            if ((bin.Op == "==" || bin.Op == "~=") && (bin.L is NilLit || bin.R is NilLit))
+            {
+                Expr other = (bin.L is NilLit) ? bin.R : bin.L;
+                EmitExpr(other);
+                Line("isnil");                       // 1 if nil
+                if (bin.Op == "~=") { Line("iconst 0"); Line("ieq"); }  // -> 1 if NOT nil
+                return VarType.Integer;
+            }
 
             VarType lt = EmitExpr(bin.L);
             Coerce(lt, VarType.Float, bin.Line);
@@ -843,9 +1072,12 @@ namespace InWorldz.Phlox.SLua
         private void Coerce(VarType from, VarType to, int line)
         {
             if (from == to) return;
+            if (from == Dynamic || to == Dynamic) return;   // VM coerces at consumption (no static cast)
             if (to == VarType.Integer && from == VarType.Float) { Line("icast"); return; }
             if (to == VarType.Float && from == VarType.Integer) { Line("fcast"); return; }
-            throw new SLuaException("cannot convert " + from + " to " + to + " in Tier-1", line);
+            // Remaining conversions (e.g. number<->string) are performed by the VM ops / syscall shim
+            // at the point of consumption (ConvToInt/ConvToFloat/ConvToStr). Emit nothing rather than
+            // fail, so the value flows to its coercing consumer.
         }
 
         // ---- emit helpers ----

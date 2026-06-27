@@ -197,6 +197,15 @@
     <Compile Include="SLua\SLuaCompiler.cs">
       <SubType>Code</SubType>
     </Compile>
+    <Compile Include="Types\LSLTable.cs">
+      <SubType>Code</SubType>
+    </Compile>
+    <Compile Include="Types\LuaNil.cs">
+      <SubType>Code</SubType>
+    </Compile>
+    <Compile Include="Serialization\SerializedLSLTable.cs">
+      <SubType>Code</SubType>
+    </Compile>
     <Compile Include="Properties\AssemblyInfo.cs">
       <SubType>Code</SubType>
     </Compile>

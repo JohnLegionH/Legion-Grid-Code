@@ -93,6 +93,20 @@ namespace InWorldz.Phlox.Serialization
             set { Value = value; }
         }
 
+        [ProtoMember(10)]
+        private SerializedLSLTable ValueTable
+        {
+            get { return (Value != null && Value is SerializedLSLTable) ? (SerializedLSLTable)Value : (SerializedLSLTable)null; }
+            set { Value = value; }
+        }
+
+        [ProtoMember(11)]
+        private bool ValueNil
+        {
+            get { return Value is Types.LuaNil; }
+            set { if (value) Value = Types.LuaNil.Instance; }
+        }
+
 		[ProtoMember(8)]
         private SerializedVector3 ValueVector
         {
@@ -119,19 +133,25 @@ namespace InWorldz.Phlox.Serialization
 
         public static SerializedLSLPrimitive FromPrimitive(object obj)
         {
-            if (!(obj is Types.LSLList))
-            {
-                SerializedLSLPrimitive primitive = new SerializedLSLPrimitive();
-                primitive.Value = obj;
-
-                return primitive;
-            }
+            SerializedLSLPrimitive primitive = new SerializedLSLPrimitive();
+            if (obj is Types.LSLList list)
+                primitive.Value = SerializedLSLList.FromList(list);
+            else if (obj is Types.LSLTable table)
+                primitive.Value = SerializedLSLTable.FromTable(table);
             else
-            {
-                SerializedLSLPrimitive primitive = new SerializedLSLPrimitive();
-                primitive.Value = SerializedLSLList.FromList((Types.LSLList)obj);
-                return primitive;
-            }
+                primitive.Value = obj;
+            return primitive;
+        }
+
+        /// <summary>
+        /// Reconstruct a runtime value from a (possibly wrapped) serialized value: SerializedLSLList
+        /// -> LSLList, SerializedLSLTable -> LSLTable (recursively), anything else passes through.
+        /// </summary>
+        public static object ResolveValue(object value)
+        {
+            if (value is SerializedLSLList sl) return sl.ToList();
+            if (value is SerializedLSLTable st) return st.ToTable();
+            return value;
         }
 
         public static object[] ToPrimitiveList(SerializedLSLPrimitive[] serPrimList)
@@ -146,27 +166,7 @@ namespace InWorldz.Phlox.Serialization
             for (int i = 0; i < serPrimList.Length; i++)
             {
                 SerializedLSLPrimitive obj = serPrimList[i];
-
-                if (!(obj.Value is SerializedLSLList))
-                {
-                    /*if (validate)
-                    {
-                        if (!obj.IsValid())
-                        {
-                            throw new SerializationException(
-                                String.Format(
-                                    "ToPrimitiveList: Unable to deserialize LSLPrimitive to object: Type: {0} Value: {1}",
-                                    obj != null && obj.Value != null ? obj.Value.GetType().FullName : "null", obj));
-                        }
-                    }*/
-
-                    primitiveList[i] = obj.Value;
-                }
-                else
-                {
-                    SerializedLSLList list = (SerializedLSLList)obj.Value;
-                    primitiveList[i] = list.ToList();
-                }
+                primitiveList[i] = ResolveValue(obj.Value);
             }
 
             return primitiveList;
@@ -235,27 +235,7 @@ namespace InWorldz.Phlox.Serialization
             for (int i = serializedLSLPrimitive.Length - 1; i >= 0; i--)
             {
                 SerializedLSLPrimitive obj = serializedLSLPrimitive[i];
-
-                if (!(obj.Value is SerializedLSLList))
-                {
-                    /*if (validate)
-                    {
-                        if (!obj.IsValid())
-                        {
-                            throw new SerializationException(
-                                String.Format(
-                                    "ToPrimitiveStack: Unable to deserialize LSLPrimitive to object: Type: {0} Value: {1}",
-                                    obj != null && obj.Value != null ? obj.Value.GetType().FullName : "null", obj.Value));
-                        }
-                    }*/
-
-                    primStack.Push(obj.Value);
-                }
-                else
-                {
-                    SerializedLSLList list = (SerializedLSLList)obj.Value;
-                    primStack.Push(list.ToList());
-                }
+                primStack.Push(ResolveValue(obj.Value));
             }
 
             return primStack;
@@ -282,6 +262,9 @@ namespace InWorldz.Phlox.Serialization
                 return true;
 
             if (Value is SerializedLSLList)
+                return true;
+
+            if (Value is SerializedLSLTable)
                 return true;
 
 			if (Value is VM.FunctionInfo)
