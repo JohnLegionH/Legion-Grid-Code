@@ -276,6 +276,11 @@
     ;; new alternative engine
     ;; see section [YEngine] below
     ; DefaultScriptEngine = "YEngine"
+
+    ;; Legion default: the InWorldz.Phlox script engine (required for SLua and Phlox LSL).
+    ;; This is the recommended, active default for a Legion grid. See the [InWorldz.Phlox]
+    ;; section below. Leave the two lines above commented when using Phlox.
+    DefaultScriptEngine = "InWorldz.Phlox"
     
     ;# {HttpProxy} {} {Proxy URL for llHTTPRequest and dynamic texture loading} {} http://proxy.com:8080
     ;; Http proxy setting for llHTTPRequest and dynamic texture loading, if
@@ -1010,6 +1015,13 @@
     ;# {PriceGroupCreate} {} {Fee for group creation} {} 0
     ;; Money Unit fee to create groups.  Default is 0.
     ; PriceGroupCreate = 0
+
+[InWorldz.Phlox]
+    ;; Legion's native script engine (InWorldz/Halcyon Phlox), required when
+    ;; DefaultScriptEngine = "InWorldz.Phlox" above. Powers Phlox LSL and SLua.
+    ;; Script state self-persists to a per-region SQLite database under
+    ;; ScriptEngines/Phlox/state/ (schema is created in code on first run -- no manual DB step).
+    Enabled = true
 
 [YEngine]
     ;; implements non preemptive microthreading, so fixing problems like llSleep or long events handlers

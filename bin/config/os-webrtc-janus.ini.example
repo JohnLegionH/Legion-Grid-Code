@@ -1,0 +1,26 @@
+; ============================================================================
+; os-webrtc-janus.ini.example  --  WebRTC / Janus voice for Legion
+;
+; Enables in-world voice via a WebRTC <-> Janus gateway. To activate:
+;   1. Copy this file to            bin/config/os-webrtc-janus.ini
+;   2. Replace the placeholders below with your own Janus gateway host:port
+;      and API tokens.
+;   3. Make sure this config dir is included by your OpenSim/Robust config.
+;
+; SECURITY: the real os-webrtc-janus.ini carries secret API tokens -- never
+; commit it. Only this redacted .example belongs in the repo.
+; ============================================================================
+
+[WebRtcVoice]
+    Enabled = true
+    SpatialVoiceService = WebRtcJanusService.dll:WebRtcJanusService
+    NonSpatialVoiceService = WebRtcJanusService.dll:WebRtcJanusService
+    MessageDetails = false
+
+[JanusWebRtcVoice]
+    ;; Janus gateway endpoints -- replace host:port with your own deployment.
+    JanusGatewayURI = http://your-janus-host:port/voice
+    APIToken = CHANGEME-janus-api-token
+    JanusGatewayAdminURI = http://your-janus-host:adminport/voiceadmin
+    AdminAPIToken = CHANGEME-janus-admin-api-token
+    MessageDetails = false

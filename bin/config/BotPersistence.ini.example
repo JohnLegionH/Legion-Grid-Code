@@ -1,0 +1,24 @@
+; ============================================================================
+; BotPersistence.ini.example  --  NPC / bot persistence for Legion
+;
+; Persists scripted bots (NPCs) so they survive region restarts. To activate:
+;   1. Copy this file to            bin/config/BotPersistence.ini
+;   2. Adjust limits/intervals if desired -- the defaults below are sane.
+;   3. Make sure this config dir is included by your OpenSim config.
+;
+; Storage is a per-region SQLite database (DatabaseFile, relative to bin/).
+; Its schema is created in code on first run -- NO manual DB setup, migration,
+; or pre-existing file is required. This file contains no secrets.
+; ============================================================================
+
+[BotPersistence]
+    Enabled = true
+    DatabaseFile = "botpersistence.db"
+    MaxPerParcel = 10
+    MaxPerOwner = 15
+    MaxPerRegion = 50
+    SeparateAgentPool = false
+    DefaultTTL = 604800
+    PositionSaveInterval = 60
+    CleanupInterval = 21600
+    RespawnRate = 2
