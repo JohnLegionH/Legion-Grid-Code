@@ -142,3 +142,7 @@ bin/config-include/StandaloneCommon*.ini
 
 # Windows "Copy" duplicates
 * - Copy.*
+
+# Local dev docs & test scripts — not part of the shipped repo
+/Build Documents/
+/LSL Test Scripts/
