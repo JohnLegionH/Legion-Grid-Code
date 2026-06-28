@@ -163,16 +163,40 @@ namespace OpenSim.Region.CoreModules.Experience
         // Script-Experience Association
         // ══════════════════════════════════════════════════════════════════
 
-        /// <summary>Get the experience UUID associated with a script, or UUID.Zero if none</summary>
+        /// <summary>Get the experience UUID associated with a script, or UUID.Zero if none.</summary>
+        /// <remarks>
+        /// On a dict miss (e.g. after a grid restart, when the in-memory cache is empty, or when a
+        /// script crosses into this region) the association is restored from persistent storage and
+        /// cached — INCLUDING a UUID.Zero "no experience" result, so non-experience scripts don't
+        /// re-hit the DB on every experience call. A later SetScriptExperience overwrites the cache.
+        /// </remarks>
         public UUID GetScriptExperience(UUID scriptItemId)
         {
             lock (m_ScriptExpLock)
             {
-                return m_ScriptExperiences.TryGetValue(scriptItemId, out UUID expId) ? expId : UUID.Zero;
+                if (m_ScriptExperiences.TryGetValue(scriptItemId, out UUID cached))
+                    return cached;
+            }
+
+            // Dict miss — restore from persistent storage (durable across restart / region crossing).
+            UUID restored = m_Service != null ? m_Service.GetScriptExperiencePersisted(scriptItemId) : UUID.Zero;
+
+            lock (m_ScriptExpLock)
+            {
+                // If another thread populated/assigned while we queried, that value wins.
+                if (m_ScriptExperiences.TryGetValue(scriptItemId, out UUID raced))
+                    return raced;
+                m_ScriptExperiences[scriptItemId] = restored;
+                return restored;
             }
         }
 
-        /// <summary>Associate a script with an experience</summary>
+        /// <summary>Associate a script with an experience (UUID.Zero removes/unassigns).</summary>
+        /// <remarks>
+        /// Write-through: updates the in-memory cache UNCONDITIONALLY and persists to storage so the
+        /// association survives restart. The unconditional cache update is the negative-cache
+        /// invalidation guarantee — an assign after a cached Zero takes effect immediately, no restart.
+        /// </remarks>
         public void SetScriptExperience(UUID scriptItemId, UUID experienceId)
         {
             lock (m_ScriptExpLock)
@@ -182,6 +206,19 @@ namespace OpenSim.Region.CoreModules.Experience
                 else
                     m_ScriptExperiences[scriptItemId] = experienceId;
             }
+
+            // Write through to persistent storage. Real id → upsert; UUID.Zero → delete (explicit
+            // unassign only). NOTE: never call this on script-stop/region-shutdown — that would wipe
+            // associations on every restart (the exact bug this fix targets).
+            if (m_Service != null)
+            {
+                if (experienceId == UUID.Zero)
+                    m_Service.RemoveScriptExperiencePersisted(scriptItemId);
+                else
+                    m_Service.SetScriptExperiencePersisted(scriptItemId, experienceId,
+                        m_Scene != null ? m_Scene.RegionInfo.RegionID : UUID.Zero);
+            }
+
             m_log.DebugFormat("[ExperienceModule]: Script {0} → experience {1}", scriptItemId, experienceId);
         }
 
@@ -250,6 +287,12 @@ namespace OpenSim.Region.CoreModules.Experience
                 "experience assign <experience-name> <script-item-uuid>",
                 "Associate a script with an experience by script item UUID",
                 HandleAssignExperience);
+
+            MainConsole.Instance.Commands.AddCommand("Experience", false,
+                "experience unassign",
+                "experience unassign <script-item-uuid>",
+                "Remove a script's experience association (also deletes the persisted row)",
+                HandleUnassignExperience);
         }
 
         private void HandleCreateExperience(string module, string[] args)
@@ -492,6 +535,25 @@ namespace OpenSim.Region.CoreModules.Experience
             SetScriptExperience(scriptItemId, exp.ExperienceId);
             MainConsole.Instance.Output(
                 $"Script {scriptItemId} is now associated with experience '{expName}' ({exp.ExperienceId})");
+        }
+
+        private void HandleUnassignExperience(string module, string[] args)
+        {
+            if (args.Length < 3)
+            {
+                MainConsole.Instance.Output("Usage: experience unassign <script-item-uuid>");
+                return;
+            }
+
+            if (!UUID.TryParse(args[2], out UUID scriptItemId))
+            {
+                MainConsole.Instance.Output($"Invalid UUID: {args[2]}");
+                return;
+            }
+
+            // UUID.Zero unassigns: removes from cache and deletes the persisted row (write-through).
+            SetScriptExperience(scriptItemId, UUID.Zero);
+            MainConsole.Instance.Output($"Script {scriptItemId} experience association removed.");
         }
     }
 }

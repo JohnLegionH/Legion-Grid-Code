@@ -73,7 +73,7 @@ namespace OpenSim.Services.ExperienceService
                         }
                     }
                     s_schemaEnsured = true;
-                    m_log.Info("[ExperienceService]: Schema ensured (5x CREATE TABLE IF NOT EXISTS)");
+                    m_log.Info("[ExperienceService]: Schema ensured (6x CREATE TABLE IF NOT EXISTS)");
                 }
                 catch (Exception e)
                 {
@@ -137,8 +137,83 @@ namespace OpenSim.Services.ExperienceService
                 `region_id` char(36) NOT NULL,
                 `experience_id` char(36) NOT NULL,
                 PRIMARY KEY (`region_id`,`experience_id`)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4",
+
+            @"CREATE TABLE IF NOT EXISTS `script_experiences` (
+                `item_id` char(36) NOT NULL,
+                `experience_id` char(36) NOT NULL,
+                `region_id` char(36) NOT NULL DEFAULT '00000000-0000-0000-0000-000000000000',
+                `created` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                `updated` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                PRIMARY KEY (`item_id`),
+                KEY `idx_se_experience` (`experience_id`)
             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4"
         };
+
+        // ══════════════════════════════════════════════════════════════════
+        // Script ↔ Experience association persistence (EXP-PERSIST-1)
+        // ══════════════════════════════════════════════════════════════════
+
+        public void SetScriptExperiencePersisted(UUID itemId, UUID experienceId, UUID regionId)
+        {
+            try
+            {
+                using (var conn = GetConnection())
+                using (var cmd = new MySqlCommand(@"
+                    INSERT INTO script_experiences (item_id, experience_id, region_id)
+                    VALUES (@item, @exp, @region)
+                    ON DUPLICATE KEY UPDATE experience_id=VALUES(experience_id), region_id=VALUES(region_id)", conn))
+                {
+                    cmd.Parameters.AddWithValue("@item", itemId.ToString());
+                    cmd.Parameters.AddWithValue("@exp", experienceId.ToString());
+                    cmd.Parameters.AddWithValue("@region", regionId.ToString());
+                    cmd.ExecuteNonQuery();
+                }
+            }
+            catch (Exception e)
+            {
+                m_log.ErrorFormat("[ExperienceService]: SetScriptExperiencePersisted error: {0}", e.Message);
+            }
+        }
+
+        public UUID GetScriptExperiencePersisted(UUID itemId)
+        {
+            try
+            {
+                using (var conn = GetConnection())
+                using (var cmd = new MySqlCommand(
+                    "SELECT experience_id FROM script_experiences WHERE item_id=@item", conn))
+                {
+                    cmd.Parameters.AddWithValue("@item", itemId.ToString());
+                    var result = cmd.ExecuteScalar();
+                    if (result != null && UUID.TryParse(result.ToString(), out UUID expId))
+                        return expId;
+                }
+            }
+            catch (Exception e)
+            {
+                m_log.ErrorFormat("[ExperienceService]: GetScriptExperiencePersisted error: {0}", e.Message);
+            }
+            return UUID.Zero;
+        }
+
+        public void RemoveScriptExperiencePersisted(UUID itemId)
+        {
+            try
+            {
+                using (var conn = GetConnection())
+                using (var cmd = new MySqlCommand(
+                    "DELETE FROM script_experiences WHERE item_id=@item", conn))
+                {
+                    cmd.Parameters.AddWithValue("@item", itemId.ToString());
+                    cmd.ExecuteNonQuery();
+                }
+            }
+            catch (Exception e)
+            {
+                m_log.ErrorFormat("[ExperienceService]: RemoveScriptExperiencePersisted error: {0}", e.Message);
+            }
+        }
 
         // ══════════════════════════════════════════════════════════════════
         // Experience CRUD

@@ -53,5 +53,13 @@ namespace OpenSim.Services.Interfaces
         bool RemoveAllowedExperience(UUID regionId, UUID experienceId);
         bool BlockExperience(UUID regionId, UUID experienceId);
         bool RemoveBlockedExperience(UUID regionId, UUID experienceId);
+
+        // ── Script ↔ Experience association persistence (EXP-PERSIST-1) ──
+        /// <summary>Persist (or update) a script's experience association, keyed by script ItemID.</summary>
+        void SetScriptExperiencePersisted(UUID itemId, UUID experienceId, UUID regionId);
+        /// <summary>Read a script's persisted experience association. Returns UUID.Zero if none.</summary>
+        UUID GetScriptExperiencePersisted(UUID itemId);
+        /// <summary>Delete a script's persisted experience association.</summary>
+        void RemoveScriptExperiencePersisted(UUID itemId);
     }
 }
