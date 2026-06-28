@@ -52,6 +52,15 @@ bin/*.db
 bin/*.db-journal
 bin/addin-db-*
 bin/*.dll
+# Vendored OpenMetaverse (libomv fork) binaries — committed so a clean clone builds without a
+# manual pre-copy from legion-grid-webrtc/bin/. Mirrors the upstream WebRTC repo, which also
+# tracks these. To update: copy a new build over these in bin/ and `git add`.
+!bin/OpenMetaverse.dll
+!bin/OpenMetaverseTypes.dll
+!bin/OpenMetaverse.StructuredData.dll
+!bin/OpenMetaverse.Rendering.Meshmerizer.dll
+!bin/OpenMetaverse.dll.config
+!bin/openmetaverse_data/
 bin/OpenSim.vshost.exe.config
 bin/OpenSim.32BitLaunch.vshost.exe.config
 bin/OpenSim.32BitLaunch.log
