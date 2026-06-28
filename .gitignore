@@ -10,6 +10,10 @@
 # so the SLua front-end (SLua/SLuaCompiler.cs) and the explicit Compile lists survive. See
 # SLUA_TIER1.md sec.9 and the legion-csproj-gitignored memory.
 !OpenSim/Addons/Phlox/InWorldz.Phlox/InWorldz.Phlox.csproj
+# Phlox.ScriptEngine: hand-maintained sibling project (explicit Compile list + SLua proof files).
+# Tracked with relative HintPaths so a clean clone has a usable project without running prebuild
+# (re-running prebuild would regenerate OpenSim.sln WITHOUT InWorldz.Phlox). Mirrors the fix above.
+!OpenSim/Addons/Phlox/Phlox.ScriptEngine/Phlox.ScriptEngine.csproj
 *.mdb
 *.mdp
 *.mds

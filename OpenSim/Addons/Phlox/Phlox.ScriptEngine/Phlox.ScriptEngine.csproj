@@ -1,0 +1,123 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <PreserveCompilationContext>false</PreserveCompilationContext>
+    <OutputType>Library</OutputType>
+    <GenerateAssemblyInfo>false</GenerateAssemblyInfo>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <AssemblyName>Phlox.ScriptEngine</AssemblyName>
+    <Deterministic>true</Deterministic>
+    <ProduceReferenceAssembly>false</ProduceReferenceAssembly>
+    <GenerateDependencyFile>false</GenerateDependencyFile>
+    <EnableUnsafeBinaryFormatterSerialization>true</EnableUnsafeBinaryFormatterSerialization>
+    <EnableDefaultItems>false</EnableDefaultItems>
+  </PropertyGroup>
+
+  <PropertyGroup Condition=" '$(Configuration)|$(Platform)' == 'Debug|AnyCPU' ">
+    <AllowUnsafeBlocks>True</AllowUnsafeBlocks>
+    <BaseAddress>285212672</BaseAddress>
+    <DefineConstants>TRACE</DefineConstants>
+    <DebugSymbols>True</DebugSymbols>
+    <FileAlignment>4096</FileAlignment>
+    <Optimize>False</Optimize>
+    <TieredCompilationQuickJit>false</TieredCompilationQuickJit>
+    <UseCommonOutputDirectory>True</UseCommonOutputDirectory>
+    <AppendTargetFrameworkToOutputPath>False</AppendTargetFrameworkToOutputPath>
+    <AppendRuntimeIdentifierToOutputPath>False</AppendRuntimeIdentifierToOutputPath>
+    <OutputPath>..\..\..\..\bin\</OutputPath>
+    <TreatWarningsAsErrors>False</TreatWarningsAsErrors>
+    <WarningLevel>4</WarningLevel>
+    <NoWarn>CA1416,SYSLIB0011,SYSLIB0014,SYSLIB0039</NoWarn>
+    <PlatformTarget>AnyCPU</PlatformTarget>
+  </PropertyGroup>
+
+  <PropertyGroup Condition=" '$(Configuration)|$(Platform)' == 'Release|AnyCPU' ">
+    <AllowUnsafeBlocks>True</AllowUnsafeBlocks>
+    <BaseAddress>285212672</BaseAddress>
+    <DebugSymbols>False</DebugSymbols>
+    <FileAlignment>4096</FileAlignment>
+    <Optimize>True</Optimize>
+    <TieredCompilationQuickJit>false</TieredCompilationQuickJit>
+    <UseCommonOutputDirectory>True</UseCommonOutputDirectory>
+    <AppendTargetFrameworkToOutputPath>False</AppendTargetFrameworkToOutputPath>
+    <AppendRuntimeIdentifierToOutputPath>False</AppendRuntimeIdentifierToOutputPath>
+    <OutputPath>..\..\..\..\bin\</OutputPath>
+    <TreatWarningsAsErrors>False</TreatWarningsAsErrors>
+    <WarningLevel>4</WarningLevel>
+    <NoWarn>CA1416,SYSLIB0011,SYSLIB0014,SYSLIB0039</NoWarn>
+    <PlatformTarget>AnyCPU</PlatformTarget>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="protobuf-net" Version="3.*" />
+    <PackageReference Include="Antlr4.Runtime.Standard" Version="4.13.1" />
+	<PackageReference Include="Microsoft.Data.Sqlite" Version="10.0.7" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Reference Include="C5">
+      <HintPath>..\..\..\..\bin\C5.dll</HintPath>
+      <Private>False</Private>
+    </Reference>
+    <Reference Include="InWorldz.Phlox">
+      <HintPath>..\..\..\..\bin\InWorldz.Phlox.dll</HintPath>
+      <Private>False</Private>
+    </Reference>
+    <Reference Include="log4net">
+      <HintPath>..\..\..\..\bin\log4net.dll</HintPath>
+      <Private>False</Private>
+    </Reference>
+    <Reference Include="Mono.Addins">
+      <HintPath>..\..\..\..\bin\Mono.Addins.dll</HintPath>
+      <Private>False</Private>
+    </Reference>
+    <Reference Include="Nini">
+      <HintPath>..\..\..\..\bin\Nini.dll</HintPath>
+      <Private>False</Private>
+    </Reference>
+    <Reference Include="OpenMetaverse">
+      <HintPath>..\..\..\..\bin\OpenMetaverse.dll</HintPath>
+      <Private>False</Private>
+    </Reference>
+	<Reference Include="OpenMetaverse.StructuredData">
+      <HintPath>..\..\..\..\bin\OpenMetaverse.StructuredData.dll</HintPath>
+    </Reference>
+    <Reference Include="OpenMetaverseTypes">
+      <HintPath>..\..\..\..\bin\OpenMetaverseTypes.dll</HintPath>
+      <Private>False</Private>
+    </Reference>
+    <Reference Include="SmartThreadPool">
+      <HintPath>..\..\..\..\bin\SmartThreadPool.dll</HintPath>
+      <Private>False</Private>
+    </Reference>
+	<Reference Include="MySql.Data">
+      <HintPath>..\..\..\..\bin\MySql.Data.dll</HintPath>
+    </Reference>
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\..\Framework\OpenSim.Framework.csproj" />
+    <ProjectReference Include="..\..\..\Region\Framework\OpenSim.Region.Framework.csproj" />
+    <ProjectReference Include="..\..\..\Region\ScriptEngine\Shared\OpenSim.Region.ScriptEngine.Shared.csproj" />
+    <ProjectReference Include="..\..\..\Region\OptionalModules\OpenSim.Region.OptionalModules.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Compile Include="LSLSystemAPI.cs" />
+    <Compile Include="PhloxEngine.cs" />
+    <Compile Include="PhloxExecutionScheduler.cs" />
+    <Compile Include="PhloxLoadRequest.cs" />
+    <Compile Include="PhloxMasterScheduler.cs" />
+    <Compile Include="PhloxScriptLoader.cs" />
+    <Compile Include="WorkStatus.cs" />
+	<Compile Include="PhloxListenManager.cs" />
+    <Compile Include="AsyncCommand\AsyncCommandManager.cs" />
+    <Compile Include="AsyncCommand\Plugins\SensorRepeat.cs" />
+    <Compile Include="AsyncCommand\Plugins\HttpRequest.cs" />
+    <Compile Include="AsyncCommand\Plugins\XmlRequest.cs" />
+	<Compile Include="StateManager.cs" />
+    <Compile Include="SluaBackHalfProof.cs" />
+  </ItemGroup>
+
+</Project>
