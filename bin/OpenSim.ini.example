@@ -1023,6 +1023,15 @@
     ;; ScriptEngines/Phlox/state/ (schema is created in code on first run -- no manual DB step).
     Enabled = true
 
+[Experience]
+    ;; Legion Experience system (experiences, KV store, permissions, region allow/block lists).
+    ;; The schema self-creates on first run (CREATE TABLE IF NOT EXISTS) -- no manual DB step.
+    Enabled = true
+    ;; Must point at the SAME grid database as [DatabaseService] in
+    ;; config-include/GridCommon.ini -- mirror that ConnectionString here and replace the
+    ;; password placeholder. This file is committed, so never put a real password here.
+    ConnectionString = "Data Source=localhost;Database=opensim;User ID=root;Password=CHANGEME;Old Guids=true;SslMode=None;"
+
 [YEngine]
     ;; implements non preemptive microthreading, so fixing problems like llSleep or long events handlers
     ;; but those will suffer from timeslicing, so will be slower.

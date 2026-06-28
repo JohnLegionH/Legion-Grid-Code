@@ -26,9 +26,16 @@ namespace OpenSim.Services.ExperienceService
         private static readonly ILog m_log = LogManager.GetLogger(MethodBase.GetCurrentMethod().DeclaringType);
         private readonly string m_connectionString;
 
+        // Schema bootstrap guard: the idempotent CREATE TABLE IF NOT EXISTS pass runs
+        // ONCE PER PROCESS (not once per region), even though a service instance is
+        // constructed per region in ExperienceModule.AddRegion.
+        private static bool s_schemaEnsured = false;
+        private static readonly object s_schemaLock = new object();
+
         public ExperienceService(string connectionString)
         {
             m_connectionString = connectionString;
+            EnsureSchema();
             m_log.Info("[ExperienceService]: Initialized with MySQL backend");
         }
 
@@ -38,6 +45,100 @@ namespace OpenSim.Services.ExperienceService
             conn.Open();
             return conn;
         }
+
+        // ══════════════════════════════════════════════════════════════════
+        // Schema bootstrap (idempotent, once per process)
+        // ══════════════════════════════════════════════════════════════════
+
+        /// <summary>
+        /// Create the Experience tables if they don't already exist. Safe to run against a
+        /// grid where the tables were created by hand (CREATE TABLE IF NOT EXISTS no-ops).
+        /// Runs once per process; failures are logged loudly but do not crash region load.
+        /// </summary>
+        private void EnsureSchema()
+        {
+            lock (s_schemaLock)
+            {
+                if (s_schemaEnsured)
+                    return;
+
+                try
+                {
+                    using (var conn = GetConnection())
+                    {
+                        foreach (var ddl in SchemaStatements)
+                        {
+                            using (var cmd = new MySqlCommand(ddl, conn))
+                                cmd.ExecuteNonQuery();
+                        }
+                    }
+                    s_schemaEnsured = true;
+                    m_log.Info("[ExperienceService]: Schema ensured (5x CREATE TABLE IF NOT EXISTS)");
+                }
+                catch (Exception e)
+                {
+                    // Surface the failure in the log; leave the guard false so a later region
+                    // add retries. Do NOT rethrow — a schema hiccup must not crash region load.
+                    m_log.ErrorFormat("[ExperienceService]: EnsureSchema failed: {0}", e.Message);
+                }
+            }
+        }
+
+        // DDL kept verbatim from the live schema, normalized to IF NOT EXISTS, ENGINE=InnoDB,
+        // DEFAULT CHARSET=utf8mb4. The explicit COLLATE is intentionally omitted (the live
+        // utf8mb4_0900_ai_ci is MySQL-8-only; letting the server pick its utf8mb4 default
+        // keeps a fresh grid portable to MariaDB / older MySQL).
+        private static readonly string[] SchemaStatements = new[]
+        {
+            @"CREATE TABLE IF NOT EXISTS `experiences` (
+                `experience_id` char(36) NOT NULL,
+                `owner_id` char(36) NOT NULL,
+                `group_id` char(36) NOT NULL DEFAULT '00000000-0000-0000-0000-000000000000',
+                `name` varchar(64) NOT NULL,
+                `description` varchar(256) NOT NULL DEFAULT '',
+                `maturity` tinyint NOT NULL DEFAULT '0',
+                `properties` int NOT NULL DEFAULT '1',
+                `logo` char(36) NOT NULL DEFAULT '00000000-0000-0000-0000-000000000000',
+                `marketplace` varchar(256) NOT NULL DEFAULT '',
+                `slurl` varchar(256) NOT NULL DEFAULT '',
+                `created` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                `updated` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                PRIMARY KEY (`experience_id`),
+                KEY `idx_exp_owner` (`owner_id`),
+                KEY `idx_exp_name` (`name`)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4",
+
+            @"CREATE TABLE IF NOT EXISTS `experience_permissions` (
+                `experience_id` char(36) NOT NULL,
+                `agent_id` char(36) NOT NULL,
+                `granted` tinyint NOT NULL DEFAULT '1',
+                `created` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (`experience_id`,`agent_id`),
+                KEY `idx_expperm_agent` (`agent_id`)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4",
+
+            @"CREATE TABLE IF NOT EXISTS `experience_keyvalue` (
+                `experience_id` char(36) NOT NULL,
+                `kv_key` varchar(255) NOT NULL,
+                `kv_value` text NOT NULL,
+                `created` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                `updated` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                PRIMARY KEY (`experience_id`,`kv_key`),
+                KEY `idx_expkv_experience` (`experience_id`)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4",
+
+            @"CREATE TABLE IF NOT EXISTS `experience_allowed` (
+                `region_id` char(36) NOT NULL,
+                `experience_id` char(36) NOT NULL,
+                PRIMARY KEY (`region_id`,`experience_id`)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4",
+
+            @"CREATE TABLE IF NOT EXISTS `experience_blocked` (
+                `region_id` char(36) NOT NULL,
+                `experience_id` char(36) NOT NULL,
+                PRIMARY KEY (`region_id`,`experience_id`)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4"
+        };
 
         // ══════════════════════════════════════════════════════════════════
         // Experience CRUD
