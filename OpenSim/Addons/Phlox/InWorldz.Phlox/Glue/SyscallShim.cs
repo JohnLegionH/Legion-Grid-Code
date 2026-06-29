@@ -6492,7 +6492,7 @@ private static string ConvToString(object o)
         {
             string p1 = ConvToString(self._interpreter.ScriptState.Operands.Pop());
             string p0 = ConvToString(self._interpreter.ScriptState.Operands.Pop());
-            int ret = self._systemAPI.llCreateKeyValue(p0, p1);
+            string ret = self._systemAPI.llCreateKeyValue(p0, p1);
             self._interpreter.ScriptState.Operands.Push(ConvToLSLType(ret));
         }
 
@@ -6505,23 +6505,24 @@ private static string ConvToString(object o)
 
         static private void Shim_llUpdateKeyValue(SyscallShim self)
         {
-            string p2 = ConvToString(self._interpreter.ScriptState.Operands.Pop());
-            string p1 = ConvToString(self._interpreter.ScriptState.Operands.Pop());
-            string p0 = ConvToString(self._interpreter.ScriptState.Operands.Pop());
-            int ret = self._systemAPI.llUpdateKeyValue(p0, p1, p2);
+            string p3 = ConvToString(self._interpreter.ScriptState.Operands.Pop());   // original_value
+            int    p2 = ConvToInt(self._interpreter.ScriptState.Operands.Pop());       // checked
+            string p1 = ConvToString(self._interpreter.ScriptState.Operands.Pop());   // value
+            string p0 = ConvToString(self._interpreter.ScriptState.Operands.Pop());   // key
+            string ret = self._systemAPI.llUpdateKeyValue(p0, p1, p2, p3);
             self._interpreter.ScriptState.Operands.Push(ConvToLSLType(ret));
         }
 
         static private void Shim_llDeleteKeyValue(SyscallShim self)
         {
             string p0 = ConvToString(self._interpreter.ScriptState.Operands.Pop());
-            int ret = self._systemAPI.llDeleteKeyValue(p0);
+            string ret = self._systemAPI.llDeleteKeyValue(p0);
             self._interpreter.ScriptState.Operands.Push(ConvToLSLType(ret));
         }
 
         static private void Shim_llKeyCountKeyValue(SyscallShim self)
         {
-            int ret = self._systemAPI.llKeyCountKeyValue();
+            string ret = self._systemAPI.llKeyCountKeyValue();
             self._interpreter.ScriptState.Operands.Push(ConvToLSLType(ret));
         }
 
@@ -6529,44 +6530,40 @@ private static string ConvToString(object o)
         {
             int p1 = ConvToInt(self._interpreter.ScriptState.Operands.Pop());
             int p0 = ConvToInt(self._interpreter.ScriptState.Operands.Pop());
-            LSLList ret = self._systemAPI.llKeysKeyValue(p0, p1);
+            string ret = self._systemAPI.llKeysKeyValue(p0, p1);
             self._interpreter.ScriptState.Operands.Push(ConvToLSLType(ret));
         }
 
         static private void Shim_llDataSizeKeyValue(SyscallShim self)
         {
-            int ret = self._systemAPI.llDataSizeKeyValue();
+            string ret = self._systemAPI.llDataSizeKeyValue();
             self._interpreter.ScriptState.Operands.Push(ConvToLSLType(ret));
         }
 
         static private void Shim_llClearKeyValue(SyscallShim self)
         {
-            int ret = self._systemAPI.llClearKeyValue();
+            string ret = self._systemAPI.llClearKeyValue();
             self._interpreter.ScriptState.Operands.Push(ConvToLSLType(ret));
         }
 
+        // ── REMOVED FUNCTIONS — inert dispatch stubs (table indices 618/619/620) ──
+        // llCreateKeyValueSL / llReadKeyValueSL / llUpdateKeyValueSL were deleted from the callable
+        // surface (their CSV payloads now live in the async dataserver wrappers). These stubs are
+        // kept ONLY to preserve the positional _shimMap indices so functions >=621 do not shift.
+        // They are never dispatched (no Defaults.cs registration). Do not reuse indices 618-620.
         static private void Shim_llCreateKeyValueSL(SyscallShim self)
         {
-            string p1 = ConvToString(self._interpreter.ScriptState.Operands.Pop());
-            string p0 = ConvToString(self._interpreter.ScriptState.Operands.Pop());
-            string ret = self._systemAPI.llCreateKeyValueSL(p0, p1);
-            self._interpreter.ScriptState.Operands.Push(ConvToLSLType(ret));
+            self._interpreter.ScriptState.Operands.Push(ConvToLSLType(string.Empty));
         }
 
         static private void Shim_llReadKeyValueSL(SyscallShim self)
         {
-            string p0 = ConvToString(self._interpreter.ScriptState.Operands.Pop());
-            string ret = self._systemAPI.llReadKeyValueSL(p0);
-            self._interpreter.ScriptState.Operands.Push(ConvToLSLType(ret));
+            self._interpreter.ScriptState.Operands.Push(ConvToLSLType(string.Empty));
         }
 
         static private void Shim_llUpdateKeyValueSL(SyscallShim self)
         {
-            string p2 = ConvToString(self._interpreter.ScriptState.Operands.Pop());
-            string p1 = ConvToString(self._interpreter.ScriptState.Operands.Pop());
-            string p0 = ConvToString(self._interpreter.ScriptState.Operands.Pop());
-            string ret = self._systemAPI.llUpdateKeyValueSL(p0, p1, p2);
-            self._interpreter.ScriptState.Operands.Push(ConvToLSLType(ret));
+            self._interpreter.ScriptState.Operands.Push(ConvToLSLType(string.Empty));
         }
 		static private void Shim_llSignRSA(SyscallShim self)
         {

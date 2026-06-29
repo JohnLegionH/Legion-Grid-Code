@@ -4281,9 +4281,11 @@ namespace InWorldz.Phlox.Types
                 TableIndex = 609
             }},
 			// ── Tier 5: Experience KVP Store ──
+            // SL-async experience KV: each returns a request key (String, mirroring the
+            // llRequestUserKey precedent) and delivers the result via the dataserver event.
             {"llCreateKeyValue", new FunctionSig {
                 FunctionName = "llCreateKeyValue",
-                ReturnType = VarType.Integer,
+                ReturnType = VarType.String,
                 ParamTypes = new VarType[] { VarType.String, VarType.String },
                 ParamNames = new string[] { "key", "value" },
                 TableIndex = 610
@@ -4297,67 +4299,51 @@ namespace InWorldz.Phlox.Types
             }},
             {"llUpdateKeyValue", new FunctionSig {
                 FunctionName = "llUpdateKeyValue",
-                ReturnType = VarType.Integer,
-                ParamTypes = new VarType[] { VarType.String, VarType.String, VarType.String },
-                ParamNames = new string[] { "key", "value", "check" },
+                ReturnType = VarType.String,
+                ParamTypes = new VarType[] { VarType.String, VarType.String, VarType.Integer, VarType.String },
+                ParamNames = new string[] { "key", "value", "checked", "original_value" },
                 TableIndex = 612
             }},
             {"llDeleteKeyValue", new FunctionSig {
                 FunctionName = "llDeleteKeyValue",
-                ReturnType = VarType.Integer,
+                ReturnType = VarType.String,
                 ParamTypes = new VarType[] { VarType.String },
                 ParamNames = new string[] { "key" },
                 TableIndex = 613
             }},
             {"llKeyCountKeyValue", new FunctionSig {
                 FunctionName = "llKeyCountKeyValue",
-                ReturnType = VarType.Integer,
+                ReturnType = VarType.String,
                 ParamTypes = new VarType[] {},
                 ParamNames = new string[] {},
                 TableIndex = 614
             }},
             {"llKeysKeyValue", new FunctionSig {
                 FunctionName = "llKeysKeyValue",
-                ReturnType = VarType.List,
+                ReturnType = VarType.String,
                 ParamTypes = new VarType[] { VarType.Integer, VarType.Integer },
                 ParamNames = new string[] { "start", "count" },
                 TableIndex = 615
             }},
             {"llDataSizeKeyValue", new FunctionSig {
                 FunctionName = "llDataSizeKeyValue",
-                ReturnType = VarType.Integer,
+                ReturnType = VarType.String,
                 ParamTypes = new VarType[] {},
                 ParamNames = new string[] {},
                 TableIndex = 616
             }},
+            // Non-SL Legion extension (clear all keys for the experience); async for surface uniformity.
             {"llClearKeyValue", new FunctionSig {
                 FunctionName = "llClearKeyValue",
-                ReturnType = VarType.Integer,
+                ReturnType = VarType.String,
                 ParamTypes = new VarType[] {},
                 ParamNames = new string[] {},
                 TableIndex = 617
             }},
-            {"llCreateKeyValueSL", new FunctionSig {
-                FunctionName = "llCreateKeyValueSL",
-                ReturnType = VarType.String,
-                ParamTypes = new VarType[] { VarType.String, VarType.String },
-                ParamNames = new string[] { "key", "value" },
-                TableIndex = 618
-            }},
-            {"llReadKeyValueSL", new FunctionSig {
-                FunctionName = "llReadKeyValueSL",
-                ReturnType = VarType.String,
-                ParamTypes = new VarType[] { VarType.String },
-                ParamNames = new string[] { "key" },
-                TableIndex = 619
-            }},
-            {"llUpdateKeyValueSL", new FunctionSig {
-                FunctionName = "llUpdateKeyValueSL",
-                ReturnType = VarType.String,
-                ParamTypes = new VarType[] { VarType.String, VarType.String, VarType.String },
-                ParamNames = new string[] { "key", "value", "check" },
-                TableIndex = 620
-            }},
+            // NOTE: table indices 618/619/620 (formerly llCreateKeyValueSL/llReadKeyValueSL/
+            // llUpdateKeyValueSL) are intentionally LEFT VACANT here (removed from the callable
+            // surface). Their SyscallShim dispatch slots are preserved as inert stubs so indices
+            // >=621 do not shift. Do not reuse 618/619/620.
 			
 			// -- Pathfinding Character Functions (621-628) --
 			{"llCreateCharacter", new FunctionSig {

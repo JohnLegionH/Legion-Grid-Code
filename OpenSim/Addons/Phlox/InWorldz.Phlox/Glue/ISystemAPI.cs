@@ -663,18 +663,15 @@ namespace InWorldz.Phlox.Glue
 		void llWanderWithin(Vector3 origin, Vector3 distances, LSLList options);
 		void llPatrolPoints(LSLList points, LSLList options);
 		
-		// ── Tier 5: Experience KVP Store ──
-        int llCreateKeyValue(string key, string value);
+		// ── Tier 5: Experience KVP Store (SL-async: return a request key, deliver via dataserver) ──
+        string llCreateKeyValue(string key, string value);
         string llReadKeyValue(string key);
-        int llUpdateKeyValue(string key, string value, string check);
-        int llDeleteKeyValue(string key);
-        int llKeyCountKeyValue();
-        LSLList llKeysKeyValue(int start, int count);
-        int llDataSizeKeyValue();
-        int llClearKeyValue();
-        string llCreateKeyValueSL(string key, string value);
-        string llReadKeyValueSL(string key);
-        string llUpdateKeyValueSL(string key, string value, string check);
+        string llUpdateKeyValue(string key, string value, int checkedFlag, string originalValue);
+        string llDeleteKeyValue(string key);
+        string llKeyCountKeyValue();
+        string llKeysKeyValue(int start, int count);
+        string llDataSizeKeyValue();
+        string llClearKeyValue();
 		
         // ── Tier 6: Standalone ──
         string llSignRSA(string data, string privateKeyPem, string algorithm);

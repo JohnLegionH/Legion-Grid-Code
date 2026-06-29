@@ -11327,197 +11327,247 @@ public int llSetLinkGLTFOverrides(int link, int face, LSLList overrides)
 
         // ── 610–620: Experience KV Store (upgraded to use ExperienceService) ──
 
-        public int llCreateKeyValue(string key, string value)
+        // ══════════════════════════════════════════════════════════════════
+        // Experience Key-Value store — SL-async. Each returns a request key
+        // immediately and delivers the result via the dataserver event, exactly
+        // mirroring the llRequestUserKey precedent: UUID.Random() → Task.Run calls
+        // the existing synchronous ExperienceService method → PostScriptEvent
+        // (m_itemID, "dataserver", { reqKey, payload }). Payload is SL's CSV form
+        // ("1,<value>" / "0,<error>"). Experience resolved via GetScriptExperienceId()
+        // with the existing owner-namespace fallback.
+        // ══════════════════════════════════════════════════════════════════
+
+        public string llCreateKeyValue(string key, string value)
         {
-            if (string.IsNullOrEmpty(key) || key.Length > 255) return -1;
-            var expService = World?.RequestModuleInterface<IExperienceService>();
-            UUID expId = GetScriptExperienceId();
-            if (expService == null || expId == UUID.Zero)
+            UUID reqID = UUID.Random();
+            System.Threading.Tasks.Task.Run(() =>
             {
-                // Fallback: use owner-based namespace via old GetExperienceId()
-                expId = m_host.OwnerID;
-            }
-            try
-            {
-                bool ok = expService != null
-                    ? expService.CreateKeyValue(expId, key, value)
-                    : false;
-                return ok ? 0 : -2; // -2 = duplicate key
-            }
-            catch (Exception ex)
-            {
-                m_log.WarnFormat("[PhloxAPI]: llCreateKeyValue failed: {0}", ex.Message);
-                return -1;
-            }
+                string payload;
+                try
+                {
+                    var expService = World?.RequestModuleInterface<IExperienceService>();
+                    UUID expId = GetScriptExperienceId();
+                    if (expId == UUID.Zero) expId = m_host.OwnerID;
+                    if (string.IsNullOrEmpty(key) || key.Length > 255 || expService == null)
+                        payload = "0," + ExperienceInfo.XP_ERROR_STORAGE_EXCEPTION;
+                    else
+                        // Service returns bare false for dup AND error (indistinguishable); both map
+                        // to STORAGE_EXCEPTION (13) — SL-valid for a create failure.
+                        payload = expService.CreateKeyValue(expId, key, value)
+                            ? "1," + (value ?? string.Empty)
+                            : "0," + ExperienceInfo.XP_ERROR_STORAGE_EXCEPTION;
+                }
+                catch (Exception ex)
+                {
+                    m_log.WarnFormat("[PhloxAPI]: llCreateKeyValue failed: {0}", ex.Message);
+                    payload = "0," + ExperienceInfo.XP_ERROR_STORAGE_EXCEPTION;
+                }
+                m_ScriptEngine.PostScriptEvent(m_itemID, "dataserver", new object[] { reqID.ToString(), payload });
+            });
+            return reqID.ToString();
         }
 
         public string llReadKeyValue(string key)
         {
-            if (string.IsNullOrEmpty(key)) return string.Empty;
-            var expService = World?.RequestModuleInterface<IExperienceService>();
-            UUID expId = GetScriptExperienceId();
-            if (expService == null || expId == UUID.Zero)
-                expId = m_host.OwnerID;
-            try
+            UUID reqID = UUID.Random();
+            System.Threading.Tasks.Task.Run(() =>
             {
-                string val = expService?.ReadKeyValue(expId, key);
-                return val ?? string.Empty;
-            }
-            catch (Exception ex)
-            {
-                m_log.WarnFormat("[PhloxAPI]: llReadKeyValue failed: {0}", ex.Message);
-                return string.Empty;
-            }
-        }
-
-        public int llUpdateKeyValue(string key, string value, string check)
-        {
-            if (string.IsNullOrEmpty(key) || key.Length > 255) return -1;
-            var expService = World?.RequestModuleInterface<IExperienceService>();
-            UUID expId = GetScriptExperienceId();
-            if (expService == null || expId == UUID.Zero)
-                expId = m_host.OwnerID;
-            try
-            {
-                bool ok = expService != null
-                    ? expService.UpdateKeyValue(expId, key, value, check)
-                    : false;
-                return ok ? 0 : -3; // -3 = check failed or key not found
-            }
-            catch (Exception ex)
-            {
-                m_log.WarnFormat("[PhloxAPI]: llUpdateKeyValue failed: {0}", ex.Message);
-                return -1;
-            }
-        }
-
-        public int llDeleteKeyValue(string key)
-        {
-            if (string.IsNullOrEmpty(key)) return -1;
-            var expService = World?.RequestModuleInterface<IExperienceService>();
-            UUID expId = GetScriptExperienceId();
-            if (expService == null || expId == UUID.Zero)
-                expId = m_host.OwnerID;
-            try
-            {
-                bool ok = expService != null
-                    ? expService.DeleteKeyValue(expId, key)
-                    : false;
-                return ok ? 0 : -4; // -4 = key not found
-            }
-            catch (Exception ex)
-            {
-                m_log.WarnFormat("[PhloxAPI]: llDeleteKeyValue failed: {0}", ex.Message);
-                return -1;
-            }
-        }
-
-        public int llKeyCountKeyValue()
-        {
-            var expService = World?.RequestModuleInterface<IExperienceService>();
-            UUID expId = GetScriptExperienceId();
-            if (expService == null || expId == UUID.Zero)
-                expId = m_host.OwnerID;
-            try
-            {
-                return expService?.KeyCountKeyValue(expId) ?? 0;
-            }
-            catch (Exception ex)
-            {
-                m_log.WarnFormat("[PhloxAPI]: llKeyCountKeyValue failed: {0}", ex.Message);
-                return 0;
-            }
-        }
-
-        public LSLList llKeysKeyValue(int start, int count)
-        {
-            if (count <= 0) count = 100;
-            if (count > 1000) count = 1000;
-            if (start < 0) start = 0;
-            var expService = World?.RequestModuleInterface<IExperienceService>();
-            UUID expId = GetScriptExperienceId();
-            if (expService == null || expId == UUID.Zero)
-                expId = m_host.OwnerID;
-            try
-            {
-                var keys = expService?.KeysKeyValue(expId, start, count);
-                if (keys == null || keys.Count == 0) return new LSLList();
-                return new LSLList(keys.Select(k => (object)k).ToArray());
-            }
-            catch (Exception ex)
-            {
-                m_log.WarnFormat("[PhloxAPI]: llKeysKeyValue failed: {0}", ex.Message);
-                return new LSLList();
-            }
-        }
-
-        public int llDataSizeKeyValue()
-        {
-            var expService = World?.RequestModuleInterface<IExperienceService>();
-            UUID expId = GetScriptExperienceId();
-            if (expService == null || expId == UUID.Zero)
-                expId = m_host.OwnerID;
-            try
-            {
-                return (int)(expService?.DataSizeKeyValue(expId) ?? 0);
-            }
-            catch (Exception ex)
-            {
-                m_log.WarnFormat("[PhloxAPI]: llDataSizeKeyValue failed: {0}", ex.Message);
-                return 0;
-            }
-        }
-
-        public int llClearKeyValue()
-        {
-            // Clear all KV pairs for this experience — delete all keys
-            var expService = World?.RequestModuleInterface<IExperienceService>();
-            UUID expId = GetScriptExperienceId();
-            if (expService == null || expId == UUID.Zero)
-                expId = m_host.OwnerID;
-            try
-            {
-                var keys = expService?.KeysKeyValue(expId, 0, 10000);
-                if (keys != null)
+                string payload;
+                try
                 {
-                    foreach (var k in keys)
-                        expService.DeleteKeyValue(expId, k);
+                    var expService = World?.RequestModuleInterface<IExperienceService>();
+                    UUID expId = GetScriptExperienceId();
+                    if (expId == UUID.Zero) expId = m_host.OwnerID;
+                    string val = expService?.ReadKeyValue(expId, key);
+                    payload = !string.IsNullOrEmpty(val) ? "1," + val : "0," + ExperienceInfo.XP_ERROR_KEY_NOT_FOUND;
                 }
-                return 0;
-            }
-            catch (Exception ex)
+                catch (Exception ex)
+                {
+                    m_log.WarnFormat("[PhloxAPI]: llReadKeyValue failed: {0}", ex.Message);
+                    payload = "0," + ExperienceInfo.XP_ERROR_STORAGE_EXCEPTION;
+                }
+                m_ScriptEngine.PostScriptEvent(m_itemID, "dataserver", new object[] { reqID.ToString(), payload });
+            });
+            return reqID.ToString();
+        }
+
+        public string llUpdateKeyValue(string key, string value, int checkedFlag, string originalValue)
+        {
+            UUID reqID = UUID.Random();
+            System.Threading.Tasks.Task.Run(() =>
             {
-                m_log.WarnFormat("[PhloxAPI]: llClearKeyValue failed: {0}", ex.Message);
-                return -1;
-            }
+                string payload;
+                try
+                {
+                    var expService = World?.RequestModuleInterface<IExperienceService>();
+                    UUID expId = GetScriptExperienceId();
+                    if (expId == UUID.Zero) expId = m_host.OwnerID;
+                    // SL CAS: checkedFlag != 0 → only update if current value == original_value.
+                    // Mapped onto ExperienceService.UpdateKeyValue's `check` arg.
+                    // LIMITATION (flagged): the service treats an EMPTY check as "unconditional",
+                    // so a CAS against an empty original_value (checked=TRUE, original="") cannot be
+                    // distinguished from unconditional and behaves as unconditional. Not hit by the
+                    // current test scripts; would need a service-layer flag to fix exactly.
+                    string checkArg = (checkedFlag != 0) ? (originalValue ?? string.Empty) : string.Empty;
+                    if (string.IsNullOrEmpty(key) || key.Length > 255 || expService == null)
+                        payload = "0," + ExperienceInfo.XP_ERROR_STORAGE_EXCEPTION;
+                    else
+                        // LIMITATION: the service returns bare false for CAS-fail, key-not-found,
+                        // and error alike — cannot distinguish; emits RETRY_UPDATE (15) for all.
+                        // SL-valid (15 is the documented CAS-fail code) but imprecise.
+                        payload = expService.UpdateKeyValue(expId, key, value, checkArg)
+                            ? "1," + (value ?? string.Empty)
+                            : "0," + ExperienceInfo.XP_ERROR_RETRY_UPDATE;
+                }
+                catch (Exception ex)
+                {
+                    m_log.WarnFormat("[PhloxAPI]: llUpdateKeyValue failed: {0}", ex.Message);
+                    payload = "0," + ExperienceInfo.XP_ERROR_STORAGE_EXCEPTION;
+                }
+                m_ScriptEngine.PostScriptEvent(m_itemID, "dataserver", new object[] { reqID.ToString(), payload });
+            });
+            return reqID.ToString();
         }
 
-        public string llCreateKeyValueSL(string key, string value)
+        public string llDeleteKeyValue(string key)
         {
-            int result = llCreateKeyValue(key, value);
-            if (result == 0)
-                return "1," + (value ?? string.Empty);
-            if (result == -2)
-                return "0,key already exists";
-            return "0,error";
+            UUID reqID = UUID.Random();
+            System.Threading.Tasks.Task.Run(() =>
+            {
+                string payload;
+                try
+                {
+                    var expService = World?.RequestModuleInterface<IExperienceService>();
+                    UUID expId = GetScriptExperienceId();
+                    if (expId == UUID.Zero) expId = m_host.OwnerID;
+                    // SL echoes the deleted value, so read it before deleting (two service calls — fine here).
+                    string deleted = expService?.ReadKeyValue(expId, key);
+                    payload = (expService != null && expService.DeleteKeyValue(expId, key))
+                        ? "1," + (deleted ?? string.Empty)
+                        : "0," + ExperienceInfo.XP_ERROR_STORAGE_EXCEPTION;
+                }
+                catch (Exception ex)
+                {
+                    m_log.WarnFormat("[PhloxAPI]: llDeleteKeyValue failed: {0}", ex.Message);
+                    payload = "0," + ExperienceInfo.XP_ERROR_STORAGE_EXCEPTION;
+                }
+                m_ScriptEngine.PostScriptEvent(m_itemID, "dataserver", new object[] { reqID.ToString(), payload });
+            });
+            return reqID.ToString();
         }
 
-        public string llReadKeyValueSL(string key)
+        public string llKeyCountKeyValue()
         {
-            string val = llReadKeyValue(key);
-            if (!string.IsNullOrEmpty(val))
-                return "1," + val;
-            return "0,key not found";
+            UUID reqID = UUID.Random();
+            System.Threading.Tasks.Task.Run(() =>
+            {
+                string payload;
+                try
+                {
+                    var expService = World?.RequestModuleInterface<IExperienceService>();
+                    UUID expId = GetScriptExperienceId();
+                    if (expId == UUID.Zero) expId = m_host.OwnerID;
+                    payload = (expService == null)
+                        ? "0," + ExperienceInfo.XP_ERROR_STORAGE_EXCEPTION
+                        : "1," + expService.KeyCountKeyValue(expId);
+                }
+                catch (Exception ex)
+                {
+                    m_log.WarnFormat("[PhloxAPI]: llKeyCountKeyValue failed: {0}", ex.Message);
+                    payload = "0," + ExperienceInfo.XP_ERROR_STORAGE_EXCEPTION;
+                }
+                m_ScriptEngine.PostScriptEvent(m_itemID, "dataserver", new object[] { reqID.ToString(), payload });
+            });
+            return reqID.ToString();
         }
 
-        public string llUpdateKeyValueSL(string key, string value, string check)
+        public string llKeysKeyValue(int start, int count)
         {
-            int result = llUpdateKeyValue(key, value, check);
-            if (result == 0)
-                return "1," + (value ?? string.Empty);
-            if (result == -3)
-                return "0,check failed";
-            return "0,error";
+            UUID reqID = UUID.Random();
+            System.Threading.Tasks.Task.Run(() =>
+            {
+                string payload;
+                try
+                {
+                    if (count <= 0) count = 100;
+                    if (count > 1000) count = 1000;
+                    if (start < 0) start = 0;
+                    var expService = World?.RequestModuleInterface<IExperienceService>();
+                    UUID expId = GetScriptExperienceId();
+                    if (expId == UUID.Zero) expId = m_host.OwnerID;
+                    var keys = expService?.KeysKeyValue(expId, start, count);
+                    // SL: success "1,<k1>,<k2>,…"; empty/exhausted is a FAILURE (KEY_NOT_FOUND), not an empty success.
+                    payload = (keys != null && keys.Count > 0)
+                        ? "1," + string.Join(",", keys)
+                        : "0," + ExperienceInfo.XP_ERROR_KEY_NOT_FOUND;
+                }
+                catch (Exception ex)
+                {
+                    m_log.WarnFormat("[PhloxAPI]: llKeysKeyValue failed: {0}", ex.Message);
+                    payload = "0," + ExperienceInfo.XP_ERROR_STORAGE_EXCEPTION;
+                }
+                m_ScriptEngine.PostScriptEvent(m_itemID, "dataserver", new object[] { reqID.ToString(), payload });
+            });
+            return reqID.ToString();
+        }
+
+        public string llDataSizeKeyValue()
+        {
+            UUID reqID = UUID.Random();
+            System.Threading.Tasks.Task.Run(() =>
+            {
+                string payload;
+                try
+                {
+                    var expService = World?.RequestModuleInterface<IExperienceService>();
+                    UUID expId = GetScriptExperienceId();
+                    if (expId == UUID.Zero) expId = m_host.OwnerID;
+                    // SL success is "1,<used>,<quota>" (two ints). LIMITATION: quota is the nominal
+                    // MAX_DATA_QUOTA constant; Legion does not currently ENFORCE it — the second int
+                    // is informational only.
+                    payload = (expService == null)
+                        ? "0," + ExperienceInfo.XP_ERROR_STORAGE_EXCEPTION
+                        : "1," + expService.DataSizeKeyValue(expId) + "," + ExperienceInfo.MAX_DATA_QUOTA;
+                }
+                catch (Exception ex)
+                {
+                    m_log.WarnFormat("[PhloxAPI]: llDataSizeKeyValue failed: {0}", ex.Message);
+                    payload = "0," + ExperienceInfo.XP_ERROR_STORAGE_EXCEPTION;
+                }
+                m_ScriptEngine.PostScriptEvent(m_itemID, "dataserver", new object[] { reqID.ToString(), payload });
+            });
+            return reqID.ToString();
+        }
+
+        // Non-SL Legion extension: clears all keys for the experience. Async for surface uniformity.
+        public string llClearKeyValue()
+        {
+            UUID reqID = UUID.Random();
+            System.Threading.Tasks.Task.Run(() =>
+            {
+                string payload;
+                try
+                {
+                    var expService = World?.RequestModuleInterface<IExperienceService>();
+                    UUID expId = GetScriptExperienceId();
+                    if (expId == UUID.Zero) expId = m_host.OwnerID;
+                    if (expService != null)
+                    {
+                        var keys = expService.KeysKeyValue(expId, 0, 10000);
+                        if (keys != null)
+                            foreach (var k in keys)
+                                expService.DeleteKeyValue(expId, k);
+                    }
+                    payload = "1";
+                }
+                catch (Exception ex)
+                {
+                    m_log.WarnFormat("[PhloxAPI]: llClearKeyValue failed: {0}", ex.Message);
+                    payload = "0," + ExperienceInfo.XP_ERROR_STORAGE_EXCEPTION;
+                }
+                m_ScriptEngine.PostScriptEvent(m_itemID, "dataserver", new object[] { reqID.ToString(), payload });
+            });
+            return reqID.ToString();
         }
 		
         // ── Tier 6: Standalone ──
@@ -12498,7 +12548,7 @@ public int llSetLinkGLTFOverrides(int link, int face, LSLList overrides)
             {
                 m_ScriptEngine.PostScriptEvent(m_itemID, new EventParams(
                     "experience_permissions_denied",
-                    new object[] { agent, 17 }, // XP_ERROR_NOT_PERMITTED
+                    new object[] { agent, ExperienceInfo.XP_ERROR_NO_EXPERIENCE }, // 5 — script not associated with an experience
                     new DetectParams[0]));
                 return;
             }
@@ -12509,7 +12559,7 @@ public int llSetLinkGLTFOverrides(int link, int face, LSLList overrides)
             {
                 m_ScriptEngine.PostScriptEvent(m_itemID, new EventParams(
                     "experience_permissions_denied",
-                    new object[] { agent, 18 }, // XP_ERROR_NOT_FOUND
+                    new object[] { agent, ExperienceInfo.XP_ERROR_NOT_PERMITTED }, // 4 — experience not allowed in this region
                     new DetectParams[0]));
                 return;
             }
@@ -12520,7 +12570,7 @@ public int llSetLinkGLTFOverrides(int link, int face, LSLList overrides)
             {
                 m_ScriptEngine.PostScriptEvent(m_itemID, new EventParams(
                     "experience_permissions_denied",
-                    new object[] { agent, 17 },
+                    new object[] { agent, ExperienceInfo.XP_ERROR_NOT_PERMITTED }, // 4 — toucher not a root presence here
                     new DetectParams[0]));
                 return;
             }
@@ -12540,7 +12590,7 @@ public int llSetLinkGLTFOverrides(int link, int face, LSLList overrides)
             {
                 m_ScriptEngine.PostScriptEvent(m_itemID, new EventParams(
                     "experience_permissions_denied",
-                    new object[] { agent, 4 }, // XP_ERROR_REQUEST_DENIED
+                    new object[] { agent, ExperienceInfo.XP_ERROR_NOT_PERMITTED }, // 4 — agent explicitly blocked
                     new DetectParams[0]));
                 return;
             }

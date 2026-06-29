@@ -53,6 +53,10 @@ namespace OpenSim.Services.Interfaces
         public const int XP_ERROR_KEY_NOT_FOUND = 14;
         public const int XP_ERROR_RETRY_UPDATE = 15;
         public const int XP_ERROR_MATURITY_EXCEEDED = 16;
+        // ── Legion-only extensions — NOT in SL (whose XP_ERROR enum ends at 16). These MUST NEVER
+        //    be emitted in SL-facing output (dataserver payloads or experience_permissions_denied):
+        //    a script calling llGetExperienceErrorMessage(17|18) on real SL gets "unknown error".
+        //    Kept defined for internal/diagnostic use only; as of EXP-ERRCODE-1 they have zero emit sites.
         public const int XP_ERROR_NOT_PERMITTED_LAND = 17;
         public const int XP_ERROR_REQUEST_PERM_TIMEOUT = 18;
 
