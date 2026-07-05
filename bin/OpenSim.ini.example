@@ -1025,14 +1025,19 @@
 
 [RemoteSound]
     ;; Backs the osPlaySoundURL(key target, string url, float volume) script function,
-    ;; which fetches an external PCM-WAV file and plays it as a temporary sound to nearby
+    ;; which fetches an external Ogg Vorbis file and plays it as a temporary sound to nearby
     ;; avatars. Opt-in and OFF by default; the function is registered in both engines
     ;; (Phlox + YEngine) but returns "disabled" until Enabled = true here.
     ;;
+    ;; Ogg Vorbis is the ONLY format accepted, because that is the only sound format SL/OpenSim
+    ;; viewers decode for playback (AssetType.Sound = Ogg); the fetched bytes are stored as-is
+    ;; as AssetType.Sound, exactly like a normal uploaded sound. WAV/MP3 are rejected (Legion has
+    ;; no server-side transcoder). The URL must serve Content-Type audio/ogg (or application/ogg)
+    ;; and the payload must begin with the Ogg "OggS" signature.
+    ;;
     ;; Security floor is Legion's OutboundUrlFilter (the same SSRF guard llHTTPRequest
     ;; uses) -- loopback/private/link-local/metadata IPs are always rejected, and the
-    ;; connection is pinned to the exact validated IP (no DNS-rebinding). Only PCM WAV
-    ;; (RIFF/WAVE, audio/wav) is accepted for v1; MP3/OGG are rejected.
+    ;; connection is pinned to the exact validated IP (no DNS-rebinding).
     ;
     ;# {Enabled} {} {Enable osPlaySoundURL?} {true false} false
     Enabled = false

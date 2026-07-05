@@ -82,9 +82,9 @@ namespace OpenSim.Region.Framework.Scenes
         private const int RedirectCap = 5;
         private static readonly TimeSpan FetchTimeout = TimeSpan.FromSeconds(15);
 
-        private static readonly HashSet<string> WavContentTypes = new(StringComparer.OrdinalIgnoreCase)
+        private static readonly HashSet<string> OggContentTypes = new(StringComparer.OrdinalIgnoreCase)
         {
-            "audio/wav", "audio/x-wav", "audio/wave", "audio/vnd.wave"
+            "audio/ogg", "application/ogg"
         };
 
         // url -> (assetId, expiryTicks)
@@ -226,8 +226,8 @@ namespace OpenSim.Region.Framework.Scenes
                 if (!headResp.IsSuccessStatusCode) { SafeReport(reportAsyncError, $"Remote returned {(int)headResp.StatusCode}"); return; }
 
                 string ctype = headResp.Content.Headers.ContentType?.MediaType;
-                if (!string.IsNullOrEmpty(ctype) && !WavContentTypes.Contains(ctype))
-                { SafeReport(reportAsyncError, $"Unsupported content-type: {ctype}; only PCM WAV is accepted"); return; }
+                if (!string.IsNullOrEmpty(ctype) && !OggContentTypes.Contains(ctype))
+                { SafeReport(reportAsyncError, $"Unsupported content-type: {ctype}; only Ogg Vorbis is accepted"); return; }
 
                 long? len = headResp.Content.Headers.ContentLength;
                 if (len.HasValue && len.Value > m_maxSizeBytes)
@@ -248,14 +248,17 @@ namespace OpenSim.Region.Framework.Scenes
             if (!resp.IsSuccessStatusCode) { SafeReport(reportAsyncError, $"Remote returned {(int)resp.StatusCode}"); return; }
 
             string getCtype = resp.Content.Headers.ContentType?.MediaType;
-            if (string.IsNullOrEmpty(getCtype) || !WavContentTypes.Contains(getCtype))
-            { SafeReport(reportAsyncError, $"Unsupported content-type: {getCtype ?? "(none)"}; only PCM WAV is accepted"); return; }
+            if (string.IsNullOrEmpty(getCtype) || !OggContentTypes.Contains(getCtype))
+            { SafeReport(reportAsyncError, $"Unsupported content-type: {getCtype ?? "(none)"}; only Ogg Vorbis is accepted"); return; }
 
             byte[] data = ReadCapped(resp, m_maxSizeBytes, out bool overLimit);
             if (overLimit) { SafeReport(reportAsyncError, "Remote audio exceeds size limit"); return; }
-            if (!IsRiffWave(data)) { SafeReport(reportAsyncError, "Data is not a RIFF/WAVE file"); return; }
+            if (!IsOggVorbis(data)) { SafeReport(reportAsyncError, "Data is not an Ogg Vorbis file"); return; }
 
-            AssetBase asset = new(UUID.Random(), "osPlaySoundURL", (sbyte)AssetType.SoundWAV, host.OwnerID.ToString())
+            // AssetType.Sound (1) is Ogg Vorbis in SL/OpenSim — the only sound format the
+            // viewer decodes for playback. The bytes are Ogg, so this is the correct type
+            // (SoundWAV/17 would only be served for a snd_wav request the viewer never makes).
+            AssetBase asset = new(UUID.Random(), "osPlaySoundURL", (sbyte)AssetType.Sound, host.OwnerID.ToString())
             {
                 Data = data,
                 Temporary = true
@@ -386,10 +389,10 @@ namespace OpenSim.Region.Framework.Scenes
             return ms.ToArray();
         }
 
-        private static bool IsRiffWave(byte[] d)
-            => d != null && d.Length >= 12
-               && d[0] == (byte)'R' && d[1] == (byte)'I' && d[2] == (byte)'F' && d[3] == (byte)'F'
-               && d[8] == (byte)'W' && d[9] == (byte)'A' && d[10] == (byte)'V' && d[11] == (byte)'E';
+        // Ogg bitstream starts with the capture pattern "OggS" (0x4F 0x67 0x67 0x53).
+        private static bool IsOggVorbis(byte[] d)
+            => d != null && d.Length >= 4
+               && d[0] == (byte)'O' && d[1] == (byte)'g' && d[2] == (byte)'g' && d[3] == (byte)'S';
 
         private static HashSet<string> ParseDomains(string csv)
         {
