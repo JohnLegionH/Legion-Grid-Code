@@ -1023,6 +1023,41 @@
     ;; ScriptEngines/Phlox/state/ (schema is created in code on first run -- no manual DB step).
     Enabled = true
 
+[RemoteSound]
+    ;; Backs the osPlaySoundURL(key target, string url, float volume) script function,
+    ;; which fetches an external PCM-WAV file and plays it as a temporary sound to nearby
+    ;; avatars. Opt-in and OFF by default; the function is registered in both engines
+    ;; (Phlox + YEngine) but returns "disabled" until Enabled = true here.
+    ;;
+    ;; Security floor is Legion's OutboundUrlFilter (the same SSRF guard llHTTPRequest
+    ;; uses) -- loopback/private/link-local/metadata IPs are always rejected, and the
+    ;; connection is pinned to the exact validated IP (no DNS-rebinding). Only PCM WAV
+    ;; (RIFF/WAVE, audio/wav) is accepted for v1; MP3/OGG are rejected.
+    ;
+    ;# {Enabled} {} {Enable osPlaySoundURL?} {true false} false
+    Enabled = false
+    ;
+    ;# {AllowHttp} {} {Allow plain http:// URLs (else HTTPS only)} {true false} false
+    AllowHttp = false
+    ;
+    ;# {MaxSizeBytes} {} {Maximum audio file size in bytes} {} 10485760
+    MaxSizeBytes = 10485760
+    ;
+    ;# {PerObjectRatePerMinute} {} {Max plays per minute per object} {} 6
+    PerObjectRatePerMinute = 6
+    ;
+    ;# {PerRegionRatePerMinute} {} {Max plays per minute per region} {} 60
+    PerRegionRatePerMinute = 60
+    ;
+    ;# {CacheSeconds} {} {How long a fetched sound is cached (url->asset)} {} 300
+    CacheSeconds = 300
+    ;
+    ;; Optional domain policy LAYERED ON TOP of OutboundUrlFilter (the filter is the
+    ;; security floor; these are convenience policy). Comma/semicolon separated hostnames.
+    ;; DeniedDomains always wins. If AllowedDomains is non-empty, ONLY those hosts are permitted.
+    ; AllowedDomains = "sounds.example.com,cdn.example.org"
+    ; DeniedDomains = ""
+
 [Experience]
     ;; Legion Experience system (experiences, KV store, permissions, region allow/block lists).
     ;; The schema self-creates on first run (CREATE TABLE IF NOT EXISTS) -- no manual DB step.

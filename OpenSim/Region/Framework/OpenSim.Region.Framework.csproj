@@ -420,6 +420,9 @@
     <Compile Include="Scenes\Scene.cs">
       <SubType>Code</SubType>
     </Compile>
+    <Compile Include="Scenes\RemoteSoundFetcher.cs">
+      <SubType>Code</SubType>
+    </Compile>
     <Compile Include="Scenes\Scene.Inventory.cs">
       <SubType>Code</SubType>
     </Compile>
