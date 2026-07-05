@@ -10,8 +10,17 @@
  * Saves/restores LSL global variable state, current LSL state name,
  * timer interval, and event queue across region restarts.
  *
- * The serialization format (protobuf-net via SerializedRuntimeState) is
- * already implemented in InWorldz.Phlox.dll — we just call it here.
+ * Concurrency model (see the "state-save race" fix):
+ *   Serialization of a script's RuntimeState happens ONLY on the scheduler
+ *   thread, at a safe point where the script is quiescent (between bytecode
+ *   ops, event queue drained) — i.e. from ScriptChanged/ScriptUnloaded, which
+ *   the scheduler calls at its run-state transitions. At that instant the
+ *   operand/call stacks are not being mutated, so the serialized blob is
+ *   internally consistent WITHOUT any lock on the VM state. The finished
+ *   byte[] blob is queued; the background thread does ONLY the SQLite write of
+ *   pre-made blobs and never touches live RuntimeState. This is the same
+ *   approach the event-queue race fix (commit 85ad91cdf7) used for one
+ *   collection, generalized to all VM stacks.
  */
 
 using System;
@@ -35,20 +44,27 @@ namespace Phlox.ScriptEngine
         private const string DB_DIR  = "ScriptEngines/Phlox/state";
         private const string DB_FILE = "ScriptEngines/Phlox/state/script_state.db";
         private const int FLUSH_INTERVAL_MS = 2500;
-        private const int MAX_DIRTY_EXECUTIONS = 200;
 
         private readonly PhloxEngine m_Engine;
-        private readonly SortedDictionary<UUID, DirtyEntry> m_Dirty = new SortedDictionary<UUID, DirtyEntry>();
-        private readonly Dictionary<UUID, Interpreter> m_Live = new Dictionary<UUID, Interpreter>();
+
+        // item_id -> latest pre-serialized blob awaiting a disk write. Guarded by
+        // m_Lock. Capture (scheduler thread) overwrites; flush (bg thread) drains.
+        private readonly Dictionary<UUID, PendingSave> m_Pending = new Dictionary<UUID, PendingSave>();
         private readonly object m_Lock = new object();
+
+        // Serializes the actual SQLite writes so the background flush and a
+        // scheduler-thread unload write never collide (SQLite allows one writer).
+        private readonly object m_DbLock = new object();
+
         private Thread m_Thread;
         private volatile bool m_Stop;
         private readonly ManualResetEventSlim m_WakeEvent = new ManualResetEventSlim(false);
 
-        private class DirtyEntry
+        private sealed class PendingSave
         {
-            public Interpreter Script;
-            public int ExecutionCount;
+            public UUID ItemId;
+            public UUID AssetId;
+            public byte[] Blob;
         }
 
         public StateManager(PhloxEngine engine)
@@ -73,10 +89,7 @@ namespace Phlox.ScriptEngine
             m_Stop = true;
             m_WakeEvent.Set();
             m_Thread?.Join(5000);
-            lock (m_Lock)
-            {
-                FlushAllDirty();
-            }
+            FlushPending();
         }
 
         public void Dispose()
@@ -85,36 +98,68 @@ namespace Phlox.ScriptEngine
             m_WakeEvent.Dispose();
         }
 
+        /// <summary>
+        /// Called on the SCHEDULER thread when a script reaches a safe point
+        /// (quiescent — event handler finished, stacks at a clean boundary).
+        /// Serializes the consistent state to a blob NOW and queues it for the
+        /// background writer. Race-free by construction: nothing is mutating the
+        /// VM stacks at this instant.
+        /// </summary>
         public void ScriptChanged(Interpreter interp)
         {
+            byte[] blob;
+            try
+            {
+                blob = SerializeState(interp);
+            }
+            catch (Exception e)
+            {
+                // No masking of a race here — serialization runs on stable state,
+                // so a throw is a genuine bug, logged loudly, not silently skipped.
+                m_log.WarnFormat("[PhloxState]: Failed to serialize {0}: {1}", interp.ItemId, e.Message);
+                return;
+            }
+
             lock (m_Lock)
             {
-                if (m_Dirty.TryGetValue(interp.ItemId, out var entry))
+                m_Pending[interp.ItemId] = new PendingSave
                 {
-                    entry.ExecutionCount++;
-                    if (entry.ExecutionCount >= MAX_DIRTY_EXECUTIONS)
-                    {
-                        SaveSingle(interp);
-                        m_Dirty.Remove(interp.ItemId);
-                    }
-                }
-                else
-                {
-                    m_Dirty[interp.ItemId] = new DirtyEntry { Script = interp, ExecutionCount = 1 };
-                    m_Live[interp.ItemId] = interp;
-                }
-                m_WakeEvent.Set();
+                    ItemId  = interp.ItemId,
+                    AssetId = interp.Script.AssetId,
+                    Blob    = blob
+                };
             }
+            m_WakeEvent.Set();
         }
 
+        /// <summary>
+        /// Final save at unload (scheduler thread, safe point). Serializes the
+        /// last state and writes it synchronously so it is persisted before the
+        /// script object goes away.
+        /// </summary>
         public void ScriptUnloaded(Interpreter interp)
         {
-            lock (m_Lock)
+            PendingSave save;
+            try
             {
-                SaveSingle(interp);
-                m_Dirty.Remove(interp.ItemId);
-                m_Live.Remove(interp.ItemId);
+                save = new PendingSave
+                {
+                    ItemId  = interp.ItemId,
+                    AssetId = interp.Script.AssetId,
+                    Blob    = SerializeState(interp)
+                };
             }
+            catch (Exception e)
+            {
+                m_log.WarnFormat("[PhloxState]: Failed to serialize {0} at unload: {1}", interp.ItemId, e.Message);
+                return;
+            }
+
+            // Drop any queued (now-superseded) blob and write the final one.
+            lock (m_Lock)
+                m_Pending.Remove(interp.ItemId);
+
+            WriteBatch(new List<PendingSave> { save });
         }
 
         /// <summary>
@@ -154,18 +199,20 @@ namespace Phlox.ScriptEngine
 
         public void DeleteState(UUID itemId)
         {
+            // Drop any queued blob first so a pending write can't resurrect the
+            // state we are about to delete.
+            lock (m_Lock)
+                m_Pending.Remove(itemId);
+
             try
             {
-                using var conn = OpenConnection();
-                using var cmd  = conn.CreateCommand();
-                cmd.CommandText = "DELETE FROM script_state WHERE item_id = @id";
-                cmd.Parameters.AddWithValue("@id", itemId.ToString());
-                cmd.ExecuteNonQuery();
-
-                lock (m_Lock)
+                lock (m_DbLock)
                 {
-                    m_Dirty.Remove(itemId);
-                    m_Live.Remove(itemId);
+                    using var conn = OpenConnection();
+                    using var cmd  = conn.CreateCommand();
+                    cmd.CommandText = "DELETE FROM script_state WHERE item_id = @id";
+                    cmd.Parameters.AddWithValue("@id", itemId.ToString());
+                    cmd.ExecuteNonQuery();
                 }
             }
             catch (Exception e)
@@ -181,64 +228,57 @@ namespace Phlox.ScriptEngine
                 m_WakeEvent.Wait(FLUSH_INTERVAL_MS);
                 m_WakeEvent.Reset();
                 if (m_Stop) break;
-                lock (m_Lock)
-                {
-                    FlushAllDirty();
-                }
+                FlushPending();
             }
         }
 
-        private void FlushAllDirty()
+        private void FlushPending()
         {
-            if (m_Dirty.Count == 0) return;
-            var snapshot = new List<DirtyEntry>(m_Dirty.Values);
-            m_Dirty.Clear();
-            try
+            List<PendingSave> batch;
+            lock (m_Lock)
             {
-                using var conn = OpenConnection();
-                using var tx   = conn.BeginTransaction();
-                foreach (var entry in snapshot)
+                if (m_Pending.Count == 0) return;
+                batch = new List<PendingSave>(m_Pending.Values);
+                m_Pending.Clear();
+            }
+            WriteBatch(batch);
+        }
+
+        private void WriteBatch(List<PendingSave> batch)
+        {
+            lock (m_DbLock)
+            {
+                try
                 {
-                    try { SaveSingleInTransaction(conn, entry.Script); }
-                    catch (Exception e)
+                    using var conn = OpenConnection();
+                    using var tx   = conn.BeginTransaction();
+                    foreach (var save in batch)
                     {
-                        m_log.WarnFormat("[PhloxState]: Failed to save {0}: {1}", entry.Script.ItemId, e.Message);
+                        try { WriteOne(conn, save); }
+                        catch (Exception e)
+                        {
+                            m_log.WarnFormat("[PhloxState]: Failed to write {0}: {1}", save.ItemId, e.Message);
+                        }
                     }
+                    tx.Commit();
                 }
-                tx.Commit();
-            }
-            catch (Exception e)
-            {
-                m_log.ErrorFormat("[PhloxState]: Batch flush failed: {0}", e.Message);
-            }
-            
-        }
-
-        private void SaveSingle(Interpreter interp)
-        {
-            try
-            {
-                using var conn = OpenConnection();
-                using var tx   = conn.BeginTransaction();
-                SaveSingleInTransaction(conn, interp);
-                tx.Commit();
-            }
-            catch (Exception e)
-            {
-                m_log.WarnFormat("[PhloxState]: Failed to save state for {0}: {1}", interp.ItemId, e.Message);
+                catch (Exception e)
+                {
+                    m_log.ErrorFormat("[PhloxState]: Batch flush failed: {0}", e.Message);
+                }
             }
         }
 
-        private static void SaveSingleInTransaction(SqliteConnection conn, Interpreter interp)
+        private static byte[] SerializeState(Interpreter interp)
         {
             SerializedRuntimeState srs = SerializedRuntimeState.FromRuntimeState(interp.ScriptState);
-            byte[] blob;
-            using (var ms = new MemoryStream())
-            {
-                ProtoBuf.Serializer.Serialize(ms, srs);
-                blob = ms.ToArray();
-            }
+            using var ms = new MemoryStream();
+            ProtoBuf.Serializer.Serialize(ms, srs);
+            return ms.ToArray();
+        }
 
+        private static void WriteOne(SqliteConnection conn, PendingSave save)
+        {
             using var cmd = conn.CreateCommand();
             cmd.CommandText =
                 @"INSERT INTO script_state (item_id, asset_id, state_data, saved_at)
@@ -247,9 +287,9 @@ namespace Phlox.ScriptEngine
                       asset_id   = excluded.asset_id,
                       state_data = excluded.state_data,
                       saved_at   = excluded.saved_at";
-            cmd.Parameters.AddWithValue("@id",      interp.ItemId.ToString());
-            cmd.Parameters.AddWithValue("@assetid", interp.Script.AssetId.ToString());
-            cmd.Parameters.AddWithValue("@data",    blob);
+            cmd.Parameters.AddWithValue("@id",      save.ItemId.ToString());
+            cmd.Parameters.AddWithValue("@assetid", save.AssetId.ToString());
+            cmd.Parameters.AddWithValue("@data",    save.Blob);
             cmd.Parameters.AddWithValue("@ts",      DateTimeOffset.UtcNow.ToUnixTimeSeconds());
             cmd.ExecuteNonQuery();
         }
