@@ -145,6 +145,7 @@ namespace OpenSim.Region.ScriptEngine.Shared.Api.Interfaces
         void osRegionNotice(LSL_Key agentID, string msg);
         bool osConsoleCommand(string Command);
         void osSetParcelMusicURL(LSL_String url);
+        LSL_String osPlaySoundURL(LSL_Key target, LSL_String url, LSL_Float volume);
         void osSetParcelMediaURL(LSL_String url);
         void osSetPrimFloatOnWater(int floatYN);
         void osSetParcelSIPAddress(string SIPAddress);

@@ -1988,6 +1988,20 @@ namespace OpenSim.Region.ScriptEngine.Shared.Api
             land?.SetMusicUrl(url);
         }
 
+        // Fetch an external PCM-WAV file and play it as a temporary sound to nearby
+        // avatars. High threat: outbound fetch + asset creation + audible broadcast.
+        // Security lives in the shared RemoteSoundFetcher (scheme/domain/SSRF/rate/size);
+        // this just resolves the per-region helper and forwards. Returns "" on accept,
+        // else a reason string.
+        public LSL_String osPlaySoundURL(LSL_Key target, LSL_String url, LSL_Float volume)
+        {
+            CheckThreatLevel(ThreatLevel.High, "osPlaySoundURL");
+
+            UUID.TryParse(target, out UUID targetId);
+            RemoteSoundFetcher fetcher = RemoteSoundFetcher.GetForScene(World, m_ScriptEngine.ConfigSource);
+            return fetcher.Play(m_host, targetId, url, volume, msg => OSSLShoutError(msg));
+        }
+
         public void osSetParcelMediaURL(LSL_String url)
         {
             CheckThreatLevel(ThreatLevel.VeryLow, "osSetParcelMediaURL");
