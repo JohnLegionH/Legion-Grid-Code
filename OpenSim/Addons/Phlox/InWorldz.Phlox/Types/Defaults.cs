@@ -4730,6 +4730,13 @@ namespace InWorldz.Phlox.Types
                 ParamNames = new string[] { },
                 TableIndex = 673
             }},
+            {"osPlaySoundURL", new FunctionSig {
+                FunctionName = "osPlaySoundURL",
+                ReturnType = VarType.String,
+                ParamTypes = new VarType[] { VarType.Key, VarType.String, VarType.Float },
+                ParamNames = new string[] { "target", "url", "volume" },
+                TableIndex = 674
+            }},
          };
         }
 }

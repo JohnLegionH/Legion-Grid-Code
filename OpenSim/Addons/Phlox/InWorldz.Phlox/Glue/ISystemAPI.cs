@@ -403,6 +403,7 @@ namespace InWorldz.Phlox.Glue
         void iwTeleportAgent(string agent, string region, Vector3 pos, Vector3 lookat);
         void osTeleportAgent(string agent, string region, Vector3 pos, Vector3 lookat);
         LSLList osGetAvatarList();
+        string osPlaySoundURL(string target, string url, float volume);
         string llAvatarOnLinkSitTarget(int linknumber);
         string iwGetLastOwner();
         void iwRemoveLinkInventory(int linknumber, string item);

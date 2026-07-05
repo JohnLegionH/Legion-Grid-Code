@@ -758,6 +758,7 @@ private static string ConvToString(object o)
 								Shim_botSetPersistentData,      //671
 								Shim_osTeleportAgent,           //672
 								Shim_osGetAvatarList,           //673
+								Shim_osPlaySoundURL,            //674
         };
 
         public void SetScriptEventFlags()
@@ -6897,6 +6898,22 @@ private static string ConvToString(object o)
         static private void Shim_osGetAvatarList(SyscallShim self)
         {
             LSLList ret = self._systemAPI.osGetAvatarList();
+            self._interpreter.SafeOperandsPush(ConvToLSLType(ret));
+        }
+
+        // OSSL: string osPlaySoundURL(key target, string url, float volume)  [TableIndex 674]
+        // Synchronous shim: validation/SSRF/rate-limit run inline and return the status
+        // string; the network fetch backgrounds inside the shared helper, so the
+        // scheduler thread is not blocked and no async/Syscall handling is needed here.
+        // Operands pop in reverse declaration order: volume, url, target.
+        static private void Shim_osPlaySoundURL(SyscallShim self)
+        {
+            float volume = ConvToFloat(self._interpreter.ScriptState.Operands.Pop());
+            string url = ConvToString(self._interpreter.ScriptState.Operands.Pop());
+            string target = ConvToString(self._interpreter.ScriptState.Operands.Pop());
+
+            string ret = self._systemAPI.osPlaySoundURL(target, url, volume);
+
             self._interpreter.SafeOperandsPush(ConvToLSLType(ret));
         }
     }

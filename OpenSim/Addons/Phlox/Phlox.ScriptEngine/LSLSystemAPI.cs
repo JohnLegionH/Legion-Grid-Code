@@ -6482,6 +6482,18 @@ public void llRezObject(string inventory, Vector3 pos, Vector3 vel, Quaternion r
             return new LSLList(result);
         }
 
+        // Fetch an external PCM-WAV file and play it as a temporary sound to nearby
+        // avatars. Delegates to the SAME shared RemoteSoundFetcher the YEngine OSSL API
+        // uses, so security (scheme/domain/SSRF/rate/size) and behavior are identical
+        // across engines. Returns "" on accept, else a reason string.
+        public string osPlaySoundURL(string target, string url, float volume)
+        {
+            if (World == null) return "no region";
+            UUID.TryParse(target, out UUID targetId);
+            RemoteSoundFetcher fetcher = RemoteSoundFetcher.GetForScene(World, m_ScriptEngine.ConfigSource);
+            return fetcher.Play(m_host, targetId, url, volume, ShoutError);
+        }
+
         public int llReturnObjectsByOwner(string owner, int scope)
         {
             // Faithful port from Halcyon, adapted for Legion
