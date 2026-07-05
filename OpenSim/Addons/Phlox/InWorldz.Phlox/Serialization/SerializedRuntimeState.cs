@@ -84,20 +84,22 @@ namespace InWorldz.Phlox.Serialization
 
         public static SerializedRuntimeState FromRuntimeState(VM.RuntimeState state)
         {
-            // Snapshot all mutable collections up front to avoid
-            // "Collection was modified" if the execution thread touches
-            // the RuntimeState while we are serializing.
-            // Catch Exception (not just InvalidOperationException) because
-            // C5.CollectionModifiedException does not inherit from InvalidOperationException.
-            VM.StackFrame[] callsSnapshot;
-            try { callsSnapshot = state.Calls.ToArray(); }
-            catch { callsSnapshot = Array.Empty<VM.StackFrame>(); }
+            // This runs ONLY on the scheduler thread at a script safe point (the
+            // script is quiescent — see StateManager). The VM stacks (Calls,
+            // Operands, TopFrame, Globals) are therefore NOT being mutated, so we
+            // read them directly; a torn/empty Calls read is no longer possible.
+            // (The previous defensive try/catch here masked the race by silently
+            // returning Array.Empty — persisting a script with no call stack.)
+            //
+            // EventQueue is the exception: it is enqueued from OTHER threads
+            // (chat/collision/timer posting events) even while the script is
+            // quiescent, so it still needs EventQueueLock.
+            VM.StackFrame[] callsSnapshot = state.Calls.ToArray();
 
             VM.PostedEvent[] eventQueueSnapshot;
             lock (state.EventQueueLock)
             {
-                try { eventQueueSnapshot = state.EventQueue.ToArray(); }
-                catch { eventQueueSnapshot = Array.Empty<VM.PostedEvent>(); }
+                eventQueueSnapshot = state.EventQueue.ToArray();
             }
 
             Dictionary<int, VM.ActiveListen> listensSnapshot;
