@@ -305,6 +305,22 @@ namespace OpenSim.Server.Handlers.UserAccounts
             if (request.TryGetValue("UserTitle", out otmp))
                 existingAccount.UserTitle = otmp.ToString();
 
+            // SL display-name fields: without these a successful setaccount would drop the
+            // stored name/timestamp (they are sent in ToKeyValuePairs but were not applied
+            // here). DisplayName mirrors the UserTitle string pattern; NameChanged mirrors
+            // the UserLevel int pattern.
+            if (request.TryGetValue("DisplayName", out otmp))
+                existingAccount.DisplayName = otmp.ToString();
+
+            int nameChanged = 0;
+            if (request.TryGetValue("NameChanged", out otmp) && int.TryParse(otmp.ToString(), out nameChanged))
+                existingAccount.NameChanged = nameChanged;
+
+            // Drive-by: UserCountry is likewise present in ToKeyValuePairs but was missing
+            // from this whitelist, so a setaccount round-trip silently cleared it.
+            if (request.TryGetValue("UserCountry", out otmp))
+                existingAccount.UserCountry = otmp.ToString();
+
             if (!m_UserAccountService.StoreUserAccount(existingAccount))
             {
                 m_log.ErrorFormat(
