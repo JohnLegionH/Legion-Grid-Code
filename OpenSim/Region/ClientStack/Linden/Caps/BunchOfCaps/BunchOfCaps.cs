@@ -2292,6 +2292,7 @@ namespace OpenSim.Region.ClientStack.Linden
             // These carry into the Pass B EventQueue reply.
             int status = 200;
             string reason = "OK";
+            string replyDisplayName = null;   // effective new name on success (for the EQ reply)
 
             try
             {
@@ -2349,6 +2350,9 @@ namespace OpenSim.Region.ClientStack.Linden
                                 if (m_userAccountService.StoreUserAccount(account))
                                 {
                                     m_userAccountService.InvalidateCache(m_AgentID);
+                                    // Effective name the viewer should show: the legacy name
+                                    // when the custom name was cleared, else the new name.
+                                    replyDisplayName = clearing ? legacy : newName;
                                 }
                                 else
                                 {
@@ -2370,19 +2374,48 @@ namespace OpenSim.Region.ClientStack.Linden
                 status = 500; reason = "Server error";
             }
 
-            // Server-side outcome (Pass A has no EQ reply yet, so this log is how the store/
-            // throttle result is observed until the viewer round-trip exists in Pass B).
             m_log.InfoFormat("[CAPS]: SetDisplayName for {0}: status {1} ({2})", m_AgentID, status, reason);
 
-            // PASS B: SetDisplayNameReply EventQueue reply goes here.
-            //   Build an OSD event named "SetDisplayNameReply" with body:
-            //     { "reason": <reason>, "status": <status>, "agent": { id, display_name,
-            //       legacy_first_name, legacy_last_name, is_display_name_default,
-            //       display_name_next_update } }
-            //   and enqueue it to m_AgentID via IEventQueue (BuildEvent + Enqueue), so the
-            //   viewer updates. Without it, the change is persisted server-side (verifiable
-            //   via GetDisplayNames / the DB) but the viewer won't reflect it until relog.
-            //   status/reason above already carry the outcome for that reply.
+            // SetDisplayNameReply over the EventQueue. The viewer relies wholly on this async
+            // reply (per the Firestorm source, llviewerdisplayname.cpp: the SetDisplayName
+            // POST's HTTP response is only checked for connection errors), for BOTH success
+            // and failure — so we always send one, or the viewer's dialog hangs with no
+            // feedback. Schema per that source:
+            //   { status:int (200 == success), reason:string (logged only),
+            //     content: { display_name } on success
+            //           or { error_description } on failure }
+            // Note the block is "content", NOT "agent" — the full "agent" record belongs to
+            // the DisplayNameUpdate message (see the Pass B2 note below).
+            IEventQueue eq = m_Scene.RequestModuleInterface<IEventQueue>();
+            if (eq is not null)
+            {
+                OSDMap content = new OSDMap(1);
+                if (status == 200)
+                    content["display_name"] = OSD.FromString(replyDisplayName ?? string.Empty);
+                else
+                    content["error_description"] = OSD.FromString(reason);
+
+                OSDMap body = new OSDMap(3);
+                body["status"] = OSD.FromInteger(status);
+                body["reason"] = OSD.FromString(reason);
+                body["content"] = content;
+
+                eq.Enqueue(eq.BuildEvent("SetDisplayNameReply", body), m_AgentID);
+            }
+
+            // PASS B2 (deferred): DisplayNameUpdate broadcast to OTHER nearby root agents so
+            // their viewers update the changed avatar's tag live, without relog. Deferred
+            // because it needs the full LLAvatarName "agent" record —
+            //   { agent_id, old_display_name,
+            //     agent: { username, display_name, legacy_first_name, legacy_last_name,
+            //              is_display_name_default, display_name_expires,
+            //              display_name_next_update } }
+            // (Firestorm: LLDisplayNameUpdate in llviewerdisplayname.cpp + LLAvatarName::
+            // fromLLSD in llavatarname.cpp) — where the two *_expires/_next_update fields are
+            // LLDate. OSD date construction is unconfirmed in this tree and the broadcast is
+            // untestable headless, so it is not guessed here. Build it as:
+            //   m_Scene.ForEachRootScenePresence(sp => eq.Enqueue(
+            //       eq.BuildEvent("DisplayNameUpdate", body), sp.UUID));
         }
 
         private static bool IsValidDisplayName(string name)
