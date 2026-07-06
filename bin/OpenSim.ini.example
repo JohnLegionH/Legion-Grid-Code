@@ -768,6 +768,25 @@
     ; DisableFacelights = "false"
 
 
+[DisplayNames]
+    ;; SL-style display names: a user can set a custom display name (shown by the viewer
+    ;; instead of the legacy "First Last") which is stored on the account and served via the
+    ;; GetDisplayNames / SetDisplayName caps. HG/foreign users with no local account fall back
+    ;; to the synthesized legacy name.
+    ;
+    ;# {Enabled} {} {Offer the SetDisplayName cap?} {true false} true
+    ;; When false, names are still read (GetDisplayNames) but no one can set one.
+    Enabled = true
+    ;
+    ;# {AllowUserSet} {} {May users set their own display name?} {true false} true
+    ;; When false, the SetDisplayName cap rejects all changes (reserved for future admin-only set).
+    AllowUserSet = true
+    ;
+    ;# {ThrottleDays} {} {Minimum days between display-name changes} {} 3
+    ;; SL default is ~7 days; Legion default is 3. A user's next allowed change is
+    ;; NameChanged + ThrottleDays, reported to the viewer as display_name_next_update.
+    ThrottleDays = 3
+
 [ClientStack.LindenCaps]
     ;; For the long list of capabilities, see OpenSimDefaults.ini
     ;; Here are the few ones you may want to change. Possible values
