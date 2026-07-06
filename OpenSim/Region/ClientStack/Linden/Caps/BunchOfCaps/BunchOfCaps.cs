@@ -283,6 +283,10 @@ namespace OpenSim.Region.ClientStack.Linden
                 {
                     m_HostCapsObj.RegisterSimpleHandler("GetDisplayNames",
                         new SimpleStreamHandler(GetNewCapPath(), GetDisplayNames));
+
+                    if (ConfigOptions.DisplayNamesEnabled && m_userAccountService is not null)
+                        m_HostCapsObj.RegisterSimpleHandler("SetDisplayName",
+                            new SimpleOSDMapHandler("POST", GetNewCapPath(), SetDisplayName));
                 }
             }
             catch (Exception e)
@@ -2235,15 +2239,35 @@ namespace OpenSim.Region.ClientStack.Linden
                             continue;
 
                         string fullname = ud.FirstName + " " + ud.LastName;
+
+                        // Prefer a stored display name from the local account; HG/foreign
+                        // and users who have never set one fall back to the synthesized
+                        // legacy "First Last".
+                        string displayName = fullname;
+                        bool isDefault = true;
+                        DateTime nextUpdate = DateTime.UtcNow;
+                        UserAccount acct = m_userAccountService?.GetUserAccount(m_scopeID, ud.Id);
+                        if (acct is not null)
+                        {
+                            if (!string.IsNullOrEmpty(acct.DisplayName) && acct.DisplayName != fullname)
+                            {
+                                displayName = acct.DisplayName;
+                                isDefault = false;
+                            }
+                            nextUpdate = acct.NameChanged <= 0
+                                ? DateTime.UtcNow
+                                : Util.ToDateTime(acct.NameChanged).AddDays(ConfigOptions.DisplayNamesThrottleDays);
+                        }
+
                         LLSDxmlEncode2.AddMap(lsl);
                         LLSDxmlEncode2.AddElem("username", fullname, lsl);
-                        LLSDxmlEncode2.AddElem("display_name", fullname, lsl);
-                        LLSDxmlEncode2.AddElem("display_name_next_update", DateTime.UtcNow.AddDays(8), lsl);
+                        LLSDxmlEncode2.AddElem("display_name", displayName, lsl);
+                        LLSDxmlEncode2.AddElem("display_name_next_update", nextUpdate, lsl);
                         LLSDxmlEncode2.AddElem("display_name_expires", DateTime.UtcNow.AddMonths(1), lsl);
                         LLSDxmlEncode2.AddElem("legacy_first_name", ud.FirstName, lsl);
                         LLSDxmlEncode2.AddElem("legacy_last_name", ud.LastName, lsl);
                         LLSDxmlEncode2.AddElem("id", ud.Id, lsl);
-                        LLSDxmlEncode2.AddElem("is_display_name_default", true, lsl);
+                        LLSDxmlEncode2.AddElem("is_display_name_default", isDefault, lsl);
                         LLSDxmlEncode2.AddEndMap(lsl);
                     }
                     LLSDxmlEncode2.AddEndArray(lsl);
@@ -2254,6 +2278,107 @@ namespace OpenSim.Region.ClientStack.Linden
             httpResponse.RawBuffer = LLSDxmlEncode2.EndToNBBytes(lsl);
             httpResponse.ContentType = "application/llsd+xml";
             httpResponse.StatusCode = (int)HttpStatusCode.OK;
+        }
+
+        // SL SetDisplayName cap. Request body: { "display_name": [ "<old>", "<new>" ] }.
+        // This pass STORES + THROTTLES only; the async SetDisplayNameReply over the
+        // EventQueue (which makes the viewer actually update) lands in Pass B — until then
+        // the change is persisted but the viewer won't reflect it without a relog/refetch.
+        public void SetDisplayName(IOSHttpRequest httpRequest, IOSHttpResponse httpResponse, OSDMap req)
+        {
+            // The viewer expects an immediate minimal 200; the real result arrives via EQ.
+            httpResponse.StatusCode = (int)HttpStatusCode.OK;
+
+            // These carry into the Pass B EventQueue reply.
+            int status = 200;
+            string reason = "OK";
+
+            try
+            {
+                UserAccount account = m_userAccountService?.GetUserAccount(m_scopeID, m_AgentID);
+                if (account is null)
+                {
+                    status = 400; reason = "No local account";
+                }
+                else if (!ConfigOptions.DisplayNamesAllowUserSet)
+                {
+                    status = 403; reason = "Display name changes are disabled";
+                }
+                else
+                {
+                    string newName = null;
+                    if (req.TryGetValue("display_name", out OSD dnOsd) && dnOsd is OSDArray dnArr && dnArr.Count >= 2)
+                        newName = dnArr[1].AsString();
+
+                    if (newName is null)
+                    {
+                        status = 400; reason = "Malformed request";
+                    }
+                    else
+                    {
+                        newName = newName.Trim();
+                        string legacy = account.FirstName + " " + account.LastName;
+                        bool clearing = newName.Length == 0 || newName == legacy;
+
+                        if (!clearing && (newName.Length > 31 || !IsValidDisplayName(newName)))
+                        {
+                            status = 400; reason = "Invalid display name";
+                        }
+                        else
+                        {
+                            int now = Util.UnixTimeSinceEpoch();
+                            int throttleSecs = ConfigOptions.DisplayNamesThrottleDays * 86400;
+                            // First-ever set (NameChanged == 0) is never throttled.
+                            if (account.NameChanged > 0 && (now - account.NameChanged) < throttleSecs)
+                            {
+                                status = 409; reason = "Too soon since last display name change";
+                            }
+                            else
+                            {
+                                account.DisplayName = clearing ? string.Empty : newName;
+                                account.NameChanged = now;
+                                if (m_userAccountService.StoreUserAccount(account))
+                                    m_userAccountService.InvalidateCache(m_AgentID);
+                                else
+                                {
+                                    status = 500; reason = "Store failed";
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            catch (Exception e)
+            {
+                m_log.Error("[CAPS]: SetDisplayName error: " + e.Message);
+                status = 500; reason = "Server error";
+            }
+
+            // Server-side outcome (Pass A has no EQ reply yet, so this log is how the store/
+            // throttle result is observed until the viewer round-trip exists in Pass B).
+            m_log.InfoFormat("[CAPS]: SetDisplayName for {0}: status {1} ({2})", m_AgentID, status, reason);
+
+            // PASS B: SetDisplayNameReply EventQueue reply goes here.
+            //   Build an OSD event named "SetDisplayNameReply" with body:
+            //     { "reason": <reason>, "status": <status>, "agent": { id, display_name,
+            //       legacy_first_name, legacy_last_name, is_display_name_default,
+            //       display_name_next_update } }
+            //   and enqueue it to m_AgentID via IEventQueue (BuildEvent + Enqueue), so the
+            //   viewer updates. Without it, the change is persisted server-side (verifiable
+            //   via GetDisplayNames / the DB) but the viewer won't reflect it until relog.
+            //   status/reason above already carry the outcome for that reply.
+        }
+
+        private static bool IsValidDisplayName(string name)
+        {
+            if (string.IsNullOrWhiteSpace(name))
+                return false;
+            foreach (char c in name)
+            {
+                if (char.IsControl(c))
+                    return false;
+            }
+            return true;
         }
 
         public class AssetUploader
