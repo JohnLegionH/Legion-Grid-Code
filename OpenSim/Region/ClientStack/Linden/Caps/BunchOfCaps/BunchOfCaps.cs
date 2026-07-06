@@ -2260,6 +2260,9 @@ namespace OpenSim.Region.ClientStack.Linden
                         }
 
                         LLSDxmlEncode2.AddMap(lsl);
+                        // TODO(display-names): SL's "username" is the lowercased "first.last"
+                        // account name, not the display string emitted here. Candidate
+                        // micro-fix (kept separate from the DisplayNameUpdate work).
                         LLSDxmlEncode2.AddElem("username", fullname, lsl);
                         LLSDxmlEncode2.AddElem("display_name", displayName, lsl);
                         LLSDxmlEncode2.AddElem("display_name_next_update", nextUpdate, lsl);
@@ -2293,6 +2296,12 @@ namespace OpenSim.Region.ClientStack.Linden
             int status = 200;
             string reason = "OK";
             string replyDisplayName = null;   // effective new name on success (for the EQ reply)
+
+            // Captured on success for the DisplayNameUpdate broadcast (the message that
+            // actually refreshes the name cache / nametags — see the block after the reply).
+            string updOldName = null, updFirstName = null, updLastName = null;
+            bool updIsDefault = true;
+            DateTime updNextUpdate = DateTime.UtcNow;
 
             try
             {
@@ -2353,6 +2362,13 @@ namespace OpenSim.Region.ClientStack.Linden
                                     // Effective name the viewer should show: the legacy name
                                     // when the custom name was cleared, else the new name.
                                     replyDisplayName = clearing ? legacy : newName;
+                                    // Values for the DisplayNameUpdate broadcast. old name is
+                                    // the previous effective name (prev empty => legacy).
+                                    updOldName = string.IsNullOrEmpty(prevDisplayName) ? legacy : prevDisplayName;
+                                    updFirstName = account.FirstName;
+                                    updLastName = account.LastName;
+                                    updIsDefault = clearing;   // cleared => back to legacy default
+                                    updNextUpdate = DateTime.UtcNow.AddDays(ConfigOptions.DisplayNamesThrottleDays);
                                 }
                                 else
                                 {
@@ -2403,19 +2419,43 @@ namespace OpenSim.Region.ClientStack.Linden
                 eq.Enqueue(eq.BuildEvent("SetDisplayNameReply", body), m_AgentID);
             }
 
-            // PASS B2 (deferred): DisplayNameUpdate broadcast to OTHER nearby root agents so
-            // their viewers update the changed avatar's tag live, without relog. Deferred
-            // because it needs the full LLAvatarName "agent" record —
-            //   { agent_id, old_display_name,
-            //     agent: { username, display_name, legacy_first_name, legacy_last_name,
-            //              is_display_name_default, display_name_expires,
-            //              display_name_next_update } }
-            // (Firestorm: LLDisplayNameUpdate in llviewerdisplayname.cpp + LLAvatarName::
-            // fromLLSD in llavatarname.cpp) — where the two *_expires/_next_update fields are
-            // LLDate. OSD date construction is unconfirmed in this tree and the broadcast is
-            // untestable headless, so it is not guessed here. Build it as:
-            //   m_Scene.ForEachRootScenePresence(sp => eq.Enqueue(
-            //       eq.BuildEvent("DisplayNameUpdate", body), sp.UUID));
+            // DisplayNameUpdate broadcast — the message that actually refreshes the viewer
+            // name cache and rebuilds nametags. SetDisplayNameReply above is dialog-only: per
+            // the Firestorm source its 200 path just fires the success dialog and never
+            // touches LLAvatarNameCache. LLDisplayNameUpdate (llviewerdisplayname.cpp) instead
+            // calls LLAvatarNameCache::insert + LLVOAvatar::invalidateNameTag, and its
+            // "agent_id == gAgent.getID()" branch shows SL sends this to the setter too — so
+            // ForEachRootScenePresence (which includes the setter) refreshes self AND nearby
+            // avatars live, including on a clear (others must see the revert to legacy).
+            // Dates go on the wire as ISO-8601 strings; the viewer's LLDate parses a string and
+            // fails soft to epoch if missing/malformed, and it overrides display_name_expires
+            // anyway (so that field is cosmetic).
+            if (status == 200 && eq is not null && replyDisplayName is not null)
+            {
+                // SL-style username is lowercased "first.last". NOTE: GetDisplayNames still
+                // emits the display string for its "username" field — a separate micro-fix,
+                // deliberately not bundled here (see the TODO there).
+                string username = (updFirstName + "." + updLastName).ToLowerInvariant();
+                string nextUpdateIso = updNextUpdate.ToString("yyyy-MM-ddTHH:mm:ss'Z'");
+                string expiresIso = DateTime.UtcNow.AddDays(1).ToString("yyyy-MM-ddTHH:mm:ss'Z'");
+
+                OSDMap agent = new OSDMap(7);
+                agent["username"] = OSD.FromString(username);
+                agent["display_name"] = OSD.FromString(replyDisplayName);
+                agent["legacy_first_name"] = OSD.FromString(updFirstName);
+                agent["legacy_last_name"] = OSD.FromString(updLastName);
+                agent["is_display_name_default"] = OSD.FromBoolean(updIsDefault);
+                agent["display_name_next_update"] = OSD.FromString(nextUpdateIso);
+                agent["display_name_expires"] = OSD.FromString(expiresIso);
+
+                OSDMap upd = new OSDMap(3);
+                upd["agent_id"] = OSD.FromUUID(m_AgentID);
+                upd["old_display_name"] = OSD.FromString(updOldName ?? string.Empty);
+                upd["agent"] = agent;
+
+                byte[] updateEvent = eq.BuildEvent("DisplayNameUpdate", upd);
+                m_Scene.ForEachRootScenePresence(sp => eq.Enqueue(updateEvent, sp.UUID));
+            }
         }
 
         private static bool IsValidDisplayName(string name)
