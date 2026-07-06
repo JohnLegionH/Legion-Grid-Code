@@ -98,6 +98,12 @@ namespace OpenSim.Services.Interfaces
 
         public int Created;
 
+        // SL display-name support. DisplayName empty => the user has no custom display
+        // name (viewer shows the legacy "First Last"). NameChanged is a unix timestamp of
+        // the last change, used to enforce the change throttle.
+        public string DisplayName = string.Empty;
+        public int NameChanged;
+
         public string Name
         {
             get { return FirstName + " " + LastName; }
@@ -128,6 +134,10 @@ namespace OpenSim.Services.Interfaces
 
             if (kvp.ContainsKey("Created"))
                 Created = Convert.ToInt32(kvp["Created"].ToString());
+            if (kvp.ContainsKey("DisplayName") && kvp["DisplayName"] != null)
+                DisplayName = kvp["DisplayName"].ToString();
+            if (kvp.ContainsKey("NameChanged") && kvp["NameChanged"] != null)
+                Int32.TryParse(kvp["NameChanged"].ToString(), out NameChanged);
             if (kvp.ContainsKey("ServiceURLs") && kvp["ServiceURLs"] != null)
             {
                 ServiceURLs = new Dictionary<string, object>();
@@ -160,6 +170,8 @@ namespace OpenSim.Services.Interfaces
             result["UserTitle"] = UserTitle;
             result["UserCountry"] = UserCountry;
             result["LocalToGrid"] = LocalToGrid.ToString();
+            result["DisplayName"] = DisplayName;
+            result["NameChanged"] = NameChanged.ToString();
 
             string str = string.Empty;
             foreach (KeyValuePair<string, object> kvp in ServiceURLs)

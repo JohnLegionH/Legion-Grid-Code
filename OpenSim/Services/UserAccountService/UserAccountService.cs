@@ -206,6 +206,13 @@ namespace OpenSim.Services.UserAccountService
             else
                 u.UserCountry = string.Empty;
 
+            if (d.Data.ContainsKey("DisplayName") && d.Data["DisplayName"] != null)
+                u.DisplayName = d.Data["DisplayName"].ToString();
+            else
+                u.DisplayName = string.Empty;
+            if (d.Data.ContainsKey("NameChanged") && d.Data["NameChanged"] != null)
+                Int32.TryParse(d.Data["NameChanged"], out u.NameChanged);
+
             if (d.Data.ContainsKey("ServiceURLs") && d.Data["ServiceURLs"] != null)
             {
                 string[] URLs = d.Data["ServiceURLs"].ToString().Split(new char[] { ' ' });
@@ -323,6 +330,11 @@ namespace OpenSim.Services.UserAccountService
                 d.Data["UserTitle"] = data.UserTitle;
             if (!string.IsNullOrEmpty(data.UserCountry))
                 d.Data["UserCountry"] = data.UserCountry;
+            // Always write display-name columns (they exist after the migration). The
+            // generic table handler uses REPLACE INTO, so omitting them would reset the
+            // columns to their defaults on every store.
+            d.Data["DisplayName"] = data.DisplayName ?? string.Empty;
+            d.Data["NameChanged"] = data.NameChanged.ToString();
             List<string> parts = new List<string>();
 
             foreach (KeyValuePair<string, object> kvp in data.ServiceURLs)
