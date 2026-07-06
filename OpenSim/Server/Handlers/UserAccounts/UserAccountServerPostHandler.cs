@@ -108,7 +108,14 @@ namespace OpenSim.Server.Handlers.UserAccounts
                         if (m_AllowSetAccount)
                             return StoreAccount(request);
                         else
+                        {
+                            // Previously a silent rejection: the region saw only a generic
+                            // store failure. Log the actual cause so the AllowSetAccount gate
+                            // is discoverable (the fix itself is a config change:
+                            // AllowSetAccount = true in the UserAccountService section).
+                            m_log.Warn("[USER SERVICE HANDLER]: setaccount rejected because AllowSetAccount is false. Set AllowSetAccount = true in the UserAccountService config to permit remote account stores (e.g. display-name changes).");
                             return FailureResult();
+                        }
                 }
 
                 m_log.DebugFormat("[USER SERVICE HANDLER]: unknown method request: {0}", method);
