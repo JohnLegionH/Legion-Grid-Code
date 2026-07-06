@@ -2335,12 +2335,28 @@ namespace OpenSim.Region.ClientStack.Linden
                             }
                             else
                             {
+                                // Capture originals first: GetUserAccount may return a cached,
+                                // shared instance. If the store fails we must NOT leave it
+                                // mutated in memory (NameChanged set in RAM but 0 in the DB),
+                                // or the next attempt reads the poisoned value and throttles
+                                // with a bogus 409.
+                                string prevDisplayName = account.DisplayName;
+                                int prevNameChanged = account.NameChanged;
+
                                 account.DisplayName = clearing ? string.Empty : newName;
                                 account.NameChanged = now;
+
                                 if (m_userAccountService.StoreUserAccount(account))
+                                {
                                     m_userAccountService.InvalidateCache(m_AgentID);
+                                }
                                 else
                                 {
+                                    // Roll back the in-memory mutation and drop any cached
+                                    // copy so the next read reflects the (unchanged) DB.
+                                    account.DisplayName = prevDisplayName;
+                                    account.NameChanged = prevNameChanged;
+                                    m_userAccountService.InvalidateCache(m_AgentID);
                                     status = 500; reason = "Store failed";
                                 }
                             }
