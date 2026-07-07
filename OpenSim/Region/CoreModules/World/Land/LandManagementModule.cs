@@ -2196,7 +2196,28 @@ namespace OpenSim.Region.CoreModules.World.Land
                 {
                     if(!Util.ParseFakeParcelID(parcelID, out extLandData.RegionHandle,
                                         out extLandData.X, out extLandData.Y))
+                    {
+                        // Not a fake (region+coords) parcel ID. Grid-wide Places/Land search
+                        // results carry the REAL parcel UUID (LandData.GlobalID), which
+                        // ParseFakeParcelID cannot decode. Resolve it against the shared land
+                        // table and locate its region so cross-region parcel info works instead
+                        // of failing with "got no parcelinfo; not sending".
+                        LandData sd = m_scene.SimulationDataService.GetParcelInfoByUUID(parcelID, out UUID sRegionID);
+                        if (sd is null || sRegionID.IsZero())
+                            break;
+
+                        GridRegion sgr = m_scene.GridService.GetRegionByUUID(m_scene.RegionInfo.ScopeID, sRegionID);
+                        if (sgr is null)
+                            break;
+
+                        extLandData.LandData = sd;
+                        extLandData.RegionHandle = sgr.RegionHandle;
+                        extLandData.X = (uint)sd.UserLocation.X;
+                        extLandData.Y = (uint)sd.UserLocation.Y;
+                        extLandData.RegionAccess = (byte)sgr.Access;
+                        data = extLandData;
                         break;
+                    }
 
                     //m_log.DebugFormat("[LAND MANAGEMENT MODULE]: Got parcelinfo request for regionHandle {0}, x/y {1}/{2}",
                     //                extLandData.RegionHandle, extLandData.X, extLandData.Y);

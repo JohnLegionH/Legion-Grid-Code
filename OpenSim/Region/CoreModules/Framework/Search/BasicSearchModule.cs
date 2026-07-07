@@ -144,11 +144,103 @@ namespace OpenSim.Region.CoreModules.Framework.Search
         void EventManager_OnMakeRootAgent(ScenePresence sp)
         {
             sp.ControllingClient.OnDirFindQuery += OnDirFindQuery;
+            sp.ControllingClient.OnDirPlacesQuery += OnDirPlacesQuery;
+            sp.ControllingClient.OnDirLandQuery += OnDirLandQuery;
+            sp.ControllingClient.OnDirPopularQuery += OnDirPopularQuery;
         }
 
         void EventManager_OnMakeChildAgent(ScenePresence sp)
         {
             sp.ControllingClient.OnDirFindQuery -= OnDirFindQuery;
+            sp.ControllingClient.OnDirPlacesQuery -= OnDirPlacesQuery;
+            sp.ControllingClient.OnDirLandQuery -= OnDirLandQuery;
+            sp.ControllingClient.OnDirPopularQuery -= OnDirPopularQuery;
+        }
+
+        // Places / Land Sales / Popular search over the shared land table (grid-wide via
+        // SimulationDataService). Always reply — empty on no-results/short-query — so the
+        // viewer shows "No results" rather than spinning. Slice-1 conventions: DEBUG query
+        // log, page cap 100 (enforced in the data layer), stable ORDER BY for pagination.
+        // NOTE: parcel maturity in SL is the REGION's access level, which is not in the land
+        // table, so Places is not maturity-filtered at the DB here (documented limitation).
+
+        void OnDirPlacesQuery(IClientAPI remoteClient, UUID queryID, string queryText,
+            int queryFlags, int category, string simName, int queryStart)
+        {
+            m_log.DebugFormat("[SEARCH]: DirPlacesQuery '{0}' cat={1} flags={2} start={3}",
+                queryText, category, queryFlags, queryStart);
+
+            List<DirPlacesReplyData> reply = new List<DirPlacesReplyData>();
+
+            // Defensive floor: don't dump the whole grid on an effectively-empty query.
+            if ((string.IsNullOrWhiteSpace(queryText) || queryText.Trim().Length < 2) && category <= 0)
+            {
+                remoteClient.SendDirPlacesReply(queryID, reply.ToArray());
+                return;
+            }
+
+            List<LandData> parcels = m_Scenes[0].SimulationDataService.SearchParcels(
+                queryText == null ? string.Empty : queryText.Trim(), category, (uint)queryFlags, queryStart);
+
+            foreach (LandData ld in parcels)
+            {
+                reply.Add(new DirPlacesReplyData
+                {
+                    parcelID = ld.GlobalID,
+                    name = ld.Name,
+                    forSale = (ld.Flags & (uint)ParcelFlags.ForSale) != 0,
+                    auction = ld.AuctionID != 0,
+                    dwell = ld.Dwell,
+                    Status = 0
+                });
+            }
+            remoteClient.SendDirPlacesReply(queryID, reply.ToArray());
+        }
+
+        void OnDirLandQuery(IClientAPI remoteClient, UUID queryID, uint queryFlags,
+            uint searchType, int price, int area, int queryStart)
+        {
+            m_log.DebugFormat("[SEARCH]: DirLandQuery flags={0} type={1} price={2} area={3} start={4}",
+                queryFlags, searchType, price, area, queryStart);
+
+            List<DirLandReplyData> reply = new List<DirLandReplyData>();
+            List<LandData> parcels = m_Scenes[0].SimulationDataService.SearchLandForSale(
+                searchType, price, area, queryFlags, queryStart);
+
+            foreach (LandData ld in parcels)
+            {
+                reply.Add(new DirLandReplyData
+                {
+                    parcelID = ld.GlobalID,
+                    name = ld.Name,
+                    auction = ld.AuctionID != 0,
+                    forSale = (ld.Flags & (uint)ParcelFlags.ForSale) != 0,
+                    salePrice = ld.SalePrice,
+                    actualArea = ld.Area
+                });
+            }
+            remoteClient.SendDirLandReply(queryID, reply.ToArray());
+        }
+
+        void OnDirPopularQuery(IClientAPI remoteClient, UUID queryID, uint queryFlags)
+        {
+            m_log.DebugFormat("[SEARCH]: DirPopularQuery flags={0}", queryFlags);
+
+            List<DirPopularReplyData> reply = new List<DirPopularReplyData>();
+            // Popular = ShowDirectory parcels ordered by dwell (empty query + DWELL_SORT).
+            List<LandData> parcels = m_Scenes[0].SimulationDataService.SearchParcels(
+                string.Empty, 0, queryFlags | 0x10 /* DWELL_SORT */, 0);
+
+            foreach (LandData ld in parcels)
+            {
+                reply.Add(new DirPopularReplyData
+                {
+                    parcelID = ld.GlobalID,
+                    name = ld.Name,
+                    dwell = ld.Dwell
+                });
+            }
+            remoteClient.SendDirPopularReply(queryID, reply.ToArray());
         }
 
         void OnDirFindQuery(IClientAPI remoteClient, UUID queryID, string queryText, uint queryFlags, int queryStart)
