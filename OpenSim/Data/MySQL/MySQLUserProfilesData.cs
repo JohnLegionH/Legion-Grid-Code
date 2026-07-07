@@ -125,6 +125,72 @@ namespace OpenSim.Data.MySQL
             return data;
         }
 
+        public OSDArray SearchClassifieds(string queryText, int category, uint queryFlags, int queryStart)
+        {
+            OSDArray data = new OSDArray();
+
+            const int pageSize = 100;
+            if (queryStart < 0)
+                queryStart = 0;
+
+            // Maturity: classified `classifiedflags` uses mask 0x4e (PG 0x04, Mature 0x08 +
+            // legacy 0x02, Adult 0x40); the viewer's query flags reuse those bits. Include a
+            // classified when its maturity intersects the requested set. A query with no
+            // maturity bits means "any" (don't filter) rather than "nothing".
+            uint matMask = queryFlags & 0x4e;
+
+            string query =
+                "SELECT classifieduuid, name, classifiedflags, creationdate, expirationdate, priceforlisting " +
+                "FROM classifieds " +
+                "WHERE (name LIKE ?Query OR description LIKE ?Query) " +
+                "AND (?Category = 0 OR category = ?Category) " +
+                "AND expirationdate >= ?Now " +
+                "AND (?MatMask = 0 OR (classifiedflags & ?MatMask) <> 0) " +
+                "ORDER BY name ASC, classifieduuid ASC " +
+                "LIMIT ?Limit OFFSET ?Offset";
+
+            int now = (int)(DateTime.UtcNow - new DateTime(1970, 1, 1)).TotalSeconds;
+
+            using (MySqlConnection dbcon = new MySqlConnection(ConnectionString))
+            {
+                dbcon.Open();
+                using (MySqlCommand cmd = new MySqlCommand(query, dbcon))
+                {
+                    cmd.Parameters.AddWithValue("?Query", "%" + (queryText ?? string.Empty) + "%");
+                    cmd.Parameters.AddWithValue("?Category", category);
+                    cmd.Parameters.AddWithValue("?Now", now);
+                    cmd.Parameters.AddWithValue("?MatMask", matMask);
+                    cmd.Parameters.AddWithValue("?Limit", pageSize);
+                    cmd.Parameters.AddWithValue("?Offset", queryStart);
+
+                    using (MySqlDataReader reader = cmd.ExecuteReader(CommandBehavior.Default))
+                    {
+                        while (reader.Read())
+                        {
+                            try
+                            {
+                                OSDMap n = new OSDMap();
+                                UUID.TryParse(Convert.ToString(reader["classifieduuid"]), out UUID cid);
+                                n.Add("classifieduuid", OSD.FromUUID(cid));
+                                n.Add("name", OSD.FromString(Convert.ToString(reader["name"])));
+                                n.Add("classifiedflags", OSD.FromInteger(Convert.ToInt32(reader["classifiedflags"])));
+                                n.Add("creationdate", OSD.FromInteger(Convert.ToInt32(reader["creationdate"])));
+                                n.Add("expirationdate", OSD.FromInteger(Convert.ToInt32(reader["expirationdate"])));
+                                n.Add("priceforlisting", OSD.FromInteger(Convert.ToInt32(reader["priceforlisting"])));
+                                data.Add(n);
+                            }
+                            catch (Exception e)
+                            {
+                                m_log.ErrorFormat("[PROFILES_DATA]: SearchClassifieds exception {0}", e.Message);
+                            }
+                        }
+                    }
+                }
+                dbcon.Close();
+            }
+            return data;
+        }
+
         public bool UpdateClassifiedRecord(UserClassifiedAdd ad, ref string result)
         {
              const string query = 

@@ -73,6 +73,11 @@ namespace OpenSim.Services.ProfilesService
             return records;
         }
 
+        public OSDArray SearchClassifieds(string queryText, int category, uint queryFlags, int queryStart)
+        {
+            return ProfilesData.SearchClassifieds(queryText, category, queryFlags, queryStart);
+        }
+
         public bool ClassifiedUpdate(UserClassifiedAdd ad, ref string result)
         {
             if(!ProfilesData.UpdateClassifiedRecord(ad, ref result))

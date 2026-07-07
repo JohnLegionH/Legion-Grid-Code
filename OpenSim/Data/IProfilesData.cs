@@ -38,6 +38,10 @@ namespace OpenSim.Data
         OSDArray GetClassifiedRecords(UUID creatorId);
         bool UpdateClassifiedRecord(UserClassifiedAdd ad, ref string result);
         bool DeleteClassifiedRecord(UUID recordId);
+        // Grid-wide classified search behind the viewer's DirClassifiedQuery. Read-only.
+        // Each result map: classifieduuid, name, classifiedflags, creationdate,
+        // expirationdate, priceforlisting.
+        OSDArray SearchClassifieds(string queryText, int category, uint queryFlags, int queryStart);
         OSDArray GetAvatarPicks(UUID avatarId);
         UserProfilePick GetPickInfo(UUID avatarId, UUID pickId);
         bool UpdatePicksRecord(UserProfilePick pick);
