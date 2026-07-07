@@ -1618,6 +1618,17 @@ namespace OpenSim.Region.CoreModules.World.Land
 
         public void ClientOnParcelPropertiesUpdateRequest(LandUpdateArgs args, int localID, IClientAPI remote_client)
         {
+            // Same guard as the CAP path (ProcessPropertiesUpdate): LocalIDs collide across
+            // regions, so a child agent's (neighbor) circuit must not be allowed to edit a
+            // parcel here. Require a ROOT presence in this scene.
+            if (!m_scene.TryGetScenePresence(remote_client.AgentId, out ScenePresence sp) || sp.IsChildAgent)
+            {
+                m_log.WarnFormat(
+                    "[LAND MANAGEMENT MODULE]: Rejecting UDP ParcelPropertiesUpdate for LocalID {0} in {1}: agent {2} is not a root presence here (stale circuit after teleport?).",
+                    localID, m_scene.Name, remote_client.AgentId);
+                return;
+            }
+
             ILandObject land;
             lock (m_landList)
             {
@@ -2010,6 +2021,20 @@ namespace OpenSim.Region.CoreModules.World.Land
             }
 
             int parcelID = properties.LocalID;
+
+            // Parcel LocalIDs are region-local and collide across regions (every full-region
+            // parcel is the same small int), so a stale viewer cap held after a teleport can
+            // POST an About Land save to a NEIGHBOR region where the agent is only a child.
+            // TryGetClient above succeeds for child agents, so it is not enough: require a
+            // ROOT presence in THIS scene or we would corrupt the wrong region's parcel.
+            if (!m_scene.TryGetScenePresence(agentID, out ScenePresence sp) || sp.IsChildAgent)
+            {
+                m_log.WarnFormat(
+                    "[LAND MANAGEMENT MODULE]: Rejecting ParcelPropertiesUpdate for LocalID {0} in {1}: agent {2} is not a root presence here (stale cap after teleport?).",
+                    parcelID, m_scene.Name, agentID);
+                response.StatusCode = (int)HttpStatusCode.Forbidden;
+                return;
+            }
 
             ILandObject land = null;
             lock (m_landList)
