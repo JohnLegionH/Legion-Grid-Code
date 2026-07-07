@@ -148,6 +148,21 @@ namespace OpenSim.Services.SimulationService
             return m_database.LoadLandObjects(regionUUID);
         }
 
+        public List<LandData> SearchParcels(string queryText, int category, uint queryFlags, int queryStart)
+        {
+            return m_database.SearchParcels(queryText, category, queryFlags, queryStart);
+        }
+
+        public List<LandData> SearchLandForSale(uint searchType, int price, int area, uint queryFlags, int queryStart)
+        {
+            return m_database.SearchLandForSale(searchType, price, area, queryFlags, queryStart);
+        }
+
+        public LandData GetParcelInfoByUUID(UUID parcelID, out UUID regionID)
+        {
+            return m_database.GetParcelInfoByUUID(parcelID, out regionID);
+        }
+
         public void StoreRegionSettings(RegionSettings rs)
         {
             m_database.StoreRegionSettings(rs);

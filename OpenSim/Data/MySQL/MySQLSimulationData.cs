@@ -979,6 +979,119 @@ namespace OpenSim.Data.MySQL
             return landData;
         }
 
+        private const uint DFQ_DWELL_SORT = 0x10;   // viewer DirFindQuery dwell-sort flag
+
+        public virtual List<LandData> SearchParcels(string queryText, int category, uint queryFlags, int queryStart)
+        {
+            List<LandData> results = new List<LandData>();
+            const int pageSize = 100;
+            if (queryStart < 0)
+                queryStart = 0;
+            bool dwellSort = (queryFlags & DFQ_DWELL_SORT) != 0;
+            bool hasQuery = !string.IsNullOrWhiteSpace(queryText);
+
+            string sql =
+                "select * from land where (LandFlags & ?ShowDir) <> 0 " +
+                (hasQuery ? "and (Name like ?Q or Description like ?Q) " : string.Empty) +
+                (category > 0 ? "and Category = ?Cat " : string.Empty) +
+                (dwellSort ? "order by Dwell desc, UUID asc " : "order by Name asc, UUID asc ") +
+                "limit ?Limit offset ?Offset";
+
+            lock (m_dbLock)
+            {
+                using (MySqlConnection dbcon = new MySqlConnection(m_connectionString))
+                {
+                    dbcon.Open();
+                    using (MySqlCommand cmd = dbcon.CreateCommand())
+                    {
+                        cmd.CommandText = sql;
+                        cmd.Parameters.AddWithValue("ShowDir", (uint)ParcelFlags.ShowDirectory);
+                        if (hasQuery)
+                            cmd.Parameters.AddWithValue("Q", "%" + queryText + "%");
+                        if (category > 0)
+                            cmd.Parameters.AddWithValue("Cat", category);
+                        cmd.Parameters.AddWithValue("Limit", pageSize);
+                        cmd.Parameters.AddWithValue("Offset", queryStart);
+                        using (IDataReader reader = ExecuteReader(cmd))
+                        {
+                            while (reader.Read())
+                                results.Add(BuildLandData(reader));
+                        }
+                    }
+                    dbcon.Close();
+                }
+            }
+            return results;
+        }
+
+        public virtual List<LandData> SearchLandForSale(uint searchType, int price, int area, uint queryFlags, int queryStart)
+        {
+            List<LandData> results = new List<LandData>();
+            const int pageSize = 100;
+            if (queryStart < 0)
+                queryStart = 0;
+
+            string sql =
+                "select * from land where (LandFlags & ?ForSale) <> 0 " +
+                (price >= 0 ? "and SalePrice <= ?Price " : string.Empty) +
+                (area >= 0 ? "and Area >= ?Area " : string.Empty) +
+                "order by SalePrice asc, UUID asc limit ?Limit offset ?Offset";
+
+            lock (m_dbLock)
+            {
+                using (MySqlConnection dbcon = new MySqlConnection(m_connectionString))
+                {
+                    dbcon.Open();
+                    using (MySqlCommand cmd = dbcon.CreateCommand())
+                    {
+                        cmd.CommandText = sql;
+                        cmd.Parameters.AddWithValue("ForSale", (uint)ParcelFlags.ForSale);
+                        if (price >= 0)
+                            cmd.Parameters.AddWithValue("Price", price);
+                        if (area >= 0)
+                            cmd.Parameters.AddWithValue("Area", area);
+                        cmd.Parameters.AddWithValue("Limit", pageSize);
+                        cmd.Parameters.AddWithValue("Offset", queryStart);
+                        using (IDataReader reader = ExecuteReader(cmd))
+                        {
+                            while (reader.Read())
+                                results.Add(BuildLandData(reader));
+                        }
+                    }
+                    dbcon.Close();
+                }
+            }
+            return results;
+        }
+
+        public virtual LandData GetParcelInfoByUUID(UUID parcelID, out UUID regionID)
+        {
+            regionID = UUID.Zero;
+            LandData land = null;
+            lock (m_dbLock)
+            {
+                using (MySqlConnection dbcon = new MySqlConnection(m_connectionString))
+                {
+                    dbcon.Open();
+                    using (MySqlCommand cmd = dbcon.CreateCommand())
+                    {
+                        cmd.CommandText = "select * from land where UUID = ?UUID";
+                        cmd.Parameters.AddWithValue("UUID", parcelID.ToString());
+                        using (IDataReader reader = ExecuteReader(cmd))
+                        {
+                            if (reader.Read())
+                            {
+                                land = BuildLandData(reader);
+                                UUID.TryParse(reader["RegionUUID"].ToString(), out regionID);
+                            }
+                        }
+                    }
+                    dbcon.Close();
+                }
+            }
+            return land;
+        }
+
         public void Shutdown()
         {
         }

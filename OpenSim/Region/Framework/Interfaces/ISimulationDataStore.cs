@@ -119,6 +119,18 @@ namespace OpenSim.Region.Framework.Interfaces
 
         List<LandData> LoadLandObjects(UUID regionUUID);
 
+        // Grid-wide viewer search over the shared land table (read-only; no schema change).
+        // SearchParcels: ShowDirectory-visible parcels matching queryText (empty = all) and
+        //   category (0 = any); dwell-ordered when the DWELL_SORT query flag is set. Serves
+        //   the Places tab and (empty query) the Popular tab.
+        // SearchLandForSale: ForSale parcels with optional price ceiling / area floor
+        //   (negative = unlimited). Serves the Land Sales tab.
+        // GetParcelInfoByUUID: single parcel by its real GlobalID (for cross-region parcel
+        //   info on a clicked search result), with the parcel's RegionUUID as an out param.
+        List<LandData> SearchParcels(string queryText, int category, uint queryFlags, int queryStart);
+        List<LandData> SearchLandForSale(uint searchType, int price, int area, uint queryFlags, int queryStart);
+        LandData GetParcelInfoByUUID(UUID parcelID, out UUID regionID);
+
         void StoreRegionSettings(RegionSettings rs);
         RegionSettings LoadRegionSettings(UUID regionUUID);
 

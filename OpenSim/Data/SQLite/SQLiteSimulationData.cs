@@ -1029,6 +1029,89 @@ namespace OpenSim.Data.SQLite
             return landDataForRegion;
         }
 
+        private const uint DFQ_DWELL_SORT = 0x10;   // viewer DirFindQuery dwell-sort flag
+
+        public List<LandData> SearchParcels(string queryText, int category, uint queryFlags, int queryStart)
+        {
+            // SQLite holds land in an in-memory DataSet; filter/sort/page in C# since
+            // DataTable.Select has no bitwise operator. Legion runs MySQL; this keeps the
+            // SQLite backend functional/portable.
+            if (queryStart < 0)
+                queryStart = 0;
+            bool dwellSort = (queryFlags & DFQ_DWELL_SORT) != 0;
+            bool hasQuery = !string.IsNullOrWhiteSpace(queryText);
+            string q = hasQuery ? queryText.Trim() : null;
+
+            List<LandData> matches = new List<LandData>();
+            lock (ds)
+            {
+                foreach (DataRow row in ds.Tables["land"].Rows)
+                {
+                    LandData ld = buildLandData(row);
+                    if ((ld.Flags & (uint)ParcelFlags.ShowDirectory) == 0)
+                        continue;
+                    if (hasQuery &&
+                        (ld.Name == null || ld.Name.IndexOf(q, StringComparison.OrdinalIgnoreCase) < 0) &&
+                        (ld.Description == null || ld.Description.IndexOf(q, StringComparison.OrdinalIgnoreCase) < 0))
+                        continue;
+                    if (category > 0 && (int)ld.Category != category)
+                        continue;
+                    matches.Add(ld);
+                }
+            }
+
+            if (dwellSort)
+                matches.Sort((a, b) => b.Dwell.CompareTo(a.Dwell));
+            else
+                matches.Sort((a, b) => string.Compare(a.Name, b.Name, StringComparison.OrdinalIgnoreCase));
+
+            return Page(matches, queryStart, 100);
+        }
+
+        public List<LandData> SearchLandForSale(uint searchType, int price, int area, uint queryFlags, int queryStart)
+        {
+            if (queryStart < 0)
+                queryStart = 0;
+            List<LandData> matches = new List<LandData>();
+            lock (ds)
+            {
+                foreach (DataRow row in ds.Tables["land"].Rows)
+                {
+                    LandData ld = buildLandData(row);
+                    if ((ld.Flags & (uint)ParcelFlags.ForSale) == 0)
+                        continue;
+                    if (price >= 0 && ld.SalePrice > price)
+                        continue;
+                    if (area >= 0 && ld.Area < area)
+                        continue;
+                    matches.Add(ld);
+                }
+            }
+            matches.Sort((a, b) => a.SalePrice.CompareTo(b.SalePrice));
+            return Page(matches, queryStart, 100);
+        }
+
+        public LandData GetParcelInfoByUUID(UUID parcelID, out UUID regionID)
+        {
+            regionID = UUID.Zero;
+            lock (ds)
+            {
+                DataRow[] rows = ds.Tables["land"].Select("UUID = '" + parcelID + "'");
+                if (rows.Length == 0)
+                    return null;
+                UUID.TryParse(rows[0]["RegionUUID"].ToString(), out regionID);
+                return buildLandData(rows[0]);
+            }
+        }
+
+        private static List<LandData> Page(List<LandData> src, int start, int pageSize)
+        {
+            if (start >= src.Count)
+                return new List<LandData>();
+            int count = Math.Min(pageSize, src.Count - start);
+            return src.GetRange(start, count);
+        }
+
         /// <summary>
         ///
         /// </summary>
