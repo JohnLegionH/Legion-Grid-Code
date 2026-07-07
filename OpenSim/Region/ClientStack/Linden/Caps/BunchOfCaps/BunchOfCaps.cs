@@ -283,6 +283,10 @@ namespace OpenSim.Region.ClientStack.Linden
                 {
                     m_HostCapsObj.RegisterSimpleHandler("GetDisplayNames",
                         new SimpleStreamHandler(GetNewCapPath(), GetDisplayNames));
+
+                    if (ConfigOptions.DisplayNamesEnabled && m_userAccountService is not null)
+                        m_HostCapsObj.RegisterSimpleHandler("SetDisplayName",
+                            new SimpleOSDMapHandler("POST", GetNewCapPath(), SetDisplayName));
                 }
             }
             catch (Exception e)
@@ -2235,15 +2239,38 @@ namespace OpenSim.Region.ClientStack.Linden
                             continue;
 
                         string fullname = ud.FirstName + " " + ud.LastName;
+
+                        // Prefer a stored display name from the local account; HG/foreign
+                        // and users who have never set one fall back to the synthesized
+                        // legacy "First Last".
+                        string displayName = fullname;
+                        bool isDefault = true;
+                        DateTime nextUpdate = DateTime.UtcNow;
+                        UserAccount acct = m_userAccountService?.GetUserAccount(m_scopeID, ud.Id);
+                        if (acct is not null)
+                        {
+                            if (!string.IsNullOrEmpty(acct.DisplayName) && acct.DisplayName != fullname)
+                            {
+                                displayName = acct.DisplayName;
+                                isDefault = false;
+                            }
+                            nextUpdate = acct.NameChanged <= 0
+                                ? DateTime.UtcNow
+                                : Util.ToDateTime(acct.NameChanged).AddDays(ConfigOptions.DisplayNamesThrottleDays);
+                        }
+
                         LLSDxmlEncode2.AddMap(lsl);
+                        // TODO(display-names): SL's "username" is the lowercased "first.last"
+                        // account name, not the display string emitted here. Candidate
+                        // micro-fix (kept separate from the DisplayNameUpdate work).
                         LLSDxmlEncode2.AddElem("username", fullname, lsl);
-                        LLSDxmlEncode2.AddElem("display_name", fullname, lsl);
-                        LLSDxmlEncode2.AddElem("display_name_next_update", DateTime.UtcNow.AddDays(8), lsl);
+                        LLSDxmlEncode2.AddElem("display_name", displayName, lsl);
+                        LLSDxmlEncode2.AddElem("display_name_next_update", nextUpdate, lsl);
                         LLSDxmlEncode2.AddElem("display_name_expires", DateTime.UtcNow.AddMonths(1), lsl);
                         LLSDxmlEncode2.AddElem("legacy_first_name", ud.FirstName, lsl);
                         LLSDxmlEncode2.AddElem("legacy_last_name", ud.LastName, lsl);
                         LLSDxmlEncode2.AddElem("id", ud.Id, lsl);
-                        LLSDxmlEncode2.AddElem("is_display_name_default", true, lsl);
+                        LLSDxmlEncode2.AddElem("is_display_name_default", isDefault, lsl);
                         LLSDxmlEncode2.AddEndMap(lsl);
                     }
                     LLSDxmlEncode2.AddEndArray(lsl);
@@ -2254,6 +2281,193 @@ namespace OpenSim.Region.ClientStack.Linden
             httpResponse.RawBuffer = LLSDxmlEncode2.EndToNBBytes(lsl);
             httpResponse.ContentType = "application/llsd+xml";
             httpResponse.StatusCode = (int)HttpStatusCode.OK;
+        }
+
+        // SL SetDisplayName cap. Request body: { "display_name": [ "<old>", "<new>" ] }.
+        // This pass STORES + THROTTLES only; the async SetDisplayNameReply over the
+        // EventQueue (which makes the viewer actually update) lands in Pass B — until then
+        // the change is persisted but the viewer won't reflect it without a relog/refetch.
+        public void SetDisplayName(IOSHttpRequest httpRequest, IOSHttpResponse httpResponse, OSDMap req)
+        {
+            // The viewer expects an immediate minimal 200; the real result arrives via EQ.
+            httpResponse.StatusCode = (int)HttpStatusCode.OK;
+
+            // These carry into the Pass B EventQueue reply.
+            int status = 200;
+            string reason = "OK";
+            string replyDisplayName = null;   // effective new name on success (for the EQ reply)
+
+            // Captured on success for the DisplayNameUpdate broadcast (the message that
+            // actually refreshes the name cache / nametags — see the block after the reply).
+            string updOldName = null, updFirstName = null, updLastName = null;
+            bool updIsDefault = true;
+            DateTime updNextUpdate = DateTime.UtcNow;
+
+            try
+            {
+                UserAccount account = m_userAccountService?.GetUserAccount(m_scopeID, m_AgentID);
+                if (account is null)
+                {
+                    status = 400; reason = "No local account";
+                }
+                else if (!ConfigOptions.DisplayNamesAllowUserSet)
+                {
+                    status = 403; reason = "Display name changes are disabled";
+                }
+                else
+                {
+                    string newName = null;
+                    if (req.TryGetValue("display_name", out OSD dnOsd) && dnOsd is OSDArray dnArr && dnArr.Count >= 2)
+                        newName = dnArr[1].AsString();
+
+                    if (newName is null)
+                    {
+                        status = 400; reason = "Malformed request";
+                    }
+                    else
+                    {
+                        newName = newName.Trim();
+                        string legacy = account.FirstName + " " + account.LastName;
+                        bool clearing = newName.Length == 0 || newName == legacy;
+
+                        if (!clearing && (newName.Length > 31 || !IsValidDisplayName(newName)))
+                        {
+                            status = 400; reason = "Invalid display name";
+                        }
+                        else
+                        {
+                            int now = Util.UnixTimeSinceEpoch();
+                            int throttleSecs = ConfigOptions.DisplayNamesThrottleDays * 86400;
+                            // First-ever set (NameChanged == 0) is never throttled.
+                            if (account.NameChanged > 0 && (now - account.NameChanged) < throttleSecs)
+                            {
+                                status = 409; reason = "Too soon since last display name change";
+                            }
+                            else
+                            {
+                                // Capture originals first: GetUserAccount may return a cached,
+                                // shared instance. If the store fails we must NOT leave it
+                                // mutated in memory (NameChanged set in RAM but 0 in the DB),
+                                // or the next attempt reads the poisoned value and throttles
+                                // with a bogus 409.
+                                string prevDisplayName = account.DisplayName;
+                                int prevNameChanged = account.NameChanged;
+
+                                account.DisplayName = clearing ? string.Empty : newName;
+                                account.NameChanged = now;
+
+                                if (m_userAccountService.StoreUserAccount(account))
+                                {
+                                    m_userAccountService.InvalidateCache(m_AgentID);
+                                    // Effective name the viewer should show: the legacy name
+                                    // when the custom name was cleared, else the new name.
+                                    replyDisplayName = clearing ? legacy : newName;
+                                    // Values for the DisplayNameUpdate broadcast. old name is
+                                    // the previous effective name (prev empty => legacy).
+                                    updOldName = string.IsNullOrEmpty(prevDisplayName) ? legacy : prevDisplayName;
+                                    updFirstName = account.FirstName;
+                                    updLastName = account.LastName;
+                                    updIsDefault = clearing;   // cleared => back to legacy default
+                                    updNextUpdate = DateTime.UtcNow.AddDays(ConfigOptions.DisplayNamesThrottleDays);
+                                }
+                                else
+                                {
+                                    // Roll back the in-memory mutation and drop any cached
+                                    // copy so the next read reflects the (unchanged) DB.
+                                    account.DisplayName = prevDisplayName;
+                                    account.NameChanged = prevNameChanged;
+                                    m_userAccountService.InvalidateCache(m_AgentID);
+                                    status = 500; reason = "Store failed";
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            catch (Exception e)
+            {
+                m_log.Error("[CAPS]: SetDisplayName error: " + e.Message);
+                status = 500; reason = "Server error";
+            }
+
+            m_log.InfoFormat("[CAPS]: SetDisplayName for {0}: status {1} ({2})", m_AgentID, status, reason);
+
+            // SetDisplayNameReply over the EventQueue. The viewer relies wholly on this async
+            // reply (per the Firestorm source, llviewerdisplayname.cpp: the SetDisplayName
+            // POST's HTTP response is only checked for connection errors), for BOTH success
+            // and failure — so we always send one, or the viewer's dialog hangs with no
+            // feedback. Schema per that source:
+            //   { status:int (200 == success), reason:string (logged only),
+            //     content: { display_name } on success
+            //           or { error_description } on failure }
+            // Note the block is "content", NOT "agent" — the full "agent" record belongs to
+            // the DisplayNameUpdate message (see the Pass B2 note below).
+            IEventQueue eq = m_Scene.RequestModuleInterface<IEventQueue>();
+            if (eq is not null)
+            {
+                OSDMap content = new OSDMap(1);
+                if (status == 200)
+                    content["display_name"] = OSD.FromString(replyDisplayName ?? string.Empty);
+                else
+                    content["error_description"] = OSD.FromString(reason);
+
+                OSDMap body = new OSDMap(3);
+                body["status"] = OSD.FromInteger(status);
+                body["reason"] = OSD.FromString(reason);
+                body["content"] = content;
+
+                eq.Enqueue(eq.BuildEvent("SetDisplayNameReply", body), m_AgentID);
+            }
+
+            // DisplayNameUpdate broadcast — the message that actually refreshes the viewer
+            // name cache and rebuilds nametags. SetDisplayNameReply above is dialog-only: per
+            // the Firestorm source its 200 path just fires the success dialog and never
+            // touches LLAvatarNameCache. LLDisplayNameUpdate (llviewerdisplayname.cpp) instead
+            // calls LLAvatarNameCache::insert + LLVOAvatar::invalidateNameTag, and its
+            // "agent_id == gAgent.getID()" branch shows SL sends this to the setter too — so
+            // ForEachRootScenePresence (which includes the setter) refreshes self AND nearby
+            // avatars live, including on a clear (others must see the revert to legacy).
+            // Dates go on the wire as ISO-8601 strings; the viewer's LLDate parses a string and
+            // fails soft to epoch if missing/malformed, and it overrides display_name_expires
+            // anyway (so that field is cosmetic).
+            if (status == 200 && eq is not null && replyDisplayName is not null)
+            {
+                // SL-style username is lowercased "first.last". NOTE: GetDisplayNames still
+                // emits the display string for its "username" field — a separate micro-fix,
+                // deliberately not bundled here (see the TODO there).
+                string username = (updFirstName + "." + updLastName).ToLowerInvariant();
+                string nextUpdateIso = updNextUpdate.ToString("yyyy-MM-ddTHH:mm:ss'Z'");
+                string expiresIso = DateTime.UtcNow.AddDays(1).ToString("yyyy-MM-ddTHH:mm:ss'Z'");
+
+                OSDMap agent = new OSDMap(7);
+                agent["username"] = OSD.FromString(username);
+                agent["display_name"] = OSD.FromString(replyDisplayName);
+                agent["legacy_first_name"] = OSD.FromString(updFirstName);
+                agent["legacy_last_name"] = OSD.FromString(updLastName);
+                agent["is_display_name_default"] = OSD.FromBoolean(updIsDefault);
+                agent["display_name_next_update"] = OSD.FromString(nextUpdateIso);
+                agent["display_name_expires"] = OSD.FromString(expiresIso);
+
+                OSDMap upd = new OSDMap(3);
+                upd["agent_id"] = OSD.FromUUID(m_AgentID);
+                upd["old_display_name"] = OSD.FromString(updOldName ?? string.Empty);
+                upd["agent"] = agent;
+
+                byte[] updateEvent = eq.BuildEvent("DisplayNameUpdate", upd);
+                m_Scene.ForEachRootScenePresence(sp => eq.Enqueue(updateEvent, sp.UUID));
+            }
+        }
+
+        private static bool IsValidDisplayName(string name)
+        {
+            if (string.IsNullOrWhiteSpace(name))
+                return false;
+            foreach (char c in name)
+            {
+                if (char.IsControl(c))
+                    return false;
+            }
+            return true;
         }
 
         public class AssetUploader

@@ -203,8 +203,16 @@ namespace OpenSim.Region.CoreModules.ServiceConnectorsOut.UserAccounts
 
         public override bool StoreUserAccount(UserAccount data)
         {
-            // This remote connector refuses to serve this method
-            return false;
+            // Historically this override was a stub that refused to store (returned false
+            // with no wire call at all). SetDisplayName is the first region-side caller that
+            // needs to persist an account change, so delegate to the inherited connector,
+            // which sends METHOD=setaccount to the UserAccountService and judges success from
+            // the parsed account reply. Access control lives on the Robust side
+            // (the AllowSetAccount gate).
+            bool ok = base.StoreUserAccount(data);
+            if (ok && data is not null)
+                m_Cache.Cache(data.PrincipalID, data);   // reflect the store in the region cache
+            return ok;
         }
 
         #endregion

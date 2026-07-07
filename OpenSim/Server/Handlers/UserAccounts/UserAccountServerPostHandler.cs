@@ -108,7 +108,14 @@ namespace OpenSim.Server.Handlers.UserAccounts
                         if (m_AllowSetAccount)
                             return StoreAccount(request);
                         else
+                        {
+                            // Previously a silent rejection: the region saw only a generic
+                            // store failure. Log the actual cause so the AllowSetAccount gate
+                            // is discoverable (the fix itself is a config change:
+                            // AllowSetAccount = true in the UserAccountService section).
+                            m_log.Warn("[USER SERVICE HANDLER]: setaccount rejected because AllowSetAccount is false. Set AllowSetAccount = true in the UserAccountService config to permit remote account stores (e.g. display-name changes).");
                             return FailureResult();
+                        }
                 }
 
                 m_log.DebugFormat("[USER SERVICE HANDLER]: unknown method request: {0}", method);
@@ -297,6 +304,22 @@ namespace OpenSim.Server.Handlers.UserAccounts
 
             if (request.TryGetValue("UserTitle", out otmp))
                 existingAccount.UserTitle = otmp.ToString();
+
+            // SL display-name fields: without these a successful setaccount would drop the
+            // stored name/timestamp (they are sent in ToKeyValuePairs but were not applied
+            // here). DisplayName mirrors the UserTitle string pattern; NameChanged mirrors
+            // the UserLevel int pattern.
+            if (request.TryGetValue("DisplayName", out otmp))
+                existingAccount.DisplayName = otmp.ToString();
+
+            int nameChanged = 0;
+            if (request.TryGetValue("NameChanged", out otmp) && int.TryParse(otmp.ToString(), out nameChanged))
+                existingAccount.NameChanged = nameChanged;
+
+            // Drive-by: UserCountry is likewise present in ToKeyValuePairs but was missing
+            // from this whitelist, so a setaccount round-trip silently cleared it.
+            if (request.TryGetValue("UserCountry", out otmp))
+                existingAccount.UserCountry = otmp.ToString();
 
             if (!m_UserAccountService.StoreUserAccount(existingAccount))
             {

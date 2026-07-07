@@ -62,6 +62,11 @@ namespace OpenSim.Region.ClientStack.Linden
         public bool AllowCapAttachmentResources = true;
 
         public UUID testAssetsCreatorID = UUID.Zero;
+
+        // [DisplayNames]
+        public bool DisplayNamesEnabled = true;      // whether the SetDisplayName cap is offered
+        public bool DisplayNamesAllowUserSet = true;  // whether users may set their own name
+        public int DisplayNamesThrottleDays = 3;      // minimum days between changes
     }
 
     [Extension(Path = "/OpenSim/RegionModules", NodeName = "RegionModule", Id = "BunchOfCapsModule")]
@@ -155,6 +160,14 @@ namespace OpenSim.Region.ClientStack.Linden
 
                     string AttachmentResourcesUrl = CapsConfig.GetString("Cap_AttachmentResources", "localhost");
                     ConfigOptions.AllowCapAttachmentResources = !string.IsNullOrEmpty(AttachmentResourcesUrl);
+                }
+
+                IConfig displayNamesConfig = config.Configs["DisplayNames"];
+                if (displayNamesConfig is not null)
+                {
+                    ConfigOptions.DisplayNamesEnabled = displayNamesConfig.GetBoolean("Enabled", ConfigOptions.DisplayNamesEnabled);
+                    ConfigOptions.DisplayNamesAllowUserSet = displayNamesConfig.GetBoolean("AllowUserSet", ConfigOptions.DisplayNamesAllowUserSet);
+                    ConfigOptions.DisplayNamesThrottleDays = displayNamesConfig.GetInt("ThrottleDays", ConfigOptions.DisplayNamesThrottleDays);
                 }
 
                 m_Scene.EventManager.OnRegisterCaps += OnRegisterCaps;

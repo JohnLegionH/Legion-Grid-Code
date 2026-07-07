@@ -319,10 +319,43 @@ namespace OpenSim.Services.Connectors
                 sendData[kvp.Key] = kvp.Value.ToString();
             }
 
-            if (SendAndGetReply(sendData) != null)
-                return true;
-            else
+            // Inlined (rather than SendAndGetReply) so a failed store is diagnosable: reads
+            // legitimately return null (user not found), but a store returning false is an
+            // error worth a single WARN that names the URI and classifies the reply. Success
+            // semantics match SendAndGetReply: a "result" account dictionary came back.
+            string uri = m_ServerURI + "/accounts";
+            string reply;
+            try
+            {
+                reply = SynchronousRestFormsRequester.MakeRequest("POST", uri,
+                        ServerUtils.BuildQueryString(sendData), m_Auth);
+            }
+            catch (Exception e)
+            {
+                m_log.WarnFormat("[ACCOUNTS CONNECTOR]: StoreUserAccount to {0} failed: exception: {1}", uri, e.Message);
                 return false;
+            }
+
+            if (string.IsNullOrEmpty(reply))
+            {
+                m_log.WarnFormat("[ACCOUNTS CONNECTOR]: StoreUserAccount to {0} failed: empty reply (is AllowSetAccount enabled on the UserAccountService?)", uri);
+                return false;
+            }
+
+            Dictionary<string, object> replyData = ServerUtils.ParseXmlResponse(reply);
+            string snippet = reply.Length > 200 ? reply.Substring(0, 200) : reply;
+            if (replyData == null)
+            {
+                m_log.WarnFormat("[ACCOUNTS CONNECTOR]: StoreUserAccount to {0} failed: unparseable reply: {1}", uri, snippet);
+                return false;
+            }
+            if (!replyData.ContainsKey("result") || replyData["result"] is not Dictionary<string, object>)
+            {
+                m_log.WarnFormat("[ACCOUNTS CONNECTOR]: StoreUserAccount to {0} failed: reply lacked a result account (AllowSetAccount gate?): {1}", uri, snippet);
+                return false;
+            }
+
+            return true;
         }
 
         /// <summary>
