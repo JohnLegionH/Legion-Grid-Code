@@ -87,6 +87,7 @@ namespace OpenSim.Server.Handlers.Profiles
             JsonRpcProfileHandlers handler = new JsonRpcProfileHandlers(ServiceModule);
 
             Server.AddJsonRPCHandler("avatarclassifiedsrequest", handler.AvatarClassifiedsRequest);
+            Server.AddJsonRPCHandler("dir_classified_query", handler.DirClassifiedQuery);
             Server.AddJsonRPCHandler("classified_update", handler.ClassifiedUpdate);
             Server.AddJsonRPCHandler("classifieds_info_query", handler.ClassifiedInfoRequest);
             Server.AddJsonRPCHandler("classified_delete", handler.ClassifiedDelete);
