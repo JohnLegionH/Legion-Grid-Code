@@ -587,9 +587,13 @@ namespace OpenSim.Region.CoreModules.World.Land
             {
                 newData.Category = args.Category;
 
+                // NOTE: do NOT OR in (1 << 23) here -- that bit is ParcelFlags.LindenHome
+                // (0x800000), which the client must never set/clear. Including it let any
+                // FindPlaces (search) edit silently clear LindenHome, since owner-editable
+                // flags are taken entirely from the incoming word.
                 allowedDelta |= (uint)(ParcelFlags.ShowDirectory |
                         ParcelFlags.AllowPublish |
-                        ParcelFlags.MaturePublish) | (uint)(1 << 23);
+                        ParcelFlags.MaturePublish);
             }
 
             if (m_scenePermissions.CanEditParcelProperties(remote_client.AgentId,this, GroupPowers.LandChangeIdentity, false))

@@ -1659,7 +1659,16 @@ namespace OpenSim.Region.CoreModules.World.Land
         public void ClientOnParcelSelectObjects(int local_id, int request_type,
                                                 List<UUID> returnIDs, IClientAPI remote_client)
         {
-            m_landList[local_id].SendForceObjectSelect(local_id, request_type, returnIDs, remote_client);
+            ILandObject land;
+            lock (m_landList)
+            {
+                // Raw m_landList[local_id] threw KeyNotFoundException on a stale or foreign
+                // LocalID (parcel LocalIDs collide grid-wide). Resolve safely and drop misses.
+                if (!m_landList.TryGetValue(local_id, out land) || land is null)
+                    return;
+            }
+
+            land.SendForceObjectSelect(local_id, request_type, returnIDs, remote_client);
         }
 
         public void ClientOnParcelObjectOwnerRequest(int local_id, IClientAPI remote_client)

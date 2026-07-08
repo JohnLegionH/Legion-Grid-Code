@@ -1485,17 +1485,26 @@ namespace OpenSim.Region.CoreModules.World.Estate
             }
 
             if (reportType != 0)
+            {
                 remoteClient.SendLandStatReply(reportType, requestFlags, 0, new LandStatReportItem[0]);
+                return;
+            }
 
             IScriptModule scriptModule = Scene.RequestModuleInterface<IScriptModule>();
             if (scriptModule == null)
+            {
                 remoteClient.SendLandStatReply(reportType, requestFlags, 0, new LandStatReportItem[0]);
+                return;
+            }
 
             ICollection<ScriptTopStatsData>  sceneData = scriptModule.GetTopObjectStats(
                     0.001f, 1024, out float totaltime, out float totalmemory);
 
             if(sceneData == null || sceneData.Count == 0)
+            {
                 remoteClient.SendLandStatReply(0, requestFlags, 0, new LandStatReportItem[0]);
+                return;
+            }
 
             IUrlModule urlModule = Scene.RequestModuleInterface<IUrlModule>();
 
@@ -1607,7 +1616,10 @@ namespace OpenSim.Region.CoreModules.World.Estate
         private void LandCollidersStatRequest(int parcelID, uint requestFlags, string filter, IClientAPI remoteClient)
         {
             if (!Scene.Permissions.CanIssueEstateCommand(remoteClient.AgentId, false))
+            {
                 remoteClient.SendLandStatReply(1, requestFlags, 0, new LandStatReportItem[0]);
+                return;
+            }
 
             Dictionary<uint, float> sceneData = Scene.PhysicsScene.GetTopColliders();
 
