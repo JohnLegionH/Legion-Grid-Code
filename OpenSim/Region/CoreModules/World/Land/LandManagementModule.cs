@@ -1636,6 +1636,12 @@ namespace OpenSim.Region.CoreModules.World.Land
                     return;
             }
 
+            // Same wire-level flag visibility as the CAP path (ProcessPropertiesUpdate).
+            if (m_log.IsDebugEnabled)
+                m_log.DebugFormat(
+                    "[LAND MANAGEMENT MODULE]: ParcelPropertiesUpdate (UDP) from {0} for parcel {1} in {2}: incoming flags 0x{3:X8}, current 0x{4:X8}",
+                    remote_client.AgentId, localID, m_scene.Name, args.ParcelFlags, land.LandData.Flags);
+
             UpdateLandProperties(land, args, remote_client);
             m_scene.EventManager.TriggerOnParcelPropertiesUpdateRequest(args, localID, remote_client);
         }
@@ -2048,6 +2054,15 @@ namespace OpenSim.Region.CoreModules.World.Land
                 response.StatusCode = (int)HttpStatusCode.NotFound;
                 return;
             }
+
+            // Wire-level visibility for flag persistence diagnosis: log every incoming
+            // flag word against the parcel's current flags so a later update silently
+            // reverting a bit (e.g. ShowDirectory via a stale full-state resend from a
+            // per-control-apply viewer) is visible in the log.
+            if (m_log.IsDebugEnabled)
+                m_log.DebugFormat(
+                    "[LAND MANAGEMENT MODULE]: ParcelPropertiesUpdate (CAP) from {0} for parcel {1} in {2}: incoming flags 0x{3:X8}, current 0x{4:X8}",
+                    agentID, parcelID, m_scene.Name, (uint)properties.ParcelFlags, land.LandData.Flags);
 
             try
             {
