@@ -2333,6 +2333,17 @@ namespace OpenSim.Region.CoreModules.World.Land
 
         public void SetParcelOtherCleanTime(IClientAPI remoteClient, int localID, int otherCleanTime)
         {
+            // LocalID-keyed write (LocalIDs collide grid-wide): require a root presence in
+            // this scene, matching the ParcelPropertiesUpdate guard, so a stale/neighbor
+            // circuit can't mutate the wrong region's parcel.
+            if (!m_scene.TryGetScenePresence(remoteClient.AgentId, out ScenePresence sp) || sp.IsChildAgent)
+            {
+                m_log.WarnFormat(
+                    "[LAND MANAGEMENT MODULE]: Rejecting SetParcelOtherCleanTime for LocalID {0} in {1}: agent {2} is not a root presence here.",
+                    localID, m_scene.Name, remoteClient.AgentId);
+                return;
+            }
+
             ILandObject land;
             lock (m_landList)
             {
@@ -2340,7 +2351,14 @@ namespace OpenSim.Region.CoreModules.World.Land
                     return;
             }
 
-            if (!m_scene.Permissions.CanEditParcelProperties(remoteClient.AgentId, land, GroupPowers.LandOptions, false))
+            // SL enables the auto-return field under any of the three object-return powers
+            // (GP_LAND_RETURN_GROUP_OWNED/GROUP_SET/NON_GROUP), not GP_LAND_OPTIONS
+            // (llfloaterland.cpp:1456-1478). CanEditParcelProperties requires ALL bits of a
+            // single mask, so check each power and allow if any grants it (owner/EM/admin
+            // short-circuit inside). Estate managers may manage returns.
+            if (!m_scene.Permissions.CanEditParcelProperties(remoteClient.AgentId, land, GroupPowers.ReturnGroupOwned, true) &&
+                !m_scene.Permissions.CanEditParcelProperties(remoteClient.AgentId, land, GroupPowers.ReturnGroupSet, true) &&
+                !m_scene.Permissions.CanEditParcelProperties(remoteClient.AgentId, land, GroupPowers.ReturnNonGroup, true))
                 return;
 
             land.LandData.OtherCleanTime = otherCleanTime;

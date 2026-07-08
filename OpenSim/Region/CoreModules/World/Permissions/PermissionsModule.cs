@@ -1164,7 +1164,9 @@ namespace OpenSim.Region.CoreModules.World.Permissions
             DebugPermissionInformation(MethodInfo.GetCurrentMethod().Name);
             if (m_bypassPermissions) return m_bypassPermissionsValue;
 
-            return GenericParcelOwnerPermission(user, parcel, (ulong)GroupPowers.LandRelease, false);
+            // SL allows an estate manager to release ("is_manager_release") a parcel in the
+            // estate, not just the owner -> allowEstateManager = true.
+            return GenericParcelOwnerPermission(user, parcel, (ulong)GroupPowers.LandRelease, true);
         }
 
         private bool CanReclaimParcel(UUID user, ILandObject parcel)
@@ -1172,7 +1174,12 @@ namespace OpenSim.Region.CoreModules.World.Permissions
             DebugPermissionInformation(MethodInfo.GetCurrentMethod().Name);
             if (m_bypassPermissions) return m_bypassPermissionsValue;
 
-            return GenericParcelOwnerPermission(user, parcel, 0,true);
+            // groupPowers must be a real power: passing 0 makes IsGroupMember(...,0) return
+            // true for ANY member with any power (PermissionsModule IsGroupMember), so any
+            // titled member could reclaim group-owned land. Reclaim is a release operation,
+            // so require GP_LAND_RELEASE (verified GroupPowers.LandRelease == 1<<13 ==
+            // GP_LAND_RELEASE in roles_constants.h). Estate managers still allowed.
+            return GenericParcelOwnerPermission(user, parcel, (ulong)GroupPowers.LandRelease, true);
         }
 
         private bool CanDeedParcel(UUID user, ILandObject parcel)
