@@ -143,9 +143,16 @@ namespace OpenSim.Region.CoreModules.Framework.Search
 
         void EventManager_OnMakeRootAgent(ScenePresence sp)
         {
+            // Idempotent subscribe: OnMakeRootAgent can fire more than once for the same
+            // client instance without an intervening OnMakeChildAgent, stacking duplicate
+            // handlers (observed as one viewer Dir* query logged/answered N times).
+            sp.ControllingClient.OnDirFindQuery -= OnDirFindQuery;
             sp.ControllingClient.OnDirFindQuery += OnDirFindQuery;
+            sp.ControllingClient.OnDirPlacesQuery -= OnDirPlacesQuery;
             sp.ControllingClient.OnDirPlacesQuery += OnDirPlacesQuery;
+            sp.ControllingClient.OnDirLandQuery -= OnDirLandQuery;
             sp.ControllingClient.OnDirLandQuery += OnDirLandQuery;
+            sp.ControllingClient.OnDirPopularQuery -= OnDirPopularQuery;
             sp.ControllingClient.OnDirPopularQuery += OnDirPopularQuery;
         }
 
