@@ -540,7 +540,7 @@ namespace OpenSim.Region.CoreModules.World.Land
             // ParcelFlags.ForSaleObjects
             // ParcelFlags.LindenHome
 
-            if (m_scenePermissions.CanEditParcelProperties(remote_client.AgentId, this, GroupPowers.LandOptions, false))
+            if (m_scenePermissions.CanEditParcelProperties(remote_client.AgentId, this, GroupPowers.LandOptions, true))
             {
                 allowedDelta |= (uint)(ParcelFlags.AllowLandmark |
                         ParcelFlags.AllowTerraform |
@@ -583,7 +583,7 @@ namespace OpenSim.Region.CoreModules.World.Land
                 allowedDelta |= (uint)ParcelFlags.ForSale;
             }
 
-            if (m_scenePermissions.CanEditParcelProperties(remote_client.AgentId,this, GroupPowers.FindPlaces, false))
+            if (m_scenePermissions.CanEditParcelProperties(remote_client.AgentId,this, GroupPowers.FindPlaces, true))
             {
                 newData.Category = args.Category;
 
@@ -596,21 +596,21 @@ namespace OpenSim.Region.CoreModules.World.Land
                         ParcelFlags.MaturePublish);
             }
 
-            if (m_scenePermissions.CanEditParcelProperties(remote_client.AgentId,this, GroupPowers.LandChangeIdentity, false))
+            if (m_scenePermissions.CanEditParcelProperties(remote_client.AgentId,this, GroupPowers.LandChangeIdentity, true))
             {
                 newData.Description = args.Desc;
                 newData.Name = args.Name;
                 newData.SnapshotID = args.SnapshotID;
             }
 
-            if (m_scenePermissions.CanEditParcelProperties(remote_client.AgentId,this, GroupPowers.SetLandingPoint, false))
+            if (m_scenePermissions.CanEditParcelProperties(remote_client.AgentId,this, GroupPowers.SetLandingPoint, true))
             {
                 newData.LandingType = args.LandingType;
                 newData.UserLocation = args.UserLocation;
                 newData.UserLookAt = args.UserLookAt;
             }
 
-            if (m_scenePermissions.CanEditParcelProperties(remote_client.AgentId,this, GroupPowers.ChangeMedia, false))
+            if (m_scenePermissions.CanEditParcelProperties(remote_client.AgentId,this, GroupPowers.ChangeMedia, true))
             {
                 newData.MediaAutoScale = args.MediaAutoScale;
                 newData.MediaID = args.MediaID;
@@ -636,7 +636,7 @@ namespace OpenSim.Region.CoreModules.World.Land
             if(!m_estateSettings.TaxFree)
             {
                 // don't allow passes on group owned until we can give money to groups
-                if (!newData.IsGroupOwned && m_scenePermissions.CanEditParcelProperties(remote_client.AgentId,this, GroupPowers.LandManagePasses, false))
+                if (!newData.IsGroupOwned && m_scenePermissions.CanEditParcelProperties(remote_client.AgentId,this, GroupPowers.LandManagePasses, true))
                 {
                     newData.PassHours = args.PassHours;
                     newData.PassPrice = args.PassPrice;
@@ -644,13 +644,13 @@ namespace OpenSim.Region.CoreModules.World.Land
                     allowedDelta |= (uint)ParcelFlags.UsePassList;
                 }
 
-                if (m_scenePermissions.CanEditParcelProperties(remote_client.AgentId, this, GroupPowers.LandManageAllowed, false))
+                if (m_scenePermissions.CanEditParcelProperties(remote_client.AgentId, this, GroupPowers.LandManageAllowed, true))
                 {
                     allowedDelta |= (uint)(ParcelFlags.UseAccessGroup |
                             ParcelFlags.UseAccessList);
                 }
 
-                if (m_scenePermissions.CanEditParcelProperties(remote_client.AgentId, this, GroupPowers.LandManageBanned, false))
+                if (m_scenePermissions.CanEditParcelProperties(remote_client.AgentId, this, GroupPowers.LandManageBanned, true))
                 {
                     allowedDelta |= (uint)(ParcelFlags.UseBanList |
                             ParcelFlags.DenyAnonymous |

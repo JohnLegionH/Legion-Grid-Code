@@ -1412,7 +1412,11 @@ namespace OpenSim.Region.CoreModules.World.Permissions
             DebugPermissionInformation(MethodInfo.GetCurrentMethod().Name);
             if (m_bypassPermissions) return m_bypassPermissionsValue;
 
-            return GenericParcelOwnerPermission(userID, parcel, (ulong)p, false);
+            // Honor the caller's allowManager choice. This was hardcoded to false, silently
+            // discarding the parameter, so appointed estate managers (who are not otherwise
+            // administrators) were denied every parcel-management operation whose caller
+            // deliberately passed true (sale, divide/join, eject/freeze, ...).
+            return GenericParcelOwnerPermission(userID, parcel, (ulong)p, allowManager);
         }
 
         /// <summary>

@@ -713,7 +713,7 @@ namespace OpenSim.Region.CoreModules.World.Land
                     return;
 
                 if (m_scene.Permissions.CanEditParcelProperties(agentID,
-                        land, requiredPowers, false))
+                        land, requiredPowers, true))
                 {
                     land.UpdateAccessList(flags, transactionID, entries);
                 }
