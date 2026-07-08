@@ -120,6 +120,9 @@ namespace OpenSim.Region.Framework.Interfaces
         List<LandData> LoadLandObjects(UUID regionUUID);
 
         // Grid-wide viewer search over the shared land table (read-only; no schema change).
+        // NOTE for anyone writing ad-hoc SQL against LandFlags: ParcelFlags.ShowDirectory is
+        // 0x1000 (1<<12); 0x800 (1<<11) is ParcelFlags.UsePassList. Verify flag constants
+        // against the OpenMetaverse ParcelFlags enum / llparcelflags.h, never from memory.
         // SearchParcels: ShowDirectory-visible parcels matching queryText (empty = all) and
         //   category (0 = any); dwell-ordered when the DWELL_SORT query flag is set. Serves
         //   the Places tab and (empty query) the Popular tab.
