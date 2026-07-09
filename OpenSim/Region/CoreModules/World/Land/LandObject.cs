@@ -540,7 +540,7 @@ namespace OpenSim.Region.CoreModules.World.Land
             // ParcelFlags.ForSaleObjects
             // ParcelFlags.LindenHome
 
-            if (m_scenePermissions.CanEditParcelProperties(remote_client.AgentId, this, GroupPowers.LandOptions, true))
+            if (m_scenePermissions.CanEditParcelProperties(remote_client.AgentId, this, GroupPowers.LandOptions, false))
             {
                 allowedDelta |= (uint)(ParcelFlags.AllowLandmark |
                         ParcelFlags.AllowDamage |
@@ -590,7 +590,7 @@ namespace OpenSim.Region.CoreModules.World.Land
                 allowedDelta |= (uint)ParcelFlags.ForSale;
             }
 
-            if (m_scenePermissions.CanEditParcelProperties(remote_client.AgentId,this, GroupPowers.FindPlaces, true))
+            if (m_scenePermissions.CanEditParcelProperties(remote_client.AgentId,this, GroupPowers.FindPlaces, false))
             {
                 newData.Category = args.Category;
 
@@ -606,7 +606,7 @@ namespace OpenSim.Region.CoreModules.World.Land
                         ParcelFlags.AllowPublish);
             }
 
-            if (m_scenePermissions.CanEditParcelProperties(remote_client.AgentId,this, GroupPowers.LandChangeIdentity, true))
+            if (m_scenePermissions.CanEditParcelProperties(remote_client.AgentId,this, GroupPowers.LandChangeIdentity, false))
             {
                 newData.Description = args.Desc;
                 newData.Name = args.Name;
@@ -617,14 +617,14 @@ namespace OpenSim.Region.CoreModules.World.Land
                 allowedDelta |= (uint)ParcelFlags.MaturePublish;
             }
 
-            if (m_scenePermissions.CanEditParcelProperties(remote_client.AgentId,this, GroupPowers.SetLandingPoint, true))
+            if (m_scenePermissions.CanEditParcelProperties(remote_client.AgentId,this, GroupPowers.SetLandingPoint, false))
             {
                 newData.LandingType = args.LandingType;
                 newData.UserLocation = args.UserLocation;
                 newData.UserLookAt = args.UserLookAt;
             }
 
-            if (m_scenePermissions.CanEditParcelProperties(remote_client.AgentId,this, GroupPowers.ChangeMedia, true))
+            if (m_scenePermissions.CanEditParcelProperties(remote_client.AgentId,this, GroupPowers.ChangeMedia, false))
             {
                 newData.MediaAutoScale = args.MediaAutoScale;
                 newData.MediaID = args.MediaID;
@@ -650,7 +650,7 @@ namespace OpenSim.Region.CoreModules.World.Land
             if(!m_estateSettings.TaxFree)
             {
                 // don't allow passes on group owned until we can give money to groups
-                if (!newData.IsGroupOwned && m_scenePermissions.CanEditParcelProperties(remote_client.AgentId,this, GroupPowers.LandManagePasses, true))
+                if (!newData.IsGroupOwned && m_scenePermissions.CanEditParcelProperties(remote_client.AgentId,this, GroupPowers.LandManagePasses, false))
                 {
                     newData.PassHours = args.PassHours;
                     newData.PassPrice = args.PassPrice;
@@ -658,13 +658,13 @@ namespace OpenSim.Region.CoreModules.World.Land
                     allowedDelta |= (uint)ParcelFlags.UsePassList;
                 }
 
-                if (m_scenePermissions.CanEditParcelProperties(remote_client.AgentId, this, GroupPowers.LandManageAllowed, true))
+                if (m_scenePermissions.CanEditParcelProperties(remote_client.AgentId, this, GroupPowers.LandManageAllowed, false))
                 {
                     allowedDelta |= (uint)(ParcelFlags.UseAccessGroup |
                             ParcelFlags.UseAccessList);
                 }
 
-                if (m_scenePermissions.CanEditParcelProperties(remote_client.AgentId, this, GroupPowers.LandManageBanned, true))
+                if (m_scenePermissions.CanEditParcelProperties(remote_client.AgentId, this, GroupPowers.LandManageBanned, false))
                 {
                     allowedDelta |= (uint)(ParcelFlags.UseBanList |
                             ParcelFlags.DenyAnonymous |
