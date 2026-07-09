@@ -1618,12 +1618,29 @@ namespace OpenSim.Region.CoreModules.World.Land
 
         public void ClientOnParcelPropertiesUpdateRequest(LandUpdateArgs args, int localID, IClientAPI remote_client)
         {
+            // Same guard as the CAP path (ProcessPropertiesUpdate): LocalIDs collide across
+            // regions, so a child agent's (neighbor) circuit must not be allowed to edit a
+            // parcel here. Require a ROOT presence in this scene.
+            if (!m_scene.TryGetScenePresence(remote_client.AgentId, out ScenePresence sp) || sp.IsChildAgent)
+            {
+                m_log.WarnFormat(
+                    "[LAND MANAGEMENT MODULE]: Rejecting UDP ParcelPropertiesUpdate for LocalID {0} in {1}: agent {2} is not a root presence here (stale circuit after teleport?).",
+                    localID, m_scene.Name, remote_client.AgentId);
+                return;
+            }
+
             ILandObject land;
             lock (m_landList)
             {
                 if(!m_landList.TryGetValue(localID, out land) || land is null)
                     return;
             }
+
+            // Same wire-level flag visibility as the CAP path (ProcessPropertiesUpdate).
+            if (m_log.IsDebugEnabled)
+                m_log.DebugFormat(
+                    "[LAND MANAGEMENT MODULE]: ParcelPropertiesUpdate (UDP) from {0} for parcel {1} in {2}: incoming flags 0x{3:X8}, current 0x{4:X8}",
+                    remote_client.AgentId, localID, m_scene.Name, args.ParcelFlags, land.LandData.Flags);
 
             UpdateLandProperties(land, args, remote_client);
             m_scene.EventManager.TriggerOnParcelPropertiesUpdateRequest(args, localID, remote_client);
@@ -1642,7 +1659,16 @@ namespace OpenSim.Region.CoreModules.World.Land
         public void ClientOnParcelSelectObjects(int local_id, int request_type,
                                                 List<UUID> returnIDs, IClientAPI remote_client)
         {
-            m_landList[local_id].SendForceObjectSelect(local_id, request_type, returnIDs, remote_client);
+            ILandObject land;
+            lock (m_landList)
+            {
+                // Raw m_landList[local_id] threw KeyNotFoundException on a stale or foreign
+                // LocalID (parcel LocalIDs collide grid-wide). Resolve safely and drop misses.
+                if (!m_landList.TryGetValue(local_id, out land) || land is null)
+                    return;
+            }
+
+            land.SendForceObjectSelect(local_id, request_type, returnIDs, remote_client);
         }
 
         public void ClientOnParcelObjectOwnerRequest(int local_id, IClientAPI remote_client)
@@ -2011,6 +2037,20 @@ namespace OpenSim.Region.CoreModules.World.Land
 
             int parcelID = properties.LocalID;
 
+            // Parcel LocalIDs are region-local and collide across regions (every full-region
+            // parcel is the same small int), so a stale viewer cap held after a teleport can
+            // POST an About Land save to a NEIGHBOR region where the agent is only a child.
+            // TryGetClient above succeeds for child agents, so it is not enough: require a
+            // ROOT presence in THIS scene or we would corrupt the wrong region's parcel.
+            if (!m_scene.TryGetScenePresence(agentID, out ScenePresence sp) || sp.IsChildAgent)
+            {
+                m_log.WarnFormat(
+                    "[LAND MANAGEMENT MODULE]: Rejecting ParcelPropertiesUpdate for LocalID {0} in {1}: agent {2} is not a root presence here (stale cap after teleport?).",
+                    parcelID, m_scene.Name, agentID);
+                response.StatusCode = (int)HttpStatusCode.Forbidden;
+                return;
+            }
+
             ILandObject land = null;
             lock (m_landList)
             {
@@ -2023,6 +2063,15 @@ namespace OpenSim.Region.CoreModules.World.Land
                 response.StatusCode = (int)HttpStatusCode.NotFound;
                 return;
             }
+
+            // Wire-level visibility for flag persistence diagnosis: log every incoming
+            // flag word against the parcel's current flags so a later update silently
+            // reverting a bit (e.g. ShowDirectory via a stale full-state resend from a
+            // per-control-apply viewer) is visible in the log.
+            if (m_log.IsDebugEnabled)
+                m_log.DebugFormat(
+                    "[LAND MANAGEMENT MODULE]: ParcelPropertiesUpdate (CAP) from {0} for parcel {1} in {2}: incoming flags 0x{3:X8}, current 0x{4:X8}",
+                    agentID, parcelID, m_scene.Name, (uint)properties.ParcelFlags, land.LandData.Flags);
 
             try
             {
@@ -2196,7 +2245,28 @@ namespace OpenSim.Region.CoreModules.World.Land
                 {
                     if(!Util.ParseFakeParcelID(parcelID, out extLandData.RegionHandle,
                                         out extLandData.X, out extLandData.Y))
+                    {
+                        // Not a fake (region+coords) parcel ID. Grid-wide Places/Land search
+                        // results carry the REAL parcel UUID (LandData.GlobalID), which
+                        // ParseFakeParcelID cannot decode. Resolve it against the shared land
+                        // table and locate its region so cross-region parcel info works instead
+                        // of failing with "got no parcelinfo; not sending".
+                        LandData sd = m_scene.SimulationDataService.GetParcelInfoByUUID(parcelID, out UUID sRegionID);
+                        if (sd is null || sRegionID.IsZero())
+                            break;
+
+                        GridRegion sgr = m_scene.GridService.GetRegionByUUID(m_scene.RegionInfo.ScopeID, sRegionID);
+                        if (sgr is null)
+                            break;
+
+                        extLandData.LandData = sd;
+                        extLandData.RegionHandle = sgr.RegionHandle;
+                        extLandData.X = (uint)sd.UserLocation.X;
+                        extLandData.Y = (uint)sd.UserLocation.Y;
+                        extLandData.RegionAccess = (byte)sgr.Access;
+                        data = extLandData;
                         break;
+                    }
 
                     //m_log.DebugFormat("[LAND MANAGEMENT MODULE]: Got parcelinfo request for regionHandle {0}, x/y {1}/{2}",
                     //                extLandData.RegionHandle, extLandData.X, extLandData.Y);
@@ -2263,6 +2333,17 @@ namespace OpenSim.Region.CoreModules.World.Land
 
         public void SetParcelOtherCleanTime(IClientAPI remoteClient, int localID, int otherCleanTime)
         {
+            // LocalID-keyed write (LocalIDs collide grid-wide): require a root presence in
+            // this scene, matching the ParcelPropertiesUpdate guard, so a stale/neighbor
+            // circuit can't mutate the wrong region's parcel.
+            if (!m_scene.TryGetScenePresence(remoteClient.AgentId, out ScenePresence sp) || sp.IsChildAgent)
+            {
+                m_log.WarnFormat(
+                    "[LAND MANAGEMENT MODULE]: Rejecting SetParcelOtherCleanTime for LocalID {0} in {1}: agent {2} is not a root presence here.",
+                    localID, m_scene.Name, remoteClient.AgentId);
+                return;
+            }
+
             ILandObject land;
             lock (m_landList)
             {
@@ -2270,7 +2351,14 @@ namespace OpenSim.Region.CoreModules.World.Land
                     return;
             }
 
-            if (!m_scene.Permissions.CanEditParcelProperties(remoteClient.AgentId, land, GroupPowers.LandOptions, false))
+            // SL enables the auto-return field under any of the three object-return powers
+            // (GP_LAND_RETURN_GROUP_OWNED/GROUP_SET/NON_GROUP), not GP_LAND_OPTIONS
+            // (llfloaterland.cpp:1456-1478). CanEditParcelProperties requires ALL bits of a
+            // single mask, so check each power and allow if any grants it (owner/EM/admin
+            // short-circuit inside). Estate managers may manage returns.
+            if (!m_scene.Permissions.CanEditParcelProperties(remoteClient.AgentId, land, GroupPowers.ReturnGroupOwned, true) &&
+                !m_scene.Permissions.CanEditParcelProperties(remoteClient.AgentId, land, GroupPowers.ReturnGroupSet, true) &&
+                !m_scene.Permissions.CanEditParcelProperties(remoteClient.AgentId, land, GroupPowers.ReturnNonGroup, true))
                 return;
 
             land.LandData.OtherCleanTime = otherCleanTime;

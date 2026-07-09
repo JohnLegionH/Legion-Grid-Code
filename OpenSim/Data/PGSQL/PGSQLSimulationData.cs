@@ -750,6 +750,97 @@ namespace OpenSim.Data.PGSQL
             return LandDataForRegion;
         }
 
+        private const uint DFQ_DWELL_SORT = 0x10;   // viewer DirFindQuery dwell-sort flag
+
+        public List<LandData> SearchParcels(string queryText, int category, uint queryFlags, int queryStart)
+        {
+            List<LandData> results = new List<LandData>();
+            const int pageSize = 100;
+            if (queryStart < 0)
+                queryStart = 0;
+            bool dwellSort = (queryFlags & DFQ_DWELL_SORT) != 0;
+            bool hasQuery = !string.IsNullOrWhiteSpace(queryText);
+
+            string sql = @"select * from land where (""LandFlags"" & :ShowDir) <> 0 " +
+                (hasQuery ? @"and (""Name"" ILIKE :Q or ""Description"" ILIKE :Q) " : string.Empty) +
+                (category > 0 ? @"and ""Category"" = :Cat " : string.Empty) +
+                (dwellSort ? @"order by ""Dwell"" desc, ""UUID"" asc " : @"order by ""Name"" asc, ""UUID"" asc ") +
+                "limit :Limit offset :Offset";
+
+            using (NpgsqlConnection conn = new NpgsqlConnection(m_connectionString))
+            using (NpgsqlCommand cmd = new NpgsqlCommand(sql, conn))
+            {
+                cmd.Parameters.Add(_Database.CreateParameter("ShowDir", (int)ParcelFlags.ShowDirectory));
+                if (hasQuery)
+                    cmd.Parameters.Add(_Database.CreateParameter("Q", "%" + queryText + "%"));
+                if (category > 0)
+                    cmd.Parameters.Add(_Database.CreateParameter("Cat", category));
+                cmd.Parameters.Add(_Database.CreateParameter("Limit", pageSize));
+                cmd.Parameters.Add(_Database.CreateParameter("Offset", queryStart));
+                conn.Open();
+                using (NpgsqlDataReader reader = cmd.ExecuteReader())
+                {
+                    while (reader.Read())
+                        results.Add(BuildLandData(reader));
+                }
+            }
+            return results;
+        }
+
+        public List<LandData> SearchLandForSale(uint searchType, int price, int area, uint queryFlags, int queryStart)
+        {
+            List<LandData> results = new List<LandData>();
+            const int pageSize = 100;
+            if (queryStart < 0)
+                queryStart = 0;
+
+            string sql = @"select * from land where (""LandFlags"" & :ForSale) <> 0 " +
+                (price >= 0 ? @"and ""SalePrice"" <= :Price " : string.Empty) +
+                (area >= 0 ? @"and ""Area"" >= :Area " : string.Empty) +
+                @"order by ""SalePrice"" asc, ""UUID"" asc limit :Limit offset :Offset";
+
+            using (NpgsqlConnection conn = new NpgsqlConnection(m_connectionString))
+            using (NpgsqlCommand cmd = new NpgsqlCommand(sql, conn))
+            {
+                cmd.Parameters.Add(_Database.CreateParameter("ForSale", (int)ParcelFlags.ForSale));
+                if (price >= 0)
+                    cmd.Parameters.Add(_Database.CreateParameter("Price", price));
+                if (area >= 0)
+                    cmd.Parameters.Add(_Database.CreateParameter("Area", area));
+                cmd.Parameters.Add(_Database.CreateParameter("Limit", pageSize));
+                cmd.Parameters.Add(_Database.CreateParameter("Offset", queryStart));
+                conn.Open();
+                using (NpgsqlDataReader reader = cmd.ExecuteReader())
+                {
+                    while (reader.Read())
+                        results.Add(BuildLandData(reader));
+                }
+            }
+            return results;
+        }
+
+        public LandData GetParcelInfoByUUID(UUID parcelID, out UUID regionID)
+        {
+            regionID = UUID.Zero;
+            LandData land = null;
+            string sql = @"select * from land where ""UUID"" = :UUID";
+            using (NpgsqlConnection conn = new NpgsqlConnection(m_connectionString))
+            using (NpgsqlCommand cmd = new NpgsqlCommand(sql, conn))
+            {
+                cmd.Parameters.Add(_Database.CreateParameter("UUID", parcelID));
+                conn.Open();
+                using (NpgsqlDataReader reader = cmd.ExecuteReader())
+                {
+                    if (reader.Read())
+                    {
+                        land = BuildLandData(reader);
+                        UUID.TryParse(reader["RegionUUID"].ToString(), out regionID);
+                    }
+                }
+            }
+            return land;
+        }
+
         /// <summary>
         /// Stores land object with landaccess list.
         /// </summary>

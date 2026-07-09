@@ -125,6 +125,62 @@ namespace OpenSim.Data.SQLite
 
             return data;
         }
+
+        public OSDArray SearchClassifieds(string queryText, int category, uint queryFlags, int queryStart)
+        {
+            OSDArray data = new OSDArray();
+            const int pageSize = 100;
+            if (queryStart < 0)
+                queryStart = 0;
+            // See MySQL impl: maturity mask 0x4e; 0 => any.
+            int matMask = (int)(queryFlags & 0x4e);
+            int now = (int)(DateTime.UtcNow - new DateTime(1970, 1, 1)).TotalSeconds;
+
+            string query =
+                "SELECT classifieduuid, name, classifiedflags, creationdate, expirationdate, priceforlisting " +
+                "FROM classifieds " +
+                "WHERE (name LIKE :Query OR description LIKE :Query) " +
+                "AND (:Category = 0 OR category = :Category) " +
+                "AND expirationdate >= :Now " +
+                "AND (:MatMask = 0 OR (classifiedflags & :MatMask) <> 0) " +
+                "ORDER BY name ASC, classifieduuid ASC " +
+                "LIMIT :Limit OFFSET :Offset";
+
+            using (SqliteCommand cmd = (SqliteCommand)m_connection.CreateCommand())
+            {
+                cmd.CommandText = query;
+                cmd.Parameters.AddWithValue(":Query", "%" + (queryText ?? string.Empty) + "%");
+                cmd.Parameters.AddWithValue(":Category", category);
+                cmd.Parameters.AddWithValue(":Now", now);
+                cmd.Parameters.AddWithValue(":MatMask", matMask);
+                cmd.Parameters.AddWithValue(":Limit", pageSize);
+                cmd.Parameters.AddWithValue(":Offset", queryStart);
+                using (IDataReader reader = cmd.ExecuteReader())
+                {
+                    while (reader.Read())
+                    {
+                        try
+                        {
+                            OSDMap n = new OSDMap();
+                            UUID.TryParse(Convert.ToString(reader["classifieduuid"]), out UUID cid);
+                            n.Add("classifieduuid", OSD.FromUUID(cid));
+                            n.Add("name", OSD.FromString(Convert.ToString(reader["name"])));
+                            n.Add("classifiedflags", OSD.FromInteger(Convert.ToInt32(reader["classifiedflags"])));
+                            n.Add("creationdate", OSD.FromInteger(Convert.ToInt32(reader["creationdate"])));
+                            n.Add("expirationdate", OSD.FromInteger(Convert.ToInt32(reader["expirationdate"])));
+                            n.Add("priceforlisting", OSD.FromInteger(Convert.ToInt32(reader["priceforlisting"])));
+                            data.Add(n);
+                        }
+                        catch (Exception e)
+                        {
+                            m_log.ErrorFormat("[PROFILES_DATA]: SearchClassifieds exception {0}", e.Message);
+                        }
+                    }
+                }
+            }
+            return data;
+        }
+
         public bool UpdateClassifiedRecord(UserClassifiedAdd ad, ref string result)
         {
             string query = string.Empty;

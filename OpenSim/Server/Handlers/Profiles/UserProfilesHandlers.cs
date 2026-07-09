@@ -91,6 +91,27 @@ namespace OpenSim.Server.Handlers
             return true;
         }
 
+        // Grid-wide classified search behind the viewer's DirClassifiedQuery.
+        public bool DirClassifiedQuery(OSDMap json, ref JsonRpcResponse response)
+        {
+            if (!json.TryGetValue("params", out OSD tmp) || tmp is not OSDMap request)
+            {
+                response.Error.Code = ErrorCode.ParseError;
+                response.Error.Message = "Error parsing classified search request";
+                m_log.Debug("[PROFILES HANDLER]: DirClassifiedQuery missing/invalid params");
+                return false;
+            }
+
+            string queryText = request.ContainsKey("queryText") ? request["queryText"].AsString() : string.Empty;
+            int category = request.ContainsKey("category") ? request["category"].AsInteger() : 0;
+            uint queryFlags = request.ContainsKey("queryFlags") ? (uint)request["queryFlags"].AsInteger() : 0;
+            int queryStart = request.ContainsKey("queryStart") ? request["queryStart"].AsInteger() : 0;
+
+            // An empty result set is a valid success (viewer shows "No results"), not an error.
+            response.Result = Service.SearchClassifieds(queryText, category, queryFlags, queryStart);
+            return true;
+        }
+
         public bool ClassifiedUpdate(OSDMap json, ref JsonRpcResponse response)
         {
             OSD tmpParams;

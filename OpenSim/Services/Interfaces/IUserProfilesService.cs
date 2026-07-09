@@ -39,6 +39,8 @@ namespace OpenSim.Services.Interfaces
         bool ClassifiedUpdate(UserClassifiedAdd ad, ref string result);
         bool ClassifiedInfoRequest(ref UserClassifiedAdd ad, ref string result);
         bool ClassifiedDelete(UUID recordId);
+        // Grid-wide classified search for the viewer's DirClassifiedQuery (Search > Classifieds).
+        OSDArray SearchClassifieds(string queryText, int category, uint queryFlags, int queryStart);
         #endregion Classifieds
 
         #region Picks

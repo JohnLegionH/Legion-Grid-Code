@@ -176,6 +176,22 @@ namespace OpenSim.Data.Null
             return new List<LandData>();
         }
 
+        public List<LandData> SearchParcels(string queryText, int category, uint queryFlags, int queryStart)
+        {
+            return new List<LandData>();
+        }
+
+        public List<LandData> SearchLandForSale(uint searchType, int price, int area, uint queryFlags, int queryStart)
+        {
+            return new List<LandData>();
+        }
+
+        public LandData GetParcelInfoByUUID(UUID parcelID, out UUID regionID)
+        {
+            regionID = UUID.Zero;
+            return null;
+        }
+
         public void Shutdown()
         {
         }

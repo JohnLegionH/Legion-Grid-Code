@@ -413,6 +413,7 @@ namespace OpenSim.Region.CoreModules.Avatar.UserProfiles
             client.OnClassifiedInfoUpdate += ClassifiedInfoUpdate;
             client.OnClassifiedInfoRequest += ClassifiedInfoRequest;
             client.OnClassifiedDelete += ClassifiedDelete;
+            client.OnDirClassifiedQuery += DirClassifiedQuery;   // Search > Classifieds tab
 
             // Picks
             client.AddGenericPacketHandler("avatarpicksrequest", PicksRequest);
@@ -445,6 +446,7 @@ namespace OpenSim.Region.CoreModules.Avatar.UserProfiles
             client.OnClassifiedInfoUpdate    -= ClassifiedInfoUpdate;
             client.OnClassifiedInfoRequest   -= ClassifiedInfoRequest;
             client.OnClassifiedDelete        -= ClassifiedDelete;
+            client.OnDirClassifiedQuery      -= DirClassifiedQuery;
 
             // Picks
             client.OnPickInfoUpdate -= PickInfoUpdate;
@@ -581,6 +583,73 @@ namespace OpenSim.Region.CoreModules.Avatar.UserProfiles
             }
 
             remoteClient.SendAvatarClassifiedReply(targetID, classifieds);
+        }
+
+        /// <summary>
+        /// Grid-wide classified search (viewer Search > Classifieds tab). Queries the local
+        /// grid's central UserProfilesService via JSON-RPC and maps results to a
+        /// DirClassifiedReply. Always replies (empty on failure/no-results) so the viewer
+        /// shows "No results" rather than spinning forever.
+        /// </summary>
+        public void DirClassifiedQuery(IClientAPI remoteClient, UUID queryID, string queryText,
+            uint queryFlags, uint category, int queryStart)
+        {
+            List<DirClassifiedReplyData> results = new();
+
+            m_log.DebugFormat("[PROFILES]: DirClassifiedQuery '{0}' cat={1} flags={2} start={3}",
+                queryText, category, queryFlags, queryStart);
+
+            // Defensive floor: don't dump the whole table on an effectively-empty query.
+            if ((string.IsNullOrWhiteSpace(queryText) || queryText.Trim().Length < 2) && category == 0)
+            {
+                remoteClient.SendDirClassifiedReply(queryID, results.ToArray());
+                return;
+            }
+
+            if (string.IsNullOrWhiteSpace(ProfileServerUri))
+            {
+                m_log.Warn("[PROFILES]: DirClassifiedQuery has no ProfileServerUri; returning empty");
+                remoteClient.SendDirClassifiedReply(queryID, results.ToArray());
+                return;
+            }
+
+            OSDMap parameters = new()
+            {
+                {"queryText", OSD.FromString(queryText ?? string.Empty)},
+                {"category", OSD.FromInteger((int)category)},
+                {"queryFlags", OSD.FromInteger((int)queryFlags)},
+                {"queryStart", OSD.FromInteger(queryStart)}
+            };
+
+            OSD osdtmp = parameters;
+            if (!rpc.JsonRpcRequest(ref osdtmp, "dir_classified_query", ProfileServerUri, UUID.Random().ToString()))
+            {
+                m_log.WarnFormat("[PROFILES]: DirClassifiedQuery RPC to {0} failed", ProfileServerUri);
+                remoteClient.SendDirClassifiedReply(queryID, results.ToArray());
+                return;
+            }
+
+            parameters = (OSDMap)osdtmp;
+            if (parameters.TryGetValue("result", out osdtmp) && osdtmp is OSDArray list)
+            {
+                foreach (OSD entry in list)
+                {
+                    if (entry is not OSDMap m)
+                        continue;
+                    results.Add(new DirClassifiedReplyData
+                    {
+                        classifiedID = m["classifieduuid"].AsUUID(),
+                        name = m["name"].AsString(),
+                        classifiedFlags = (byte)m["classifiedflags"].AsInteger(),
+                        creationDate = (uint)m["creationdate"].AsInteger(),
+                        expirationDate = (uint)m["expirationdate"].AsInteger(),
+                        price = m["priceforlisting"].AsInteger(),
+                        Status = 0
+                    });
+                }
+            }
+
+            remoteClient.SendDirClassifiedReply(queryID, results.ToArray());
         }
 
         public void ClassifiedInfoRequest(UUID queryClassifiedID, IClientAPI remoteClient)

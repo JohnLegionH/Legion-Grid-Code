@@ -10936,10 +10936,16 @@ namespace OpenSim.Region.ClientStack.LindenUDP
                     }
                     return;
                 case "colliders":
-                    c.OnLandStatRequest?.Invoke(0, 1, 0, "", c);
+                    if (c.m_scene.Permissions.CanIssueEstateCommand(c.m_agentId, false))
+                        c.OnLandStatRequest?.Invoke(0, 1, 0, "", c);
+                    else
+                        m_log.DebugFormat("[LLCLIENTVIEW]: Denying Top Colliders estate report to non-estate agent {0}", c.m_agentId);
                     return;
                 case "scripts":
-                    c.OnLandStatRequest?.Invoke(0, 0, 0, "", c);
+                    if (c.m_scene.Permissions.CanIssueEstateCommand(c.m_agentId, false))
+                        c.OnLandStatRequest?.Invoke(0, 0, 0, "", c);
+                    else
+                        m_log.DebugFormat("[LLCLIENTVIEW]: Denying Top Scripts estate report to non-estate agent {0}", c.m_agentId);
                     return;
                 case "terrain":
                     if (c.m_scene.Permissions.CanIssueEstateCommand(c.m_agentId, false))

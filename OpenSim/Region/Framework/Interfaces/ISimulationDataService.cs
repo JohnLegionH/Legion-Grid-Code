@@ -107,6 +107,12 @@ namespace OpenSim.Region.Framework.Interfaces
 
         List<LandData> LoadLandObjects(UUID regionUUID);
 
+        // Grid-wide viewer search over the shared land table (read-only). See
+        // ISimulationDataStore for semantics.
+        List<LandData> SearchParcels(string queryText, int category, uint queryFlags, int queryStart);
+        List<LandData> SearchLandForSale(uint searchType, int price, int area, uint queryFlags, int queryStart);
+        LandData GetParcelInfoByUUID(UUID parcelID, out UUID regionID);
+
         void StoreRegionSettings(RegionSettings rs);
         RegionSettings LoadRegionSettings(UUID regionUUID);
 

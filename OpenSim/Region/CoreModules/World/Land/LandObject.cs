@@ -543,7 +543,6 @@ namespace OpenSim.Region.CoreModules.World.Land
             if (m_scenePermissions.CanEditParcelProperties(remote_client.AgentId, this, GroupPowers.LandOptions, false))
             {
                 allowedDelta |= (uint)(ParcelFlags.AllowLandmark |
-                        ParcelFlags.AllowTerraform |
                         ParcelFlags.AllowDamage |
                         ParcelFlags.CreateObjects |
                         ParcelFlags.RestrictPushObject |
@@ -556,6 +555,14 @@ namespace OpenSim.Region.CoreModules.World.Land
                 newData.SeeAVs = args.SeeAVs;
                 newData.AnyAVSounds = args.AnyAVSounds;
                 newData.GroupAVSounds = args.GroupAVSounds;
+            }
+
+            if (m_scenePermissions.CanEditParcelProperties(remote_client.AgentId, this, GroupPowers.LandEdit, false))
+            {
+                // "Allow other residents to terraform" is gated by GP_LAND_EDIT (Toggle Edit
+                // Land, roles_constants.h:95), not GP_LAND_OPTIONS (whose documented set at
+                // :96 excludes terraform).
+                allowedDelta |= (uint)ParcelFlags.AllowTerraform;
             }
 
             if (m_scenePermissions.CanEditParcelProperties(remote_client.AgentId, this, GroupPowers.LandSetSale, true))
@@ -587,9 +594,16 @@ namespace OpenSim.Region.CoreModules.World.Land
             {
                 newData.Category = args.Category;
 
+                // NOTE: do NOT OR in (1 << 23) here -- that bit is ParcelFlags.LindenHome
+                // (0x800000), which the client must never set/clear. Including it let any
+                // FindPlaces (search) edit silently clear LindenHome, since owner-editable
+                // flags are taken entirely from the incoming word.
+                // GP_LAND_FIND_PLACES covers "Show in Find Places" + category only; the
+                // 'Mature' checkbox moved to the ChangeIdentity block below per SL semantics.
+                // ('Publish on the web'/AllowPublish is also ChangeIdentity in SL but is a
+                // dead legacy flag with no viewer UI; left here as a scoped follow-up.)
                 allowedDelta |= (uint)(ParcelFlags.ShowDirectory |
-                        ParcelFlags.AllowPublish |
-                        ParcelFlags.MaturePublish) | (uint)(1 << 23);
+                        ParcelFlags.AllowPublish);
             }
 
             if (m_scenePermissions.CanEditParcelProperties(remote_client.AgentId,this, GroupPowers.LandChangeIdentity, false))
@@ -597,6 +611,10 @@ namespace OpenSim.Region.CoreModules.World.Land
                 newData.Description = args.Desc;
                 newData.Name = args.Name;
                 newData.SnapshotID = args.SnapshotID;
+
+                // 'Mature' checkbox is part of Change Parcel Identity in SL
+                // (GP_LAND_CHANGE_IDENTITY, roles_constants.h:90), not Find Places.
+                allowedDelta |= (uint)ParcelFlags.MaturePublish;
             }
 
             if (m_scenePermissions.CanEditParcelProperties(remote_client.AgentId,this, GroupPowers.SetLandingPoint, false))
