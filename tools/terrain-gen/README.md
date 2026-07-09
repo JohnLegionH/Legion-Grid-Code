@@ -150,8 +150,80 @@ random); no wall-clock or `Math.random` inputs. Cross-machine byte-identity
 additionally assumes the same numpy/scipy build (elementwise float ops are
 deterministic; there are no order-dependent BLAS reductions in the pipeline).
 
+## Vegetation pass (Slice 2)
+
+Two halves: a Python **planner** that decides where trees go (reusing the same
+seed+preset synthesis byproducts — altitude, slope, hydraulic moisture, river
+centreline), and a C# **rezzer** module that plants a plan into a live region.
+
+### 1. Plan (`vegetation_plan.py`)
+
+```
+python vegetation_plan.py --size 1024 --seed 2 --preset ravenmoor-valley \
+    --out elm_veg.json --target-trees 3000
+```
+
+Biome-driven, cluster-based placement (coherent stands, not uniform noise),
+deterministic from the seed. For ravenmoor-valley: dark Cypress/Pine stands on
+mid-altitude slopes, Oak along the riverbanks just above the waterline, sparse
+stunted WinterPine approaching the ~74 m treeline, bare ridge crests, scattered
+WinterAspen for mood, and empty **clearings** (future abbey sites — auto-selected
+flattest mid-altitude spots, or `--clearings "x,y,r;x,y,r"`). Species codes are
+verified against `OpenMetaverse.Tree`.
+
+Outputs:
+- `elm_veg.json` — the plan (`meta` + `clearings` + `trees[]`, each with
+  species/code, x/y/z from the heightfield, scale, z-rotation)
+- `elm_veg.json.preview.png` — **hillshade with species-coloured dots** (red rings
+  = clearings): the human review artifact BEFORE anything rezzes
+
+Budget: `--target-trees` (default 3000; ~2–4k is right for a 1024 region — the SL
+viewer pays per entity), `--max-trees` hard cap. The run reports count + density
+and WARNs at the cap. `--group-uuid` must match the module's `GENERATED_VEG_GROUP`
+(defaults already match).
+
+### 2. Rez (`GeneratedVegetationModule`, C#)
+
+Console commands (act on the `change region`-selected region):
+
+```
+vegetation plant <planfile.json>   # rez the plan's trees (paced, progress/500)
+vegetation clear-generated         # remove ONLY generator-placed trees
+```
+
+Every planted tree is stamped with a dedicated GroupID, so `clear-generated`
+removes only generated content and **never touches hand-placed objects**. Rezzing
+is paced (brief sleep every 200) so the heartbeat doesn't stall.
+
+**Not idempotent:** `plant` twice = duplicates (each rez gets fresh UUIDs). The
+iterate workflow is **clear-generated → plant**.
+
+### Full vegetation loop
+
+```
+# 1. terrain (Slice 1)
+python ravenmoor_terrain.py --size 1024 --seed 2 --out elm.r32
+# 2. plan from the SAME seed+preset
+python vegetation_plan.py  --size 1024 --seed 2 --out elm_veg.json --target-trees 3000
+# 3. review elm_veg.json.preview.png (stands? treeline? riverbanks? clearings?)
+# 4. deploy the complete OpenSim*.dll set + restart (or 'runprebuild' then rebuild
+#    on a fresh clone — CoreModules globs the new .cs automatically)
+# 5. in the region console:
+change region Elm
+terrain load elm.r32
+vegetation plant elm_veg.json      # fly and judge
+vegetation clear-generated         # undo to iterate the plan
+```
+
+### Build / deploy note
+
+`GeneratedVegetationModule.cs` lives under `OpenSim/Region/CoreModules/World/
+Vegetation/`; the CoreModules prebuild globs `*.cs` recursively, so a fresh
+`runprebuild` + build picks it up with no manual csproj edit. Deploy the **complete
+`OpenSim*.dll` set** (it lands in `OpenSim.Region.CoreModules.dll`) — do not
+cherry-pick. No config or schema changes; the module is always-on.
+
 ## Not in this slice
 
-Texture assets, vegetation, OAR packaging (settings fragment only), server-side
-code. See the Slice-0 recon for the follow-on slices (S2 vegetation, S3 prim
-structure grammar, S4 mesh).
+Custom tree/texture assets, OAR packaging, prim structure grammar (S3), mesh (S4).
+See the Slice-0 recon for the follow-on slices.

@@ -170,7 +170,8 @@ def _padN(a, mode):
 
 
 def hydraulic_erosion(b, iters, rain, Kc, Ks, Kd, Ke,
-                      flow_rate=0.5, max_cap=4.0, max_erode=0.4, min_tilt=0.02):
+                      flow_rate=0.5, max_cap=4.0, max_erode=0.4, min_tilt=0.02,
+                      capture_flow=False):
     """Bounded, mass-conserving virtual-pipes hydraulic erosion.
 
     Every term is clamped so the field cannot diverge (an earlier unbounded pipe
@@ -183,6 +184,7 @@ def hydraulic_erosion(b, iters, rain, Kc, Ks, Kd, Ke,
     b = b.astype(np.float64).copy()
     d = np.zeros_like(b)          # water column
     s = np.zeros_like(b)          # suspended sediment
+    flow = np.zeros_like(b) if capture_flow else None   # water throughput (moisture)
     eps = 1e-6
 
     def gather(a, which):
@@ -213,6 +215,8 @@ def hydraulic_erosion(b, iters, rain, Kc, Ks, Kd, Ke,
         soT = s_out * fT / ftot; soB = s_out * fB / ftot
 
         outflow = fL + fR + fT + fB
+        if capture_flow:
+            flow += outflow                               # accumulate throughput
         inflow = gather(fR, "L") + gather(fL, "R") + gather(fB, "T") + gather(fT, "B")
         d = d - outflow + inflow
         s = s - s_out + (gather(soR, "L") + gather(soL, "R")
@@ -228,7 +232,10 @@ def hydraulic_erosion(b, iters, rain, Kc, Ks, Kd, Ke,
         s = np.maximum(s + delta, 0.0)
         d *= (1.0 - Ke)                                   # evaporation
 
-    return (b + s).astype(np.float32)                     # settle sediment
+    settled = (b + s).astype(np.float32)                  # settle sediment
+    if capture_flow:
+        return settled, flow.astype(np.float32)
+    return settled
 
 
 def thermal_erosion(b, iters, talus, factor=0.5):
@@ -449,7 +456,11 @@ def write_settings(path, region, heights, bands, water, textures):
 # --------------------------------------------------------------------------- #
 # Generation
 # --------------------------------------------------------------------------- #
-def generate(size, seed, preset_name, overrides):
+def generate(size, seed, preset_name, overrides, capture=False):
+    """Synthesize a heightfield. Returns (heights, preset, timings, fields).
+    `fields` is None unless capture=True, in which case it carries the synthesis
+    byproducts the vegetation planner needs (slope, moisture/flow, river centreline,
+    altitude) — the data advantage over anything the live scene knows."""
     if preset_name not in PRESETS:
         raise SystemExit("unknown preset '{}'; choose from {}".format(
             preset_name, ", ".join(sorted(PRESETS))))
@@ -475,8 +486,13 @@ def generate(size, seed, preset_name, overrides):
     work = base * p["work_relief"]
 
     t0 = time.time()
-    work = hydraulic_erosion(work, p["hydro_iters"], p["rain"], p["Kc"], p["Ks"],
-                             p["Kd"], p["Ke"])
+    flow = None
+    if capture:
+        work, flow = hydraulic_erosion(work, p["hydro_iters"], p["rain"], p["Kc"],
+                                       p["Ks"], p["Kd"], p["Ke"], capture_flow=True)
+    else:
+        work = hydraulic_erosion(work, p["hydro_iters"], p["rain"], p["Kc"], p["Ks"],
+                                 p["Kd"], p["Ke"])
     t_hydro = time.time() - t0
 
     t0 = time.time()
@@ -497,7 +513,17 @@ def generate(size, seed, preset_name, overrides):
         heights = carve_river_meters(heights, centre, size, p["river_top"],
                                      p["river_bottom"], p["river_hw"], p["river_bank"])
     timings = dict(noise=t_noise, hydraulic=t_hydro, thermal=t_thermal)
-    return heights, p, timings
+
+    fields = None
+    if capture:
+        moist = np.log1p(flow.astype(np.float64))
+        hi = np.percentile(moist, 99.0)
+        moist = np.clip(moist / max(hi, 1e-6), 0.0, 1.0)
+        if _HAVE_SCIPY:
+            moist = gaussian_filter(moist, 1.5)
+        fields = dict(heights=heights, slope=slope_degrees(heights),
+                      moisture=moist.astype(np.float32), centre=centre)
+    return heights, p, timings, fields
 
 
 # --------------------------------------------------------------------------- #
@@ -540,7 +566,7 @@ def main(argv=None):
 
     print("[gen] size={} seed={} preset={}".format(args.size, args.seed, args.preset))
     t0 = time.time()
-    heights, p, timings = generate(args.size, args.seed, args.preset, overrides)
+    heights, p, timings, _ = generate(args.size, args.seed, args.preset, overrides)
     total = time.time() - t0
 
     # --- sanity report ---
