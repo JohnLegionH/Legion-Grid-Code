@@ -111,12 +111,25 @@ namespace OpenSim.Region.CoreModules.World.Vegetation
                 return;
             }
 
-            IVegetationModule veg = scene.RequestModuleInterface<IVegetationModule>();
+            // TWO modules implement IVegetationModule — the core VegetationModule and the
+            // optional TreePopulatorModule. RequestModuleInterface (singular) returns
+            // whichever registered first, so if a STALE OptionalModules.dll wins, our
+            // trees are built by an old AddTree. Prefer the core VegetationModule; and we
+            // force the PCode below regardless, so a stale/variant impl can't leave us
+            // with unrenderable NewTree(111) prims.
+            IVegetationModule veg = null;
+            foreach (IVegetationModule m in scene.RequestModuleInterfaces<IVegetationModule>())
+            {
+                if (m == null) continue;
+                if (m.GetType().Name == "VegetationModule") { veg = m; break; }
+                if (veg == null) veg = m;
+            }
             if (veg == null)
             {
                 MainConsole.Instance.Output("No IVegetationModule on this region.");
                 return;
             }
+            m_log.InfoFormat("[GENVEG]: using IVegetationModule = {0}", veg.GetType().Name);
 
             OSDMap plan;
             OSDArray trees;
@@ -149,6 +162,7 @@ namespace OpenSim.Region.CoreModules.World.Vegetation
             float sy = scene.RegionInfo.RegionSizeY;
 
             int planted = 0, skipped = 0, total = trees.Count;
+            int firstPCode = -1;                             // self-check (see loop end)
             MainConsole.Instance.Output(string.Format(
                 "[GENVEG]: planting {0} trees into {1} …", total, scene.Name));
 
@@ -186,7 +200,21 @@ namespace OpenSim.Region.CoreModules.World.Vegetation
                     SceneObjectGroup sog = veg.AddTree(
                         owner, GENERATED_VEG_GROUP, scale, rot, pos, (Tree)code, false);
                     if (sog != null)
+                    {
+                        // DEFENSIVE: force renderable PCode.Tree(255) whatever the resolved
+                        // AddTree did — a stale/variant impl (e.g. an old TreePopulator in an
+                        // un-redeployed OptionalModules.dll) can otherwise leave NewTree(111),
+                        // which no viewer renders. Persist + re-send the corrected shape.
+                        if (sog.RootPart.Shape.PCode != (byte)PCode.Tree)
+                        {
+                            sog.RootPart.Shape.PCode = (byte)PCode.Tree;
+                            sog.HasGroupChanged = true;
+                            sog.ScheduleGroupForFullUpdate();
+                        }
+                        if (firstPCode < 0)
+                            firstPCode = sog.RootPart.Shape.PCode;
                         sog.Name = NAME_PREFIX + (Tree)code;
+                    }
                     else
                         skipped++;
                 }
@@ -205,10 +233,18 @@ namespace OpenSim.Region.CoreModules.World.Vegetation
                     Thread.Sleep(PACE_SLEEP_MS);                 // let the heartbeat breathe
             }
 
+            // Self-check: the first tree's actual persisted PCode. 255 = Tree (renderable);
+            // 111 = NewTree (invisible) — if this ever logs 111 the shape write regressed,
+            // so it can never again cost an operator a plant/inspect/deploy loop to notice.
+            m_log.InfoFormat(
+                "[GENVEG]: first tree shape.PCode = {0} ({1}) — expect 255/Tree (renderable); "
+                + "111/NewTree renders nowhere.", firstPCode,
+                firstPCode == 255 ? "Tree" : firstPCode == 111 ? "NewTree" : "?");
+
             MainConsole.Instance.Output(string.Format(
-                "[GENVEG]: done — {0} planted, {1} skipped, into {2}. "
+                "[GENVEG]: done — {0} planted (first PCode {1}), {2} skipped, into {3}. "
                 + "(plant is NOT idempotent: clear-generated before re-planting.)",
-                planted, skipped, scene.Name));
+                planted, firstPCode, skipped, scene.Name));
         }
 
         private void HandleClear(string module, string[] cmd)
