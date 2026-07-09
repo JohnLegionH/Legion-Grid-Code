@@ -721,7 +721,11 @@ namespace Phlox.ScriptEngine
         public float GetScriptExecutionTime(List<UUID> itemIDs) => 0f;
         public Dictionary<uint, float> GetObjectScriptsExecutionTimes() => new Dictionary<uint, float>();
         public bool SuspendScript(UUID itemID) => false;
-        public bool ResumeScript(UUID itemID) => false;
+        // Phlox scripts are never rez-suspended (they run on load), so "resume" is a no-op
+        // success. Returning false made SceneObjectPartInventory.ResumeScripts() `continue`
+        // past the changed(CHANGED_OWNER) post, swallowing that event on ownership transfer.
+        // Real transient Suspend/Resume remains a deferred Slice-2 feature.
+        public bool ResumeScript(UUID itemID) => true;
         public int GetScriptsMemory(List<UUID> itemIDs) => 0;
         public ICollection<ScriptTopStatsData> GetTopObjectStats(float minTime, int maxCount,
             out float totalTime, out float memUsage)
