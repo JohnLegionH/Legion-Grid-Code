@@ -557,7 +557,7 @@ namespace OpenSim.Region.CoreModules.World.Land
                 newData.GroupAVSounds = args.GroupAVSounds;
             }
 
-            if (m_scenePermissions.CanEditParcelProperties(remote_client.AgentId, this, GroupPowers.LandEdit, true))
+            if (m_scenePermissions.CanEditParcelProperties(remote_client.AgentId, this, GroupPowers.LandEdit, false))
             {
                 // "Allow other residents to terraform" is gated by GP_LAND_EDIT (Toggle Edit
                 // Land, roles_constants.h:95), not GP_LAND_OPTIONS (whose documented set at
