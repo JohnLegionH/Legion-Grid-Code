@@ -52,6 +52,10 @@ bin/*.db
 bin/*.db-journal
 bin/addin-db-*
 bin/*.dll
+# .NET host config regenerated on every build — churn noise, never runtime-git-dependent
+# (hostfxr reads the on-disk file the build just wrote). Scoped to this pattern only; the
+# tree deliberately tracks other bin/ contents (see the vendored DLL exceptions below).
+bin/*.runtimeconfig.json
 # Vendored OpenMetaverse (libomv fork) binaries — committed so a clean clone builds without a
 # manual pre-copy from legion-grid-webrtc/bin/. Mirrors the upstream WebRTC repo, which also
 # tracks these. To update: copy a new build over these in bin/ and `git add`.
