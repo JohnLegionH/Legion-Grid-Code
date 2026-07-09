@@ -180,8 +180,11 @@ namespace OpenSim.Region.CoreModules.World.Vegetation
 
                 try
                 {
+                    // TRAP: newTree=false => PCode.Tree (255), the renderable kind.
+                    // newTree=true => PCode.NewTree (111), which NO viewer renders
+                    // (the parameter name means the opposite of what you'd expect).
                     SceneObjectGroup sog = veg.AddTree(
-                        owner, GENERATED_VEG_GROUP, scale, rot, pos, (Tree)code, true);
+                        owner, GENERATED_VEG_GROUP, scale, rot, pos, (Tree)code, false);
                     if (sog != null)
                         sog.Name = NAME_PREFIX + (Tree)code;
                     else
