@@ -22,7 +22,7 @@ import time
 import numpy as np
 
 try:
-    from scipy.ndimage import gaussian_filter, map_coordinates
+    from scipy.ndimage import gaussian_filter
     _HAVE_SCIPY = True
 except Exception:                                   # pragma: no cover
     _HAVE_SCIPY = False
@@ -169,104 +169,114 @@ def _padN(a, mode):
     return np.pad(a, 1, mode=mode)
 
 
-def hydraulic_erosion(b, iters, rain, Kc, Ks, Kd, Ke, dt=0.02, min_tilt=0.02,
-                      g=9.81):
-    """Vectorized virtual-pipes hydraulic erosion (Mei et al.), pure numpy for the
-    flow core + scipy semi-Lagrangian sediment advection. Operates in-place on a
-    copy; returns the eroded heightfield. `b` is a working-scale height array."""
-    b = b.astype(np.float32).copy()
-    H, W = b.shape
+def hydraulic_erosion(b, iters, rain, Kc, Ks, Kd, Ke,
+                      flow_rate=0.5, max_cap=4.0, max_erode=0.4, min_tilt=0.02):
+    """Bounded, mass-conserving virtual-pipes hydraulic erosion.
+
+    Every term is clamped so the field cannot diverge (an earlier unbounded pipe
+    model + semi-Lagrangian advection blew up to +-1000 m, producing per-cell
+    spikes): water moves at most `flow_rate`*depth and never more than half the
+    local head (no overshoot); capacity is capped at `max_cap`; erosion/deposition
+    is clamped to +-`max_erode` per step; sediment is transported by the SAME
+    clamped water-flux fractions (conservative, no wild backtracing). Works in
+    float64, returns float32. `b` is a working-scale height array."""
+    b = b.astype(np.float64).copy()
     d = np.zeros_like(b)          # water column
     s = np.zeros_like(b)          # suspended sediment
-    fL = np.zeros_like(b); fR = np.zeros_like(b)
-    fT = np.zeros_like(b); fB = np.zeros_like(b)
-    yy, xx = np.meshgrid(np.arange(H, dtype=np.float32),
-                         np.arange(W, dtype=np.float32), indexing="ij")
-    eps = 1e-8
+    eps = 1e-6
+
+    def gather(a, which):
+        Pa = np.pad(a, 1, mode="constant")
+        if which == "L": return Pa[1:-1, 0:-2]           # left nbr's rightward part
+        if which == "R": return Pa[1:-1, 2:]
+        if which == "T": return Pa[0:-2, 1:-1]
+        return Pa[2:, 1:-1]                               # "B"
 
     for _ in range(iters):
-        d += rain * dt                                   # uniform rain
+        d += rain
+        surf = b + d
+        P = _padN(surf, "edge")
+        oL = np.maximum(surf - P[1:-1, 0:-2], 0.0)
+        oR = np.maximum(surf - P[1:-1, 2:], 0.0)
+        oT = np.maximum(surf - P[0:-2, 1:-1], 0.0)
+        oB = np.maximum(surf - P[2:, 1:-1], 0.0)
+        otot = oL + oR + oT + oB + eps
+        movable = np.minimum(flow_rate * d, 0.5 * otot)   # bounded, no overshoot
+        fL = movable * oL / otot; fR = movable * oR / otot
+        fT = movable * oT / otot; fB = movable * oB / otot
+        fL[:, 0] = 0; fR[:, -1] = 0; fT[0, :] = 0; fB[-1, :] = 0
+        ftot = fL + fR + fT + fB + eps
 
-        ws = b + d
-        P = _padN(ws, "edge")
-        wsL = P[1:-1, 0:-2]; wsR = P[1:-1, 2:]
-        wsT = P[0:-2, 1:-1]; wsB = P[2:, 1:-1]
-
-        k = dt * g                                       # A=l=1
-        fL = np.maximum(0.0, fL + k * (ws - wsL))
-        fR = np.maximum(0.0, fR + k * (ws - wsR))
-        fT = np.maximum(0.0, fT + k * (ws - wsT))
-        fB = np.maximum(0.0, fB + k * (ws - wsB))
-        # closed boundaries: no flux leaves the region
-        fL[:, 0] = 0.0; fR[:, -1] = 0.0; fT[0, :] = 0.0; fB[-1, :] = 0.0
-
-        ftot = fL + fR + fT + fB
-        scale = np.minimum(1.0, d / (ftot * dt + eps))
-        fL *= scale; fR *= scale; fT *= scale; fB *= scale
-
-        inL = _padN(fR, "constant")[1:-1, 0:-2]          # left nbr's rightward flux
-        inR = _padN(fL, "constant")[1:-1, 2:]
-        inT = _padN(fB, "constant")[0:-2, 1:-1]
-        inB = _padN(fT, "constant")[2:, 1:-1]
+        # sediment moves with the same clamped flux (conservative)
+        s_out = s * np.minimum(ftot / (d + eps), 1.0)
+        soL = s_out * fL / ftot; soR = s_out * fR / ftot
+        soT = s_out * fT / ftot; soB = s_out * fB / ftot
 
         outflow = fL + fR + fT + fB
-        inflow = inL + inR + inT + inB
-        d_new = d + dt * (inflow - outflow)
-        d_new = np.maximum(d_new, 0.0)
+        inflow = gather(fR, "L") + gather(fL, "R") + gather(fB, "T") + gather(fT, "B")
+        d = d - outflow + inflow
+        s = s - s_out + (gather(soR, "L") + gather(soL, "R")
+                         + gather(soB, "T") + gather(soT, "B"))
 
-        dbar = np.maximum(0.5 * (d + d_new), eps)
-        u = 0.5 * (inL - fL + fR - inR) / dbar           # +x velocity (cols)
-        v = 0.5 * (inT - fT + fB - inB) / dbar           # +y velocity (rows)
-        d = d_new
-
-        # sediment capacity from local tilt and speed
         gy, gx = np.gradient(b)
         slope = np.sqrt(gx * gx + gy * gy)
         sin_tilt = np.maximum(slope / np.sqrt(1.0 + slope * slope), min_tilt)
-        speed = np.sqrt(u * u + v * v)
-        C = Kc * sin_tilt * speed
+        C = np.minimum(Kc * sin_tilt * outflow, max_cap)  # clamped capacity
+        delta = np.where(C > s, Ks * (C - s), Kd * (C - s))
+        delta = np.clip(delta, -max_erode, max_erode)     # bounded per step
+        b = b - delta
+        s = np.maximum(s + delta, 0.0)
+        d *= (1.0 - Ke)                                   # evaporation
 
-        er = np.where(C > s, Ks * (C - s), 0.0)
-        dep = np.where(s > C, Kd * (s - C), 0.0)
-        er = np.minimum(er, b + 1e3)                     # never dig below sanity
-        b = b - er + dep
-        s = s + er - dep
-
-        # semi-Lagrangian sediment transport
-        if _HAVE_SCIPY:
-            by = yy - v * dt
-            bx = xx - u * dt
-            s = map_coordinates(s, [by, bx], order=1, mode="nearest").astype(np.float32)
-        else:                                            # crude fallback
-            s = s  # leave in place (no advection without scipy)
-
-        d *= (1.0 - Ke * dt)                             # evaporation
-
-    b = b + s                                            # settle remaining sediment
-    return b
+    return (b + s).astype(np.float32)                     # settle sediment
 
 
 def thermal_erosion(b, iters, talus, factor=0.5):
-    """Vectorized thermal weathering: material above the talus slope slides to the
-    lower of its 4 neighbours."""
-    b = b.astype(np.float32).copy()
+    """Vectorized thermal weathering: height differences above the talus threshold
+    relax toward it (scree/talus slopes). Symmetric loss/gain => mass conserved."""
+    b = b.astype(np.float64).copy()
     for _ in range(iters):
         P = _padN(b, "edge")
         nbrs = [P[1:-1, 0:-2], P[1:-1, 2:], P[0:-2, 1:-1], P[2:, 1:-1]]
-        delta = np.zeros_like(b)
+        loss = np.zeros_like(b); gain = np.zeros_like(b)
         for n in nbrs:
-            diff = b - n
-            move = np.where(diff > talus, factor * (diff - talus) * 0.25, 0.0)
-            delta -= move                                # leaves this cell
-        # receive: a cell gains what higher neighbours shed toward it
-        gains = np.zeros_like(b)
-        # recompute symmetric transfer: for each direction, the neighbour that is
-        # higher than us by > talus sends us material
-        for n in nbrs:
-            diff = n - b
-            gains += np.where(diff > talus, factor * (diff - talus) * 0.25, 0.0)
-        b = b + delta + gains
-    return b
+            down = np.maximum(b - n, 0.0)                # we are higher -> shed
+            loss += np.where(down > talus, factor * 0.25 * (down - talus), 0.0)
+            up = np.maximum(n - b, 0.0)                  # nbr higher -> receive
+            gain += np.where(up > talus, factor * 0.25 * (up - talus), 0.0)
+        b = b + gain - loss
+    return b.astype(np.float32)
+
+
+def detail_preserving_smooth(h, sigma, strength):
+    """Blend toward a gaussian only where the field is locally ROUGH, so single-cell
+    spikes are flattened while smooth ridge crests and slopes are preserved. The
+    river is stamped after this, so it is untouched."""
+    if not _HAVE_SCIPY or sigma <= 0:
+        return h
+    sm = gaussian_filter(h, sigma)
+    rough = np.abs(h - sm)
+    w = np.clip(rough / (rough.mean() * strength + 1e-6), 0.0, 1.0)
+    return (h * (1.0 - w) + sm * w).astype(np.float32)
+
+
+def slope_degrees(h, cell=1.0):
+    """Per-cell terrain slope in degrees at `cell` metres/cell."""
+    gy, gx = np.gradient(h.astype(np.float64), cell)
+    return np.degrees(np.arctan(np.sqrt(gx * gx + gy * gy)))
+
+
+def hillshade(h, azimuth_deg=315.0, altitude_deg=45.0, cell=1.0):
+    """Lambertian hillshade (uint8) from a sun at `azimuth` (default NW) — exposes
+    per-cell spikiness that flat grayscale height hides."""
+    gy, gx = np.gradient(h.astype(np.float64), cell)
+    slope = np.arctan(np.sqrt(gx * gx + gy * gy))
+    aspect = np.arctan2(-gy, gx)
+    az = np.radians(360.0 - azimuth_deg + 90.0)
+    alt = np.radians(altitude_deg)
+    shade = (np.sin(alt) * np.cos(slope) +
+             np.cos(alt) * np.sin(slope) * np.cos(az - aspect))
+    return (np.clip(shade, 0.0, 1.0) * 255.0).astype(np.uint8)
 
 
 # --------------------------------------------------------------------------- #
@@ -290,31 +300,39 @@ def remap_percentile(field, anchors):
 # Presets
 # --------------------------------------------------------------------------- #
 # Heights sized to Elm's -100..+100 limits with the fixed 20 m waterline.
+# Design note: at 1 m/cell, RIDGED noise produces near-vertical per-cell spikes,
+# and high-frequency octaves (short wavelength) are the spike source. So the base
+# is low-frequency fBm (few big landforms; features < ~16 m come from erosion, not
+# noise); gothic drama comes from valley DEPTH and ridge HEIGHT (vertical relief),
+# not per-cell steepness. Erosion params feed the bounded hydraulic_erosion().
 PRESETS = {
     "ravenmoor-valley": dict(
-        ridged=True, base_cells=5, octaves=6, gain=0.5, lacunarity=2.0,
+        ridged=False, base_cells=2, octaves=4, gain=0.5, lacunarity=2.0,
         macro="valley", macro_depth=0.55, macro_meander=0.4,
         river_top=19.4, river_bottom=18.4, river_hw=0.014, river_bank=6.0,
-        hydro_iters=90, rain=0.012, Kc=18.0, Ks=0.6, Kd=0.5, Ke=0.015,
-        thermal_iters=40, talus=0.9,
-        work_relief=70.0,
+        hydro_iters=60, rain=0.02, Kc=0.6, Ks=0.3, Kd=0.2, Ke=0.02,
+        thermal_iters=45, talus=1.0,
+        smooth_sigma=1.8, smooth_strength=1.0,
+        work_relief=52.0,
         anchors=[(1, 22), (6, 24), (40, 28), (62, 42),
                  (85, 72), (97, 88), (99.7, 94)],
     ),
     "highlands": dict(
-        ridged=False, base_cells=4, octaves=6, gain=0.5, lacunarity=2.0,
+        ridged=False, base_cells=2, octaves=4, gain=0.5, lacunarity=2.0,
         macro="none",
-        hydro_iters=60, rain=0.010, Kc=12.0, Ks=0.4, Kd=0.4, Ke=0.02,
-        thermal_iters=50, talus=0.7,
-        work_relief=55.0,
+        hydro_iters=55, rain=0.02, Kc=0.5, Ks=0.3, Kd=0.25, Ke=0.02,
+        thermal_iters=50, talus=0.8,
+        smooth_sigma=1.8, smooth_strength=1.0,
+        work_relief=45.0,
         anchors=[(0.5, 16.5), (5, 22), (30, 33), (60, 48), (90, 63), (99, 70)],
     ),
     "islefjord": dict(
-        ridged=True, base_cells=4, octaves=6, gain=0.55, lacunarity=2.0,
+        ridged=False, base_cells=2, octaves=4, gain=0.5, lacunarity=2.0,
         macro="coast", macro_strength=1.0,
-        hydro_iters=70, rain=0.011, Kc=15.0, Ks=0.5, Kd=0.45, Ke=0.018,
-        thermal_iters=35, talus=1.0,
-        work_relief=75.0,
+        hydro_iters=55, rain=0.02, Kc=0.55, Ks=0.3, Kd=0.22, Ke=0.02,
+        thermal_iters=55, talus=0.9,
+        smooth_sigma=2.2, smooth_strength=1.2,
+        work_relief=48.0,
         anchors=[(30, 2), (45, 12), (56, 19), (66, 30),
                  (85, 60), (98, 85), (99.8, 92)],
     ),
@@ -465,14 +483,16 @@ def generate(size, seed, preset_name, overrides):
     work = thermal_erosion(work, p["thermal_iters"], p["talus"])
     t_thermal = time.time() - t0
 
-    if _HAVE_SCIPY:
-        work = gaussian_filter(work, sigma=0.6)          # de-alias erosion speckle
-
     heights = remap_percentile(work, p["anchors"])
 
+    # Detail-preserving smoothing removes per-cell (1-2 m) spikes while keeping
+    # ridge crests/slopes; metre space, before the river carve.
+    heights = detail_preserving_smooth(heights, p.get("smooth_sigma", 0.0),
+                                       p.get("smooth_strength", 1.0))
+
     if macro == "valley":
-        # Stamp the trunk river in metre space (after remap) so its bed is a clean,
-        # continuous sub-waterline surface end to end, immune to erosion bumpiness.
+        # Stamp the trunk river in metre space (after remap+smooth) so its bed is a
+        # clean, continuous sub-waterline surface end to end, immune to bumpiness.
         # Erosion still shaped the valley walls and tributaries feeding toward it.
         heights = carve_river_meters(heights, centre, size, p["river_top"],
                                      p["river_bottom"], p["river_hw"], p["river_bank"])
@@ -531,6 +551,18 @@ def main(argv=None):
     print("[time] noise={:.2f}s hydraulic={:.2f}s thermal={:.2f}s total={:.2f}s"
           .format(timings["noise"], timings["hydraulic"], timings["thermal"], total))
 
+    # --- slope distribution (per-cell, 1 m/cell) — spikiness gate ---
+    slope = slope_degrees(heights, cell=1.0)
+    s_med, s_p90, s_p99 = np.percentile(slope, [50, 90, 99])
+    pct_steep = float((slope > 55.0).mean()) * 100.0
+    print("[slope] median={:.1f} p90={:.1f} p99={:.1f} deg  |  >55deg={:.2f}%  max={:.1f}"
+          .format(s_med, s_p90, s_p99, pct_steep, float(slope.max())))
+
+    spiky = pct_steep > 2.0
+    if spiky:
+        print("[WARN] SPIKY: {:.2f}% of cells exceed 55 deg (>2% gate) — terrain will "
+              "look pointy at avatar scale; retune before loading.".format(pct_steep),
+              file=sys.stderr)
     if hmax > ELM_MAX or hmin < ELM_MIN:
         print("[WARN] heightfield exceeds Elm terrain limits {:.0f}..{:.0f} m "
               "(min={:.2f} max={:.2f}) — clamp or retune before load."
@@ -551,6 +583,12 @@ def main(argv=None):
             print("[png] wrote {} (16-bit grayscale, north-up)".format(png_path))
         else:
             print("[png] Pillow not available — skipped preview", file=sys.stderr)
+        # hillshade exposes per-cell spikiness that flat grayscale hides
+        if _HAVE_PIL:
+            shade = np.flipud(hillshade(heights, azimuth_deg=315.0))
+            hs_path = args.out + ".hillshade.png"
+            Image.fromarray(shade, mode="L").save(hs_path)
+            print("[png] wrote {} (NW-sun hillshade — judge spikiness here)".format(hs_path))
 
     set_path = args.out + ".settings.txt"
     band_lo = float(np.percentile(heights, 8))

@@ -9,26 +9,47 @@ region whose dimensions match the file.
 ## Pipeline
 
 ```
-fBm / ridged Perlin base  ->  macro shaping (valley trough / coast)
-  ->  vectorized virtual-pipes hydraulic erosion  ->  thermal (talus) erosion
-  ->  percentile-anchored remap to metres  ->  [valley: stamp trunk river]
-  ->  RAW32 (.r32) + 16-bit PNG + settings.txt
+low-frequency fBm Perlin base  ->  macro shaping (valley trough / coast)
+  ->  BOUNDED virtual-pipes hydraulic erosion  ->  thermal (talus) erosion
+  ->  percentile-anchored remap to metres  ->  detail-preserving smooth
+  ->  [valley: stamp trunk river]  ->  RAW32 + 16-bit PNG + hillshade + settings
 ```
 
-**Erosion approach:** a fully-vectorized **virtual-pipes** hydraulic model (Mei et
-al.) — pure numpy for the flow/flux core, scipy `map_coordinates` for
-semi-Lagrangian sediment advection — plus vectorized thermal weathering. Chosen
-over particle/droplet erosion because it stays O(cells) per iteration and
-completes 1024² in seconds (droplet erosion crawls at that size in Python). No
-coarse-simulate-then-upsample was needed.
+**Base is low-frequency fBm, not ridged/high-octave noise.** At 1 m/cell, ridged
+noise and short-wavelength octaves produce near-vertical *per-cell* spikes (the
+first cut of this tool was pointy at avatar scale — grayscale previews hid it,
+hillshade and slope stats expose it). So features below ~16 m come from erosion,
+not noise; the gothic drama comes from valley **depth** and ridge **height**
+(vertical relief), not per-cell steepness.
+
+**Erosion is a BOUNDED virtual-pipes model.** Every term is clamped so the field
+cannot diverge: water moves at most `flow_rate`×depth and never overshoots the
+local head; sediment capacity is capped; erosion/deposition is clamped per step;
+sediment is transported by the same clamped water flux (conservative — no
+semi-Lagrangian backtracing, which was the original blow-up to ±1000 m). Pure
+numpy for the flow core; O(cells)/iteration, so 1024² finishes in seconds. Plus
+vectorized thermal (talus) weathering and a **detail-preserving smoothing** pass
+that flattens per-cell roughness only where the field is locally rough, leaving
+ridge crests and slopes intact (the river is stamped afterward, so it survives).
 
 **Runtime (this machine, numpy 1.26 / scipy 1.16):**
 
 | size  | noise | hydraulic | thermal | total |
 |-------|-------|-----------|---------|-------|
-| 256²  | 0.05s | 0.25s     | 0.03s   | ~0.3s |
-| 512²  | 0.23s | 2.6s      | 0.5s    | ~3.3s |
-| 1024² | 0.9s  | 9.9s      | 1.9s    | ~13s  |
+| 256²  | 0.04s | 0.3s      | 0.1s    | ~0.4s |
+| 512²  | 0.2s  | 2.7s      | 1.0s    | ~4s   |
+| 1024² | 0.6s  | 10.7s     | 4.2s    | ~16s  |
+
+## Slope / spikiness gate
+
+Every run reports the per-cell **slope distribution** (median / p90 / p99 / %>55°,
+at 1 m/cell) and **WARNs loudly if >2% of cells exceed 55°** — spiky terrain fails
+the gate before anyone loads it. Healthy output: valley floors <10°, most 15–35°,
+cliffs >50° rare. Current presets: ravenmoor-valley med ~9° (>55° ~0.1%),
+highlands med ~8° (0%), islefjord med ~15° (<2%, steep-but-clean fjord walls).
+
+The `*.hillshade.png` (NW-sun lambertian) is the human check — it reveals
+per-cell spikiness that flat grayscale height cannot.
 
 ## Requirements
 
@@ -60,9 +81,10 @@ full region** (not scattered pools) across seeds.
 python ravenmoor_terrain.py --size 1024 --seed 1 --preset ravenmoor-valley --out ravenmoor.r32
 ```
 
-Outputs three files next to `--out`:
+Outputs four files next to `--out`:
 - `ravenmoor.r32` — the heightfield (1024² = **4,194,304 bytes**; load target)
-- `ravenmoor.r32.png` — 16-bit grayscale preview (north-up), judge without the viewer
+- `ravenmoor.r32.png` — 16-bit grayscale preview (north-up)
+- `ravenmoor.r32.hillshade.png` — NW-sun hillshade; **judge spikiness here** (grayscale hides it)
 - `ravenmoor.r32.settings.txt` — matched `ElevationLow/High` bands, `WaterHeight`,
   texture UUIDs; both human-readable and as a `settings/<Region>.xml` OAR fragment
 
