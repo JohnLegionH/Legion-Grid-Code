@@ -10647,7 +10647,26 @@ namespace OpenSim.Region.ClientStack.LindenUDP
                 UserLookAt = parcelPropertiesPacket.ParcelData.UserLookAt
             };
 
-            c.OnParcelPropertiesUpdateRequest?.Invoke(args, parcelPropertiesPacket.ParcelData.LocalID, c);
+            // The UDP ParcelPropertiesUpdate packet has NO fields for SeeAVs / AnyAVSounds /
+            // GroupAVSounds, so leaving them default (false) would silently disable "See
+            // Avatars" + AV sounds on any UDP-path save. Preserve the parcel's current values
+            // (mirroring how the CAP path defaults these when its keys are absent -> true).
+            int localID = parcelPropertiesPacket.ParcelData.LocalID;
+            ILandObject curr = c.m_scene.LandChannel.GetLandObject(localID);
+            if (curr is not null && curr.LandData is not null)
+            {
+                args.SeeAVs = curr.LandData.SeeAVs;
+                args.AnyAVSounds = curr.LandData.AnyAVSounds;
+                args.GroupAVSounds = curr.LandData.GroupAVSounds;
+            }
+            else
+            {
+                args.SeeAVs = true;
+                args.AnyAVSounds = true;
+                args.GroupAVSounds = true;
+            }
+
+            c.OnParcelPropertiesUpdateRequest?.Invoke(args, localID, c);
         }
 
         private static void HandleParcelSelectObjects(LLClientView c, Packet Pack)
