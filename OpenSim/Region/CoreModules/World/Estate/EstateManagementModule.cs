@@ -92,8 +92,14 @@ namespace OpenSim.Region.CoreModules.World.Estate
             if (config != null)
             {
                 AllowRegionRestartFromClient = config.GetBoolean("AllowRegionRestartFromClient", true);
-                m_ignoreEstateMinorAccessControl = config.GetBoolean("IgnoreEstateMinorAccessControl", true);
-                m_ignoreEstatePaymentAccessControl = config.GetBoolean("IgnoreEstatePaymentAccessControl", true);
+                // Default false so the estate/parcel "Deny Anonymous" / "Deny Age Unverified"
+                // controls actually enforce (SL parity). Set these true to make those
+                // checkboxes inert (the historical OpenSim default). NOTE: enforcement gates on
+                // UserAccount.UserFlags bits Identified(4)/AgeVerified(32) — accounts without
+                // them count as anonymous/unverified, so a ticked Deny-Anonymous blocks every
+                // account that has no payment-info bit set.
+                m_ignoreEstateMinorAccessControl = config.GetBoolean("IgnoreEstateMinorAccessControl", false);
+                m_ignoreEstatePaymentAccessControl = config.GetBoolean("IgnoreEstatePaymentAccessControl", false);
             }
         }
 
