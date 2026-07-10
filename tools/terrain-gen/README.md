@@ -198,6 +198,14 @@ is paced (brief sleep every 200) so the heartbeat doesn't stall.
 **Not idempotent:** `plant` twice = duplicates (each rez gets fresh UUIDs). The
 iterate workflow is **clear-generated → plant**.
 
+**Recommended live config:** set `[Trees] enabled = false` in the live `OpenSim.ini`
+to disable `TreePopulatorModule`'s copse simulation and remove the `IVegetationModule`
+registration ambiguity at the source. The module already prefers the core
+`VegetationModule` by type and forces the renderable PCode regardless, but this is
+belt-and-braces (and you aren't using the copse sim). The plant-done log line reports
+the resolved module and the first tree's PCode (255 = Tree/renderable, 111 =
+NewTree/invisible) so any regression of this class is self-announcing.
+
 ### Full vegetation loop
 
 ```
@@ -218,10 +226,24 @@ vegetation clear-generated         # undo to iterate the plan
 ### Build / deploy note
 
 `GeneratedVegetationModule.cs` lives under `OpenSim/Region/CoreModules/World/
-Vegetation/`; the CoreModules prebuild globs `*.cs` recursively, so a fresh
-`runprebuild` + build picks it up with no manual csproj edit. Deploy the **complete
-`OpenSim*.dll` set** (it lands in `OpenSim.Region.CoreModules.dll`) — do not
-cherry-pick. No config or schema changes; the module is always-on.
+Vegetation/`. **`runprebuild` is FORBIDDEN on this tree** — it clobbers the
+hand-maintained csproj customizations. The generated `.csproj` files are gitignored
+but must NOT be regenerated, so a fresh clone must add the compile include **by
+hand**. In `OpenSim/Region/CoreModules/OpenSim.Region.CoreModules.csproj`, next to
+the existing `VegetationModule.cs` include, add:
+
+```xml
+    <Compile Include="World\Vegetation\GeneratedVegetationModule.cs">
+      <SubType>Code</SubType>
+    </Compile>
+```
+
+Then build the solution normally. Deploy the **complete `OpenSim*.dll` set** — do NOT
+cherry-pick a single DLL. In particular `IVegetationModule` is implemented by BOTH
+`OpenSim.Region.CoreModules.dll` (the core VegetationModule this module prefers) and
+`OpenSim.Region.OptionalModules.dll` (TreePopulatorModule); deploying only one led to
+a stale sibling being resolved and trees rezzing as unrenderable PCode.NewTree(111).
+No config or schema changes; the module is always-on.
 
 ## Not in this slice
 
