@@ -1912,12 +1912,62 @@ namespace OpenSim.Region.CoreModules.World.Estate
             client.OnEstateDebugRegionRequest += HandleEstateDebugRegionRequest;
             client.OnEstateTeleportOneUserHomeRequest += HandleEstateTeleportOneUserHomeRequest;
             client.OnEstateTeleportAllUsersHomeRequest += HandleEstateTeleportAllUsersHomeRequest;
+            client.OnEstateObjectReturn += HandleEstateObjectReturn;
             client.OnRequestTerrain += HandleTerrainRequest;
             client.OnUploadTerrain += HandleUploadTerrain;
 
             client.OnRegionInfoRequest += HandleRegionInfoRequest;
             client.OnEstateCovenantRequest += HandleEstateCovenantRequest;
             client.OnLandStatRequest += HandleLandStatRequest;
+        }
+
+        /// <summary>
+        /// Estate "Return Objects" (EstateOwnerMessage estateobjectreturn): return objects
+        /// owned by a target user across EVERY region of this estate. Iterates the in-process
+        /// scenes on the estate (s, not the captured origin scene — the R1 cross-scene lesson)
+        /// and runs each scene's own return machinery. Permission: CanIssueEstateCommand.
+        /// </summary>
+        private void HandleEstateObjectReturn(IClientAPI client, UUID agentID, int flags, UUID targetOwner)
+        {
+            if (!Scene.Permissions.CanIssueEstateCommand(client.AgentId, false))
+                return;
+            if (targetOwner.IsZero())
+                return;
+
+            // flags & 4 = scripted objects only (SimWideDeletes convention); 0 = all objects.
+            bool scriptedOnly = (flags & 4) != 0;
+            uint estateID = Scene.RegionInfo.EstateSettings.EstateID;
+            int totalReturned = 0;
+            int sceneCount = 0;
+
+            SceneManager.Instance.ForEachScene(delegate (Scene s)
+            {
+                if (s.RegionInfo.EstateSettings.EstateID != estateID)
+                    return;
+
+                List<SceneObjectGroup> toReturn = new();
+                s.ForEachSOG(delegate (SceneObjectGroup sog)
+                {
+                    if (sog.IsAttachment || sog.IsDeleted || !sog.OwnerID.Equals(targetOwner))
+                        return;
+                    if (scriptedOnly && !sog.ContainsScripts())
+                        return;
+                    toReturn.Add(sog);
+                });
+
+                if (toReturn.Count > 0)
+                {
+                    s.returnObjects(toReturn.ToArray(), client);
+                    totalReturned += toReturn.Count;
+                    sceneCount++;
+                }
+            });
+
+            // Object return is destructive — leave a trail.
+            m_log.InfoFormat(
+                "[ESTATE]: object return by {0}: {1} object(s) owned by {2} returned across {3} scene(s) of estate {4} (flags {5}{6}).",
+                client.Name, totalReturned, targetOwner, sceneCount, estateID, flags,
+                scriptedOnly ? ", scripted-only" : "");
         }
 
         public uint GetEstateFlags()

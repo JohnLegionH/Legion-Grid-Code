@@ -1012,6 +1012,7 @@ namespace OpenSim.Framework
         event GroupActiveProposalsRequest OnGroupActiveProposalsRequest;
         event GroupVoteHistoryRequest OnGroupVoteHistoryRequest;
         event SimWideDeletesDelegate OnSimWideDeletes;
+        event SimWideDeletesDelegate OnEstateObjectReturn;
         event SendPostcard OnSendPostcard;
         event ChangeInventoryItemFlags OnChangeInventoryItemFlags;
         event MuteListEntryUpdate OnUpdateMuteListEntry;

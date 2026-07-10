@@ -540,6 +540,7 @@ namespace OpenSim.Region.OptionalModules.World.NPC
         public event GroupActiveProposalsRequest OnGroupActiveProposalsRequest;
         public event GroupVoteHistoryRequest OnGroupVoteHistoryRequest;
         public event SimWideDeletesDelegate OnSimWideDeletes;
+        public event SimWideDeletesDelegate OnEstateObjectReturn;
         public event SendPostcard OnSendPostcard;
         public event ChangeInventoryItemFlags OnChangeInventoryItemFlags;
         public event MuteListEntryUpdate OnUpdateMuteListEntry;

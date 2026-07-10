@@ -277,6 +277,7 @@ namespace OpenSim.Region.ClientStack.LindenUDP
         public event GroupActiveProposalsRequest OnGroupActiveProposalsRequest;
         public event GroupVoteHistoryRequest OnGroupVoteHistoryRequest;
         public event SimWideDeletesDelegate OnSimWideDeletes;
+        public event SimWideDeletesDelegate OnEstateObjectReturn;
         public event SendPostcard OnSendPostcard;
         public event ChangeInventoryItemFlags OnChangeInventoryItemFlags;
         public event MuteListEntryUpdate OnUpdateMuteListEntry;
@@ -11057,6 +11058,20 @@ namespace OpenSim.Region.ClientStack.LindenUDP
                         if(UUID.TryParse(Utils.BytesToString(messagePacket.ParamList[0].Parameter), out UUID Prey))
                             c.OnEstateTeleportOneUserHomeRequest?.Invoke(c, messagePacket.MethodData.Invoice,
                                 c.m_agentId, Prey, true);
+                    }
+                    return;
+
+                case "estateobjectreturn":
+                    if (c.m_scene.Permissions.CanIssueEstateCommand(c.m_agentId, false))
+                    {
+                        // ParamList[0] = return-type flags, ParamList[1] = target owner UUID
+                        // (verified vs the estateobjectreturn param layout).
+                        if (messagePacket.ParamList.Length >= 2 &&
+                            int.TryParse(Utils.BytesToString(messagePacket.ParamList[0].Parameter), out int retFlags) &&
+                            UUID.TryParse(Utils.BytesToString(messagePacket.ParamList[1].Parameter), out UUID retPrey))
+                        {
+                            c.OnEstateObjectReturn?.Invoke(c, c.m_agentId, retFlags, retPrey);
+                        }
                     }
                     return;
 
