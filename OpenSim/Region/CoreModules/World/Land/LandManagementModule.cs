@@ -736,6 +736,12 @@ namespace OpenSim.Region.CoreModules.World.Land
                         land, requiredPowers, false))
                 {
                     land.UpdateAccessList(flags, transactionID, entries);
+                    // Persist the change now and push parcel properties to clients (ban lines /
+                    // access) rather than riding the incidental dwell store. Covers ban add,
+                    // unban, and allowed-list add/remove (all flow through UpdateAccessList).
+                    // Without this a crash before the next dwell store loses the change.
+                    UpdateLandObject(land.LandData.LocalID, land.LandData);
+                    land.SendLandUpdateToAvatars();
                 }
             }
             else

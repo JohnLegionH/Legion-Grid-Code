@@ -60,7 +60,14 @@ namespace OpenSim.Region.CoreModules.World.Land
         protected readonly RegionInfo m_regionInfo;
         protected readonly RegionSettings m_regionSettings;
         protected readonly ScenePermissions m_scenePermissions;
-        protected readonly EstateSettings m_estateSettings;
+        // Read the region's CURRENT estate settings live rather than capturing a reference
+        // at construction. ReloadEstateData() / the 'estate reload' command / in-world estate
+        // changes REPLACE RegionInfo.EstateSettings with a new object, so a captured reference
+        // goes stale — e.g. a manager removed via 'estate reload' stayed exempt from parcel
+        // bans (the manager short-circuit in IsBannedFromLand read the old object) until a
+        // region restart rebuilt the LandObjects. m_regionInfo is stable; only its
+        // EstateSettings property is swapped.
+        protected EstateSettings m_estateSettings => m_regionInfo?.EstateSettings;
 
         protected readonly List<SceneObjectGroup> primsOverMe = new();
         private readonly ExpiringCacheOS<uint, UUID> m_listTransactions = new(30000);
@@ -330,7 +337,6 @@ namespace OpenSim.Region.CoreModules.World.Land
 
             m_regionInfo = scene.RegionInfo;
             m_regionSettings = scene.RegionInfo.RegionSettings;
-            m_estateSettings = m_regionInfo.EstateSettings;
 
             m_regionSizeX = (int)m_regionInfo.RegionSizeX;
             m_regionSizeY = (int)m_regionInfo.RegionSizeY;
@@ -352,7 +358,6 @@ namespace OpenSim.Region.CoreModules.World.Land
                 m_scenePermissions = scene.Permissions;
                 m_regionInfo = scene.RegionInfo;
                 m_regionSettings = scene.RegionInfo.RegionSettings;
-                m_estateSettings = m_regionInfo.EstateSettings;
 
                 m_regionSizeX = (int)m_regionInfo.RegionSizeX;
                 m_regionSizeY = (int)m_regionInfo.RegionSizeY;
