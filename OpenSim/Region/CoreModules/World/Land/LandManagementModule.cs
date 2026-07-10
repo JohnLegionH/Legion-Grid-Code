@@ -2630,6 +2630,15 @@ namespace OpenSim.Region.CoreModules.World.Land
                 return;
             if(!clientScene.TryGetScenePresence(client.AgentId, out ScenePresence parcelManager))
                 return;
+
+            // K1 residency guard (belt-and-suspenders): actor must be a root presence here.
+            if (parcelManager.IsChildAgent)
+            {
+                m_log.WarnFormat(
+                    "[LAND MANAGEMENT MODULE]: Rejecting ParcelFreezeUser in {0}: agent {1} is not a root presence here.",
+                    clientScene.Name, client.AgentId);
+                return;
+            }
             System.Threading.Timer Timer;
 
             if (targetAvatar.GodController.UserLevel < 200)
@@ -2671,6 +2680,17 @@ namespace OpenSim.Region.CoreModules.World.Land
             if (!m_scene.TryGetScenePresence(target, out ScenePresence targetAvatar) ||
                 !m_scene.TryGetScenePresence(client.AgentId, out ScenePresence parcelManager))
                 return;
+
+            // K1 residency guard (belt-and-suspenders): the actor must be a root presence
+            // here. Land is keyed off the target's live position so exposure is bounded, but
+            // a stale/neighbor circuit should not drive an eject in this region.
+            if (parcelManager.IsChildAgent)
+            {
+                m_log.WarnFormat(
+                    "[LAND MANAGEMENT MODULE]: Rejecting ParcelEjectUser in {0}: agent {1} is not a root presence here.",
+                    m_scene.Name, client.AgentId);
+                return;
+            }
 
             // Cannot eject estate managers or gods
             if (m_scene.Permissions.IsAdministrator(target))
