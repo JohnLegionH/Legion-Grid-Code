@@ -560,6 +560,18 @@ namespace OpenSim.Region.CoreModules.World.Land
 
         public void ClientParcelBuyPass(IClientAPI remote_client, UUID targetID, int landLocalID)
         {
+            // LocalID-keyed write that MOVES MONEY (IMoneyModule.MoveMoney below): parcel
+            // LocalIDs collide grid-wide, so require a root presence in THIS scene or a
+            // stale/neighbor circuit could charge the buyer and grant a pass on the wrong
+            // region's colliding-LocalID parcel, paying the wrong owner.
+            if (!m_scene.TryGetScenePresence(remote_client.AgentId, out ScenePresence sp) || sp.IsChildAgent)
+            {
+                m_log.WarnFormat(
+                    "[LAND MANAGEMENT MODULE]: Rejecting ParcelBuyPass for LocalID {0} in {1}: agent {2} is not a root presence here.",
+                    landLocalID, m_scene.Name, remote_client.AgentId);
+                return;
+            }
+
             ILandObject land;
             lock (m_landList)
             {
