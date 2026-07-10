@@ -701,8 +701,12 @@ namespace OpenSim.Region.CoreModules.World.Land
                 uint flags, UUID transactionID, int landLocalID, List<LandAccessEntry> entries,
                 IClientAPI remote_client)
         {
-            if ((flags & 0x03) == 0)
-                return; // we only have access and ban
+            // access(1) | ban(2) | allow-experience(8) | block-experience(16). The last two
+            // (AL_ALLOW_EXPERIENCE=1<<3, AL_BLOCK_EXPERIENCE=1<<4, verified vs Firestorm
+            // llparcelflags.h) were previously dropped; accept them so parcel experience
+            // entries are stored + round-tripped (read/serve side is a follow-up — see #18).
+            if ((flags & 0x1B) == 0)
+                return;
 
             if(m_scene.RegionInfo.EstateSettings.TaxFree)
                 return;
@@ -728,6 +732,8 @@ namespace OpenSim.Region.CoreModules.World.Land
                     requiredPowers |= GroupPowers.LandManageAllowed;
                 if ((flags & (uint)AccessList.Ban) != 0)
                     requiredPowers |= GroupPowers.LandManageBanned;
+                if ((flags & 0x18) != 0)                  // allow/block-experience entries
+                    requiredPowers |= GroupPowers.LandManageAllowed;
 
                 if(requiredPowers == GroupPowers.None)
                     return;

@@ -1069,9 +1069,12 @@ namespace OpenSim.Region.CoreModules.World.Land
 
         public void UpdateAccessList(uint flags, UUID transactionID, List<LandAccessEntry> entries)
         {
-            flags &= 0x03;
+            flags &= 0x1B;      // access(1)|ban(2)|allow-experience(8)|block-experience(16)
             if (flags == 0)
-                return; // we only have access and ban
+                return;
+            // The per-flag clear/add + UseAccessList/UseBanList logic below is naturally
+            // isolated per flag bit, so experience entries (8/16) are stored/round-tripped
+            // without touching the access/ban lists or their parcel flags.
 
             // get a work copy of lists
             List<LandAccessEntry> parcelAccessList = new(LandData.ParcelAccessList);
