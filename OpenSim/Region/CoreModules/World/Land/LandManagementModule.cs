@@ -707,6 +707,14 @@ namespace OpenSim.Region.CoreModules.World.Land
             if(m_scene.RegionInfo.EstateSettings.TaxFree)
                 return;
 
+            if (!m_scene.TryGetScenePresence(remote_client.AgentId, out ScenePresence sp) || sp.IsChildAgent)
+            {
+                m_log.WarnFormat(
+                    "[LAND MANAGEMENT MODULE]: Rejecting ParcelAccessListUpdate for LocalID {0} in {1}: agent {2} is not a root presence here.",
+                    landLocalID, m_scene.Name, remote_client.AgentId);
+                return;
+            }
+
             ILandObject land;
             lock (m_landList)
             {
@@ -1660,17 +1668,43 @@ namespace OpenSim.Region.CoreModules.World.Land
 
         public void ClientOnParcelDivideRequest(int west, int south, int east, int north, IClientAPI remote_client)
         {
+            // Coord-keyed, but the coords are region-relative: a stale/neighbor circuit
+            // could still subdivide THIS region's land. Require a root presence here.
+            if (!m_scene.TryGetScenePresence(remote_client.AgentId, out ScenePresence sp) || sp.IsChildAgent)
+            {
+                m_log.WarnFormat(
+                    "[LAND MANAGEMENT MODULE]: Rejecting ParcelDivide in {0}: agent {1} is not a root presence here.",
+                    m_scene.Name, remote_client.AgentId);
+                return;
+            }
             Subdivide(west, south, east, north, remote_client.AgentId);
         }
 
         public void ClientOnParcelJoinRequest(int west, int south, int east, int north, IClientAPI remote_client)
         {
+            if (!m_scene.TryGetScenePresence(remote_client.AgentId, out ScenePresence sp) || sp.IsChildAgent)
+            {
+                m_log.WarnFormat(
+                    "[LAND MANAGEMENT MODULE]: Rejecting ParcelJoin in {0}: agent {1} is not a root presence here.",
+                    m_scene.Name, remote_client.AgentId);
+                return;
+            }
             Join(west, south, east, north, remote_client.AgentId);
         }
 
         public void ClientOnParcelSelectObjects(int local_id, int request_type,
                                                 List<UUID> returnIDs, IClientAPI remote_client)
         {
+            // K1 residency guard: parcel LocalIDs collide grid-wide, so require a root
+            // presence in this scene (a stale/neighbor circuit must not act on our parcels).
+            if (!m_scene.TryGetScenePresence(remote_client.AgentId, out ScenePresence sp) || sp.IsChildAgent)
+            {
+                m_log.WarnFormat(
+                    "[LAND MANAGEMENT MODULE]: Rejecting ParcelSelectObjects for LocalID {0} in {1}: agent {2} is not a root presence here.",
+                    local_id, m_scene.Name, remote_client.AgentId);
+                return;
+            }
+
             ILandObject land;
             lock (m_landList)
             {
@@ -1685,6 +1719,14 @@ namespace OpenSim.Region.CoreModules.World.Land
 
         public void ClientOnParcelObjectOwnerRequest(int local_id, IClientAPI remote_client)
         {
+            if (!m_scene.TryGetScenePresence(remote_client.AgentId, out ScenePresence sp) || sp.IsChildAgent)
+            {
+                m_log.WarnFormat(
+                    "[LAND MANAGEMENT MODULE]: Rejecting ParcelObjectOwnerRequest for LocalID {0} in {1}: agent {2} is not a root presence here.",
+                    local_id, m_scene.Name, remote_client.AgentId);
+                return;
+            }
+
             ILandObject land;
             lock (m_landList)
             {
@@ -1700,6 +1742,16 @@ namespace OpenSim.Region.CoreModules.World.Land
         {
             if (!m_scene.Permissions.IsGod(remote_client.AgentId))
                 return;
+
+            // K1 residency guard (DEBUG: gods poke cross-region legitimately more often).
+            // A stale-circuit god write to a colliding LocalID is the likely real trigger.
+            if (!m_scene.TryGetScenePresence(remote_client.AgentId, out ScenePresence sp) || sp.IsChildAgent)
+            {
+                m_log.DebugFormat(
+                    "[LAND MANAGEMENT MODULE]: Rejecting ParcelGodForceOwner for LocalID {0} in {1}: god {2} is not a root presence here.",
+                    local_id, m_scene.Name, remote_client.AgentId);
+                return;
+            }
 
             ILandObject land;
             lock (m_landList)
@@ -1719,6 +1771,14 @@ namespace OpenSim.Region.CoreModules.World.Land
 
         public void ClientOnParcelAbandonRequest(int local_id, IClientAPI remote_client)
         {
+            if (!m_scene.TryGetScenePresence(remote_client.AgentId, out ScenePresence sp) || sp.IsChildAgent)
+            {
+                m_log.WarnFormat(
+                    "[LAND MANAGEMENT MODULE]: Rejecting ParcelAbandon for LocalID {0} in {1}: agent {2} is not a root presence here.",
+                    local_id, m_scene.Name, remote_client.AgentId);
+                return;
+            }
+
             ILandObject land;
             lock (m_landList)
             {
@@ -1741,6 +1801,14 @@ namespace OpenSim.Region.CoreModules.World.Land
 
         public void ClientOnParcelReclaim(int local_id, IClientAPI remote_client)
         {
+            if (!m_scene.TryGetScenePresence(remote_client.AgentId, out ScenePresence sp) || sp.IsChildAgent)
+            {
+                m_log.WarnFormat(
+                    "[LAND MANAGEMENT MODULE]: Rejecting ParcelReclaim for LocalID {0} in {1}: agent {2} is not a root presence here.",
+                    local_id, m_scene.Name, remote_client.AgentId);
+                return;
+            }
+
             ILandObject land;
             lock (m_landList)
             {
@@ -1823,6 +1891,14 @@ namespace OpenSim.Region.CoreModules.World.Land
 
         void ClientOnParcelDeedToGroup(int parcelLocalID, UUID groupID, IClientAPI remote_client)
         {
+            if (!m_scene.TryGetScenePresence(remote_client.AgentId, out ScenePresence sp) || sp.IsChildAgent)
+            {
+                m_log.WarnFormat(
+                    "[LAND MANAGEMENT MODULE]: Rejecting ParcelDeedToGroup for LocalID {0} in {1}: agent {2} is not a root presence here.",
+                    parcelLocalID, m_scene.Name, remote_client.AgentId);
+                return;
+            }
+
             ILandObject land;
             lock (m_landList)
             {
@@ -1920,6 +1996,14 @@ namespace OpenSim.Region.CoreModules.World.Land
 
         public void ReturnObjectsInParcel(int localID, uint returnType, UUID[] agentIDs, UUID[] taskIDs, IClientAPI remoteClient)
         {
+            if (!m_scene.TryGetScenePresence(remoteClient.AgentId, out ScenePresence sp) || sp.IsChildAgent)
+            {
+                m_log.WarnFormat(
+                    "[LAND MANAGEMENT MODULE]: Rejecting ReturnObjectsInParcel for LocalID {0} in {1}: agent {2} is not a root presence here.",
+                    localID, m_scene.Name, remoteClient.AgentId);
+                return;
+            }
+
             if (localID != -1)
             {
                 ILandObject selectedParcel;
