@@ -877,7 +877,13 @@ namespace OpenSim.Region.Framework.Scenes
             {
                 EstateSettings es = estateDataService.LoadEstateSettings(RegionInfo.RegionID, false);
                 if (es == null)
-                    m_log.Error($"[SCENE]: Region {Name} failed to load estate settings. Using defaults");
+                {
+                    // Do NOT null the settings — every later IsEstateManagerOrOwner / flag
+                    // check would NRE. Actually load defaults via the sanctioned create
+                    // path (creates + links + loads a real estate), matching the log.
+                    m_log.Warn($"[SCENE]: Region {Name} failed to load estate settings; creating/loading defaults");
+                    es = estateDataService.LoadEstateSettings(RegionInfo.RegionID, true);
+                }
                 RegionInfo.EstateSettings = es;
             }
 
@@ -5871,7 +5877,11 @@ Environment.Exit(1);
                 bool parcelEnvOvr = RegionInfo.EstateSettings.AllowEnvironmentOverride;
                 EstateSettings es = estateDataService.LoadEstateSettings(RegionInfo.RegionID, false);
                 if (es == null)
-                    m_log.Error($"[SCENE]: Region {RegionInfo.RegionName} failed to reload estate settings. Using defaults");
+                {
+                    // A reload must never blank good in-memory settings on a transient miss.
+                    m_log.Warn($"[SCENE]: Region {RegionInfo.RegionName} failed to reload estate settings; keeping current in-memory settings");
+                    return;
+                }
                 RegionInfo.EstateSettings = es;
                 if(parcelEnvOvr && !RegionInfo.EstateSettings.AllowEnvironmentOverride)
                     ClearAllParcelEnvironments();

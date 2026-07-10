@@ -90,6 +90,41 @@ namespace OpenSim.Region.CoreModules.World.Estate
 
             m_module.Scene.AddCommand(
                 "Estates", m_module, "estate show", "estate show", "Shows all estates on the simulator.", ShowEstatesCommand);
+
+            m_module.Scene.AddCommand(
+                "Estates", m_module, "estate reload",
+                "estate reload [all]",
+                "Reload estate settings from the DB for the current region (or every "
+                + "region with 'all'). Use after editing estate data directly in the DB "
+                + "or via any out-of-world path, which otherwise never reaches running "
+                + "regions without a restart.",
+                ReloadEstateCommand);
+        }
+
+        protected void ReloadEstateCommand(string module, string[] cmd)
+        {
+            bool all = cmd.Length > 2 && cmd[2].Equals("all", StringComparison.InvariantCultureIgnoreCase);
+            if (all)
+            {
+                SceneManager.Instance.ForEachScene(ReloadAndReport);
+            }
+            else
+            {
+                Scene scene = SceneManager.Instance.CurrentScene ?? m_module.Scene;
+                ReloadAndReport(scene);
+            }
+        }
+
+        private void ReloadAndReport(Scene scene)
+        {
+            scene.ReloadEstateData();
+            EstateSettings es = scene.RegionInfo.EstateSettings;
+            // manager count makes this self-verifying for the DB-edit-not-propagating
+            // scenario that this command exists to cure.
+            MainConsole.Instance.Output(string.Format(
+                "[ESTATE]: reloaded {0}: EstateID {1} / '{2}' / {3} manager(s), {4} allowed, {5} banned",
+                scene.Name, es.EstateID, es.EstateName,
+                es.EstateManagers.Length, es.EstateAccess.Length, es.EstateBans.Length));
         }
 
         public void Close() {}
