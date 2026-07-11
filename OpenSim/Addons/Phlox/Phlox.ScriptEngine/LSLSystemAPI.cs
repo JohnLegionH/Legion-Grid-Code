@@ -12537,15 +12537,43 @@ public int llSetLinkGLTFOverrides(int link, int face, LSLList overrides)
             var expService = World?.RequestModuleInterface<IExperienceService>();
             if (expService == null) return false;
 
-            // Check region allows this experience
-            var allowed = expService.GetAllowedExperiences(World.RegionInfo.RegionID);
-            if (!allowed.Contains(experienceId)) return false;
-
-            // Block-wins: a parcel BLOCK on this experience overrides region/grid allow.
+            // Block-wins: a parcel BLOCK on this experience overrides region/grid/parcel allow.
             if (IsExperienceBlockedOnObjectParcel(experienceId)) return false;
 
-            // Check agent has granted permission
+            // Admission (Slice-2 allow-precedence): region-allowed OR grid-wide OR parcel-ALLOW.
+            if (!IsExperienceAdmitted(expService, experienceId)) return false;
+
+            // Agent must still have granted permission to the experience.
             return expService.IsAgentGranted(experienceId, agentId);
+        }
+
+        /// <summary>
+        /// Slice-2 experience admission, applied AFTER the parcel-BLOCK check (block always wins):
+        /// true if the experience may run where this script's object sits — region-allowed, OR
+        /// grid-wide (a grid-wide experience runs everywhere unless blocked), OR the parcel
+        /// explicitly ALLOWs it (Flags=8, which admits a non-grid-wide experience that isn't
+        /// region-allowed). IsAgentGranted is still required by the callers on top of this.
+        /// </summary>
+        private bool IsExperienceAdmitted(IExperienceService expService, UUID experienceId)
+        {
+            if (expService.GetAllowedExperiences(World.RegionInfo.RegionID).Contains(experienceId))
+                return true;
+            var info = expService.GetExperience(experienceId);
+            if (info != null && info.IsGridWide)
+                return true;
+            return IsExperienceAllowedOnObjectParcel(experienceId);
+        }
+
+        /// <summary>
+        /// Parcel-ALLOW check for the object's current parcel (symmetric to the block check).
+        /// </summary>
+        private bool IsExperienceAllowedOnObjectParcel(UUID experienceId)
+        {
+            if (experienceId == UUID.Zero || m_host == null || World == null)
+                return false;
+            var pos = m_host.AbsolutePosition;
+            ILandObject parcel = World.LandChannel.GetLandObject(pos.X, pos.Y);
+            return parcel != null && parcel.IsExperienceAllowed(experienceId);
         }
 
         /// <summary>
@@ -12583,24 +12611,23 @@ public int llSetLinkGLTFOverrides(int link, int face, LSLList overrides)
                 return;
             }
 
-            // Check if experience is allowed in this region
-            var allowed = expService.GetAllowedExperiences(World.RegionInfo.RegionID);
-            if (!allowed.Contains(experienceId))
-            {
-                m_ScriptEngine.PostScriptEvent(m_itemID, new EventParams(
-                    "experience_permissions_denied",
-                    new object[] { agent, ExperienceInfo.XP_ERROR_NOT_PERMITTED }, // 4 — experience not allowed in this region
-                    new DetectParams[0]));
-                return;
-            }
-
-            // Block-wins: a parcel BLOCK on this experience overrides region/grid allow.
+            // Block-wins: a parcel BLOCK on this experience overrides region/grid/parcel allow.
             // Deny instead of auto-granting when the script's object sits on a blocking parcel.
             if (IsExperienceBlockedOnObjectParcel(experienceId))
             {
                 m_ScriptEngine.PostScriptEvent(m_itemID, new EventParams(
                     "experience_permissions_denied",
                     new object[] { agent, ExperienceInfo.XP_ERROR_NOT_PERMITTED }, // 4 — blocked on this parcel
+                    new DetectParams[0]));
+                return;
+            }
+
+            // Admission (Slice-2 allow-precedence): region-allowed OR grid-wide OR parcel-ALLOW.
+            if (!IsExperienceAdmitted(expService, experienceId))
+            {
+                m_ScriptEngine.PostScriptEvent(m_itemID, new EventParams(
+                    "experience_permissions_denied",
+                    new object[] { agent, ExperienceInfo.XP_ERROR_NOT_PERMITTED }, // 4 — not admitted here (region/grid/parcel)
                     new DetectParams[0]));
                 return;
             }
