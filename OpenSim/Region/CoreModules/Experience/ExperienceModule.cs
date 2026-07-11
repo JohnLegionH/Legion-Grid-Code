@@ -42,6 +42,11 @@ namespace OpenSim.Region.CoreModules.Experience
         private Scene m_Scene;
         private IExperienceService m_Service;
 
+        // Parcel experience access-list flag: AL_BLOCK_EXPERIENCE = (1 << 4) = 16
+        // (Firestorm indra/llinventory/llparcelflags.h). Stored raw in LandAccessEntry.Flags;
+        // the experience UUID rides in LandAccessEntry.AgentID. Matches LandObject.IsExperienceBlocked.
+        private const int AL_BLOCK_EXPERIENCE = 16;
+
         // In-memory permission cache for fast lookups during script execution
         private readonly Dictionary<string, bool> m_PermCache = new Dictionary<string, bool>();
         private readonly object m_PermCacheLock = new object();
@@ -293,6 +298,30 @@ namespace OpenSim.Region.CoreModules.Experience
                 "experience unassign <script-item-uuid>",
                 "Remove a script's experience association (also deletes the persisted row)",
                 HandleUnassignExperience);
+
+            MainConsole.Instance.Commands.AddCommand("Experience", false,
+                "experience block-parcel",
+                "experience block-parcel <exp-name-or-uuid> <parcel-localID>",
+                "BLOCK an experience on a specific parcel (block-wins; overrides region/grid allow)",
+                HandleBlockParcel);
+
+            MainConsole.Instance.Commands.AddCommand("Experience", false,
+                "experience unblock-parcel",
+                "experience unblock-parcel <exp-name-or-uuid> <parcel-localID>",
+                "Remove a parcel BLOCK for an experience",
+                HandleUnblockParcel);
+
+            MainConsole.Instance.Commands.AddCommand("Experience", false,
+                "experience list-parcels",
+                "experience list-parcels",
+                "List parcels in this region (local ID, name, area, # blocked experiences)",
+                HandleListParcels);
+
+            MainConsole.Instance.Commands.AddCommand("Experience", false,
+                "experience list-scripts",
+                "experience list-scripts [object-name-filter]",
+                "List scripts in the region with their item UUIDs (for 'experience assign')",
+                HandleListScripts);
         }
 
         private void HandleCreateExperience(string module, string[] args)
@@ -554,6 +583,173 @@ namespace OpenSim.Region.CoreModules.Experience
             // UUID.Zero unassigns: removes from cache and deletes the persisted row (write-through).
             SetScriptExperience(scriptItemId, UUID.Zero);
             MainConsole.Instance.Output($"Script {scriptItemId} experience association removed.");
+        }
+
+        // ══════════════════════════════════════════════════════════════════
+        // Parcel BLOCK commands (block-wins safety primitive; testable without the viewer cap)
+        // ══════════════════════════════════════════════════════════════════
+
+        // Resolve an experience by UUID (if the token parses) or by name.
+        private ExperienceInfo ResolveExperience(string token)
+        {
+            if (UUID.TryParse(token, out UUID id))
+            {
+                var byId = m_Service.GetExperience(id);
+                if (byId != null) return byId;
+            }
+            return m_Service.GetExperienceByName(token);
+        }
+
+        private void HandleBlockParcel(string module, string[] args)
+        {
+            // experience block-parcel <exp-name-or-uuid> <parcel-localID>
+            if (args.Length < 4)
+            {
+                MainConsole.Instance.Output("Usage: experience block-parcel <exp-name-or-uuid> <parcel-localID>");
+                MainConsole.Instance.Output("       (run 'experience list-parcels' to find the local ID)");
+                return;
+            }
+
+            var exp = ResolveExperience(args[2]);
+            if (exp == null)
+            {
+                MainConsole.Instance.Output($"Experience '{args[2]}' not found.");
+                return;
+            }
+
+            if (!int.TryParse(args[3], out int localID))
+            {
+                MainConsole.Instance.Output($"Invalid parcel local ID: {args[3]}");
+                return;
+            }
+
+            ILandObject land = m_Scene.LandChannel.GetLandObject(localID);
+            if (land == null)
+            {
+                MainConsole.Instance.Output($"No parcel with local ID {localID} in region '{m_Scene.RegionInfo.RegionName}'.");
+                return;
+            }
+
+            var list = land.LandData.ParcelAccessList;
+            bool already = list.Exists(e => (int)e.Flags == AL_BLOCK_EXPERIENCE && e.AgentID == exp.ExperienceId);
+            if (already)
+            {
+                MainConsole.Instance.Output($"Experience '{exp.Name}' is already BLOCKED on parcel '{land.LandData.Name}' (localID {localID}).");
+                return;
+            }
+
+            list.Add(new LandAccessEntry
+            {
+                AgentID = exp.ExperienceId,
+                Flags = (AccessList)AL_BLOCK_EXPERIENCE,
+                Expires = 0
+            });
+
+            // Persist: StoreLandObject (wired to OnLandObjectAdded) upserts the full access list
+            // idempotently — replace-into land + delete/insert landaccesslist, no duplicate rows.
+            m_Scene.EventManager.TriggerLandObjectAdded(land);
+            land.SendLandUpdateToAvatars();
+
+            MainConsole.Instance.Output(
+                $"Experience '{exp.Name}' ({exp.ExperienceId}) is now BLOCKED on parcel '{land.LandData.Name}' (localID {localID}).");
+        }
+
+        private void HandleUnblockParcel(string module, string[] args)
+        {
+            // experience unblock-parcel <exp-name-or-uuid> <parcel-localID>
+            if (args.Length < 4)
+            {
+                MainConsole.Instance.Output("Usage: experience unblock-parcel <exp-name-or-uuid> <parcel-localID>");
+                return;
+            }
+
+            var exp = ResolveExperience(args[2]);
+            if (exp == null)
+            {
+                MainConsole.Instance.Output($"Experience '{args[2]}' not found.");
+                return;
+            }
+
+            if (!int.TryParse(args[3], out int localID))
+            {
+                MainConsole.Instance.Output($"Invalid parcel local ID: {args[3]}");
+                return;
+            }
+
+            ILandObject land = m_Scene.LandChannel.GetLandObject(localID);
+            if (land == null)
+            {
+                MainConsole.Instance.Output($"No parcel with local ID {localID} in region '{m_Scene.RegionInfo.RegionName}'.");
+                return;
+            }
+
+            int removed = land.LandData.ParcelAccessList.RemoveAll(
+                e => (int)e.Flags == AL_BLOCK_EXPERIENCE && e.AgentID == exp.ExperienceId);
+            if (removed == 0)
+            {
+                MainConsole.Instance.Output($"Experience '{exp.Name}' was not blocked on parcel '{land.LandData.Name}' (localID {localID}).");
+                return;
+            }
+
+            m_Scene.EventManager.TriggerLandObjectAdded(land);
+            land.SendLandUpdateToAvatars();
+
+            MainConsole.Instance.Output(
+                $"Experience '{exp.Name}' is no longer blocked on parcel '{land.LandData.Name}' (localID {localID}).");
+        }
+
+        private void HandleListParcels(string module, string[] args)
+        {
+            var parcels = m_Scene.LandChannel.AllParcels();
+            if (parcels == null || parcels.Count == 0)
+            {
+                MainConsole.Instance.Output("No parcels in this region.");
+                return;
+            }
+
+            MainConsole.Instance.Output($"Parcels in region '{m_Scene.RegionInfo.RegionName}':");
+            MainConsole.Instance.Output($"{"LocalID",-8} {"Name",-30} {"Area",-8} {"BlockedExp",-10}");
+            MainConsole.Instance.Output(new string('-', 60));
+            foreach (var p in parcels)
+            {
+                var ld = p.LandData;
+                int blocked = 0;
+                foreach (var e in ld.ParcelAccessList)
+                    if ((int)e.Flags == AL_BLOCK_EXPERIENCE) blocked++;
+                MainConsole.Instance.Output($"{ld.LocalID,-8} {ld.Name,-30} {ld.Area,-8} {blocked,-10}");
+            }
+        }
+
+        private void HandleListScripts(string module, string[] args)
+        {
+            // experience list-scripts [object-name-filter]
+            string filter = args.Length > 2 ? string.Join(" ", args, 2, args.Length - 2) : null;
+
+            var groups = m_Scene.GetSceneObjectGroups();
+            int count = 0;
+            MainConsole.Instance.Output($"{"Script item UUID",-38} {"Script name",-24} {"Object",-24} Position");
+            MainConsole.Instance.Output(new string('-', 100));
+            foreach (var sog in groups)
+            {
+                if (filter != null && sog.Name.IndexOf(filter, StringComparison.OrdinalIgnoreCase) < 0)
+                    continue;
+                foreach (var part in sog.Parts)
+                {
+                    foreach (var item in part.Inventory.GetInventoryItems(InventoryType.LSL))
+                    {
+                        var pos = sog.AbsolutePosition;
+                        MainConsole.Instance.Output(
+                            $"{item.ItemID,-38} {item.Name,-24} {sog.Name,-24} <{(int)pos.X},{(int)pos.Y},{(int)pos.Z}>");
+                        count++;
+                    }
+                }
+            }
+            if (count == 0)
+                MainConsole.Instance.Output(filter != null
+                    ? $"No scripts found in objects matching '{filter}'."
+                    : "No scripts found in this region.");
+            else
+                MainConsole.Instance.Output($"\nTotal: {count} script item(s). Use the UUID with 'experience assign'.");
         }
     }
 }

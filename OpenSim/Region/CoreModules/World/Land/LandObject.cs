@@ -1067,6 +1067,36 @@ namespace OpenSim.Region.CoreModules.World.Land
                 remote_client.SendLandAccessListData(banlist, (uint)AccessList.Ban, LandData.LocalID);
         }
 
+        // Parcel experience access-list flag: AL_BLOCK_EXPERIENCE = (1 << 4) = 16
+        // (verified vs Firestorm indra/llinventory/llparcelflags.h). Experience entries store the
+        // experience UUID in LandAccessEntry.AgentID and the raw flag bit in .Flags — 16 is not a
+        // named OpenMetaverse.AccessList member, so we compare the raw int value.
+        private const int AL_BLOCK_EXPERIENCE = 16;
+
+        /// <summary>
+        /// Block-wins parcel lookup: true if the given experience UUID is explicitly BLOCKED on
+        /// this parcel. Reads the stored LandAccessEntry list (round-tripped via the #18 storage
+        /// slice) for an entry whose AgentID carries the experience id and whose Flags ==
+        /// AL_BLOCK_EXPERIENCE. AL_ALLOW_EXPERIENCE (8) entries are intentionally NOT consulted in
+        /// this slice — this is the BLOCK-only safety primitive.
+        /// </summary>
+        public bool IsExperienceBlocked(UUID experienceId)
+        {
+            if (experienceId.IsZero())
+                return false;
+
+            int now = Util.UnixTimeSinceEpoch();
+            foreach (LandAccessEntry entry in LandData.ParcelAccessList)
+            {
+                // honor expiry the same way SendAccessList / the ban predicates do
+                if (entry.Expires != 0 && entry.Expires <= now)
+                    continue;
+                if ((int)entry.Flags == AL_BLOCK_EXPERIENCE && entry.AgentID == experienceId)
+                    return true;
+            }
+            return false;
+        }
+
         public void UpdateAccessList(uint flags, UUID transactionID, List<LandAccessEntry> entries)
         {
             flags &= 0x1B;      // access(1)|ban(2)|allow-experience(8)|block-experience(16)

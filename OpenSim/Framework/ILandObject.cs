@@ -88,6 +88,9 @@ namespace OpenSim.Framework
         bool CanBeOnThisLand(UUID avatar, float posHeight);
         bool IsRestrictedFromLand(UUID avatar);
         bool IsInLandAccessList(UUID avatar);
+        // Block-wins parcel experience check: true if the experience UUID is explicitly BLOCKED
+        // on this parcel (LandAccessEntry with Flags == AL_BLOCK_EXPERIENCE). See LandObject impl.
+        bool IsExperienceBlocked(UUID experienceId);
         void SendLandUpdateToClient(IClientAPI remote_client);
         void SendLandUpdateToClient(bool snap_selection, IClientAPI remote_client);
         List<LandAccessEntry> CreateAccessListArrayByFlag(AccessList flag);

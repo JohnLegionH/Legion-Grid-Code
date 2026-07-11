@@ -12541,8 +12541,26 @@ public int llSetLinkGLTFOverrides(int link, int face, LSLList overrides)
             var allowed = expService.GetAllowedExperiences(World.RegionInfo.RegionID);
             if (!allowed.Contains(experienceId)) return false;
 
+            // Block-wins: a parcel BLOCK on this experience overrides region/grid allow.
+            if (IsExperienceBlockedOnObjectParcel(experienceId)) return false;
+
             // Check agent has granted permission
             return expService.IsAgentGranted(experienceId, agentId);
+        }
+
+        /// <summary>
+        /// Block-wins parcel check: true if <paramref name="experienceId"/> is BLOCKED on the
+        /// parcel where this script's object currently sits (m_host position). A parcel BLOCK
+        /// overrides region/grid ALLOW. This slice uses the OBJECT's parcel; an agent's-parcel
+        /// refinement for agent-affecting calls is a documented fast-follow.
+        /// </summary>
+        private bool IsExperienceBlockedOnObjectParcel(UUID experienceId)
+        {
+            if (experienceId == UUID.Zero || m_host == null || World == null)
+                return false;
+            var pos = m_host.AbsolutePosition;
+            ILandObject parcel = World.LandChannel.GetLandObject(pos.X, pos.Y);
+            return parcel != null && parcel.IsExperienceBlocked(experienceId);
         }
 
         // ── 659: llRequestExperiencePermissions ──
@@ -12572,6 +12590,17 @@ public int llSetLinkGLTFOverrides(int link, int face, LSLList overrides)
                 m_ScriptEngine.PostScriptEvent(m_itemID, new EventParams(
                     "experience_permissions_denied",
                     new object[] { agent, ExperienceInfo.XP_ERROR_NOT_PERMITTED }, // 4 — experience not allowed in this region
+                    new DetectParams[0]));
+                return;
+            }
+
+            // Block-wins: a parcel BLOCK on this experience overrides region/grid allow.
+            // Deny instead of auto-granting when the script's object sits on a blocking parcel.
+            if (IsExperienceBlockedOnObjectParcel(experienceId))
+            {
+                m_ScriptEngine.PostScriptEvent(m_itemID, new EventParams(
+                    "experience_permissions_denied",
+                    new object[] { agent, ExperienceInfo.XP_ERROR_NOT_PERMITTED }, // 4 — blocked on this parcel
                     new DetectParams[0]));
                 return;
             }
