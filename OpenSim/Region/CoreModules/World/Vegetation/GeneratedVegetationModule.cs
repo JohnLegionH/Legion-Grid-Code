@@ -1,18 +1,43 @@
 /*
  * Legion Grid — procedural content generation (vegetation rezzer).
  *
- * Reads a vegetation plan JSON produced by tools/terrain-gen/vegetation_plan.py and
- * rezzes each tree into the console's CURRENT region via IVegetationModule.AddTree.
- * Every generated tree is stamped with a dedicated GroupID (GENERATED_VEG_GROUP) so
- * `vegetation clear-generated` can remove ONLY generator-placed content and can never
- * touch hand-placed objects.
+ * Reads a vegetation plan JSON and rezzes each tree into the console's CURRENT
+ * region via IVegetationModule.AddTree. Every generated tree is stamped with a
+ * dedicated GroupID (GENERATED_VEG_GROUP) so `vegetation clear-generated` can
+ * remove ONLY generator-placed content and can never touch hand-placed objects.
+ *
+ * The plan JSON is produced by the SEPARATE "legion-tools" project
+ * (terrain-gen/vegetation_plan.py). Generator tooling was split out of this repo
+ * (2026-07) — it was formerly tools/terrain-gen/. The JSON is the CONTRACT
+ * between the two projects:
+ *   { "meta":  { "group_uuid": "<must equal GENERATED_VEG_GROUP>" },
+ *     "trees": [ { "code": <PCode int>,
+ *                  "x": <m>, "y": <m>, "z": <m>,
+ *                  "sx": <scale>, "sy": <scale>, "sz": <scale>,
+ *                  "rot": <radians> }, ... ] }
  *
  * Console commands (operate on the `change region`-selected region):
  *   vegetation plant <planfile.json>   — rez the plan's trees (paced, progress/500)
  *   vegetation clear-generated         — delete only trees in GENERATED_VEG_GROUP
  *
- * Idempotence: plant twice = duplicates (each rez gets fresh UUIDs). The workflow is
- * clear-generated -> plant. See README "Vegetation pass".
+ * Idempotence: plant twice = duplicates (each rez gets fresh UUIDs). The workflow
+ * is clear-generated -> plant.
+ *
+ * ── BUILD / DEPLOY  (authoritative; see docs/GeneratedVegetationModule.md) ──
+ *   Compiled into OpenSim.Region.CoreModules.dll. `runprebuild` is FORBIDDEN on
+ *   this tree — it clobbers the hand-maintained csproj. The .csproj files are
+ *   gitignored and must NOT be regenerated, so a fresh clone must add the compile
+ *   include BY HAND, in
+ *   OpenSim/Region/CoreModules/OpenSim.Region.CoreModules.csproj, next to the
+ *   existing VegetationModule.cs include:
+ *       <Compile Include="World\Vegetation\GeneratedVegetationModule.cs">
+ *         <SubType>Code</SubType>
+ *       </Compile>
+ *   Deploy the COMPLETE OpenSim*.dll set — never cherry-pick one DLL:
+ *   IVegetationModule is implemented by BOTH this CoreModules.dll (the preferred
+ *   core VegetationModule) and OptionalModules.dll (TreePopulatorModule); a
+ *   partial deploy left a stale sibling resolved and trees rezzed as unrenderable
+ *   PCode.NewTree(111). No config/schema changes; the module is always-on.
  */
 
 using System;
