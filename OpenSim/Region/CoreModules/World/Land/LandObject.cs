@@ -1039,6 +1039,8 @@ namespace OpenSim.Region.CoreModules.World.Land
             int now = Util.UnixTimeSinceEpoch();
             List<LandAccessEntry> accesslist = new();
             List<LandAccessEntry> banlist = new();
+            List<LandAccessEntry> allowExpList = new();
+            List<LandAccessEntry> blockExpList = new();
             foreach (LandAccessEntry entry in LandData.ParcelAccessList)
             {
                 if(entry.Expires > now || entry.Expires == 0)
@@ -1047,6 +1049,10 @@ namespace OpenSim.Region.CoreModules.World.Land
                         accesslist.Add(entry);
                     else if (entry.Flags == AccessList.Ban)
                         banlist.Add(entry);
+                    else if ((int)entry.Flags == AL_ALLOW_EXPERIENCE)
+                        allowExpList.Add(entry);
+                    else if ((int)entry.Flags == AL_BLOCK_EXPERIENCE)
+                        blockExpList.Add(entry);
                 }
             }
 
@@ -1054,7 +1060,7 @@ namespace OpenSim.Region.CoreModules.World.Land
             {
                 remote_client.SendLandAccessListData(new List<LandAccessEntry>() { new LandAccessEntry() },
                     (uint)AccessList.Access, LandData.LocalID);
-            }               
+            }
             else
                 remote_client.SendLandAccessListData(accesslist, (uint)AccessList.Access, LandData.LocalID);
 
@@ -1065,12 +1071,23 @@ namespace OpenSim.Region.CoreModules.World.Land
             }
             else
                 remote_client.SendLandAccessListData(banlist, (uint)AccessList.Ban, LandData.LocalID);
+
+            // Experience allow/block lists (Slice 2 serve-side). Send only when the client asked for
+            // them (the viewer strips AL_ALLOW/BLOCK_EXPERIENCE from its request when the
+            // RegionExperiences cap is absent) and only when non-empty — the viewer clears its
+            // experience lists before each request, so an omitted reply correctly reads as empty and
+            // we avoid feeding a zero-UUID sentinel into the viewer's unpackExperienceEntries.
+            if ((flags & (uint)AL_ALLOW_EXPERIENCE) != 0 && allowExpList.Count > 0)
+                remote_client.SendLandAccessListData(allowExpList, (uint)AL_ALLOW_EXPERIENCE, LandData.LocalID);
+            if ((flags & (uint)AL_BLOCK_EXPERIENCE) != 0 && blockExpList.Count > 0)
+                remote_client.SendLandAccessListData(blockExpList, (uint)AL_BLOCK_EXPERIENCE, LandData.LocalID);
         }
 
-        // Parcel experience access-list flag: AL_BLOCK_EXPERIENCE = (1 << 4) = 16
-        // (verified vs Firestorm indra/llinventory/llparcelflags.h). Experience entries store the
-        // experience UUID in LandAccessEntry.AgentID and the raw flag bit in .Flags — 16 is not a
-        // named OpenMetaverse.AccessList member, so we compare the raw int value.
+        // Parcel experience access-list flags (verified vs Firestorm indra/llinventory/llparcelflags.h):
+        //   AL_ALLOW_EXPERIENCE = (1 << 3) = 8   AL_BLOCK_EXPERIENCE = (1 << 4) = 16
+        // Experience entries store the experience UUID in LandAccessEntry.AgentID and the raw flag
+        // bit in .Flags — 8/16 are not named OpenMetaverse.AccessList members, so compare raw ints.
+        private const int AL_ALLOW_EXPERIENCE = 8;
         private const int AL_BLOCK_EXPERIENCE = 16;
 
         /// <summary>
@@ -1092,6 +1109,28 @@ namespace OpenSim.Region.CoreModules.World.Land
                 if (entry.Expires != 0 && entry.Expires <= now)
                     continue;
                 if ((int)entry.Flags == AL_BLOCK_EXPERIENCE && entry.AgentID == experienceId)
+                    return true;
+            }
+            return false;
+        }
+
+        /// <summary>
+        /// Slice-2 allow lookup (symmetric to IsExperienceBlocked): true if the given experience is
+        /// explicitly ALLOWED on this parcel (a LandAccessEntry with Flags == AL_ALLOW_EXPERIENCE).
+        /// A parcel ALLOW admits a non-grid-wide experience where it isn't region-allowed. Block
+        /// always wins — callers apply the block check first.
+        /// </summary>
+        public bool IsExperienceAllowed(UUID experienceId)
+        {
+            if (experienceId.IsZero())
+                return false;
+
+            int now = Util.UnixTimeSinceEpoch();
+            foreach (LandAccessEntry entry in LandData.ParcelAccessList)
+            {
+                if (entry.Expires != 0 && entry.Expires <= now)
+                    continue;
+                if ((int)entry.Flags == AL_ALLOW_EXPERIENCE && entry.AgentID == experienceId)
                     return true;
             }
             return false;

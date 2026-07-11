@@ -18,16 +18,20 @@
 
 using System;
 using System.Collections.Generic;
+using System.Net;
 using System.Reflection;
 using log4net;
 using Mono.Addins;
 using Nini.Config;
 using OpenMetaverse;
+using OpenMetaverse.StructuredData;
 using OpenSim.Framework;
+using OpenSim.Framework.Servers.HttpServer;
 using OpenSim.Region.Framework.Interfaces;
 using OpenSim.Region.Framework.Scenes;
 using OpenSim.Services.Interfaces;
 using OpenSim.Services.ExperienceService;
+using Caps = OpenSim.Framework.Capabilities.Caps;
 
 
 namespace OpenSim.Region.CoreModules.Experience
@@ -107,6 +111,11 @@ namespace OpenSim.Region.CoreModules.Experience
             // Register console commands
             RegisterConsoleCommands();
 
+            // Advertise the experience capabilities the viewer probes (Slice 2). Their PRESENCE
+            // makes Firestorm show the About Land > Experiences tab (FIRE-17280); the parcel
+            // allow/block data itself still flows over the UDP ParcelAccessList path.
+            scene.EventManager.OnRegisterCaps += OnRegisterCaps;
+
             m_log.InfoFormat("[ExperienceModule]: Experience system active for region '{0}'", scene.RegionInfo.RegionName);
         }
 
@@ -119,8 +128,153 @@ namespace OpenSim.Region.CoreModules.Experience
         public void RemoveRegion(Scene scene)
         {
             if (!m_Enabled) return;
+            scene.EventManager.OnRegisterCaps -= OnRegisterCaps;
             scene.UnregisterModuleInterface<IExperienceService>(m_Service);
             scene.UnregisterModuleInterface<ExperienceModule>(this);
+        }
+
+        // ══════════════════════════════════════════════════════════════════
+        // Capabilities (Slice 2 — viewer-facing half)
+        //   RegionExperiences     — presence gates the Land>Experiences tab; GET serves the
+        //                           region allowed/blocked lists; POST is reject-shaped (below).
+        //   GetExperienceInfo     — resolves experience UUID -> name/properties (so tab entries
+        //                           show as NAMES); shape per Firestorm llexperiencecache.
+        //   FindExperienceByName  — the add-picker's name search.
+        // ══════════════════════════════════════════════════════════════════
+        private void OnRegisterCaps(UUID agentID, Caps caps)
+        {
+            if (m_Service == null) return;
+
+            caps.RegisterSimpleHandler("RegionExperiences",
+                new SimpleStreamHandler("/" + UUID.Random(),
+                    (req, resp) => HandleRegionExperiences(req, resp)));
+
+            caps.RegisterSimpleHandler("GetExperienceInfo",
+                new SimpleStreamHandler("/" + UUID.Random(),
+                    (req, resp) => HandleGetExperienceInfo(req, resp)));
+
+            caps.RegisterSimpleHandler("FindExperienceByName",
+                new SimpleStreamHandler("/" + UUID.Random(),
+                    (req, resp) => HandleFindExperienceByName(req, resp)));
+        }
+
+        private void WriteLLSD(IOSHttpResponse resp, OSD payload)
+        {
+            resp.RawBuffer = OSDParser.SerializeLLSDXmlToBytes(payload);
+            resp.StatusCode = (int)HttpStatusCode.OK;
+        }
+
+        // Map our ExperienceInfo -> the viewer's experience_keys entry. The `properties` bitfield
+        // is the VIEWER's namespace (llexperiencecache): PROPERTY_GRID=1<<4, PROPERTY_PRIVATE=1<<5,
+        // PROPERTY_DISABLED=1<<6 — NOT our internal PROP_* bits. The add-picker filters on it, so
+        // it must be accurate: set GRID when grid-wide, DISABLED only when not enabled.
+        private OSDMap ExperienceToOSD(ExperienceInfo info)
+        {
+            const int VP_GRID = 1 << 4, VP_PRIVATE = 1 << 5, VP_DISABLED = 1 << 6;
+            OSDMap m = new OSDMap();
+            m["public_id"] = OSD.FromUUID(info.ExperienceId);
+            m["name"] = OSD.FromString(info.Name ?? string.Empty);
+            m["description"] = OSD.FromString(info.Description ?? string.Empty);
+            int props = 0;
+            if (info.IsGridWide) props |= VP_GRID;
+            if (info.IsPrivate)  props |= VP_PRIVATE;
+            if (!info.IsEnabled) props |= VP_DISABLED;
+            m["properties"] = OSD.FromInteger(props);
+            m["maturity"] = OSD.FromInteger(info.Maturity);
+            m["quota"] = OSD.FromInteger(128);
+            if (info.OwnerId != UUID.Zero) m["agent_id"] = OSD.FromUUID(info.OwnerId);
+            if (info.GroupId != UUID.Zero) m["group_id"] = OSD.FromUUID(info.GroupId);
+            if (!string.IsNullOrEmpty(info.Slurl)) m["slurl"] = OSD.FromString(info.Slurl);
+            return m;
+        }
+
+        private OSDMap BuildRegionExperiencesLLSD(UUID regionId)
+        {
+            OSDMap m = new OSDMap();
+            OSDArray allowed = new OSDArray();
+            foreach (UUID id in m_Service.GetAllowedExperiences(regionId)) allowed.Add(OSD.FromUUID(id));
+            OSDArray blocked = new OSDArray();
+            foreach (UUID id in m_Service.GetBlockedExperiences(regionId)) blocked.Add(OSD.FromUUID(id));
+            m["allowed"] = allowed;
+            m["blocked"] = blocked;
+            m["trusted"] = new OSDArray();   // estate-level "trusted" not modelled — honestly empty
+            // "default" intentionally omitted (no default experience)
+            return m;
+        }
+
+        private void HandleRegionExperiences(IOSHttpRequest req, IOSHttpResponse resp)
+        {
+            UUID regionId = m_Scene.RegionInfo.RegionID;
+            if (req.HttpMethod == "POST")
+            {
+                // Region/estate experience MANAGEMENT (the Region-Info Experiences panel writing
+                // allowed/blocked/trusted) is DEFERRED as its own future item — open permission
+                // question: who may edit, estate owner only or also managers? We do NOT silently
+                // accept-and-discard (that would lie to the panel: the edit appears to succeed then
+                // vanishes — the DisplayNames silent-gate anti-pattern). Instead reject-shaped: echo
+                // the CURRENT lists back so the panel re-renders the truth (the edit visibly reverts).
+                m_log.DebugFormat(
+                    "[ExperienceModule]: RegionExperiences POST rejected in '{0}' — region/estate experience management is deferred (Slice 2 target is the parcel Land tab).",
+                    m_Scene.RegionInfo.RegionName);
+                WriteLLSD(resp, BuildRegionExperiencesLLSD(regionId));
+                return;
+            }
+            // GET — real region allowed/blocked (also makes the Region-Info panel read-correct).
+            WriteLLSD(resp, BuildRegionExperiencesLLSD(regionId));
+        }
+
+        private void HandleGetExperienceInfo(IOSHttpRequest req, IOSHttpResponse resp)
+        {
+            // Viewer GETs <cap>/id/?page_size=N&<id>=uuid&<id>=uuid... — collect every query
+            // value that parses as a UUID (robust to the exact param name), resolve each.
+            OSDArray keys = new OSDArray();
+            OSDArray errorIds = new OSDArray();
+            var seen = new HashSet<UUID>();
+            var qs = req.QueryString;
+            if (qs != null)
+            {
+                foreach (string k in qs.AllKeys)
+                {
+                    if (k == null) continue;
+                    string[] vals = qs.GetValues(k);
+                    if (vals == null) continue;
+                    foreach (string v in vals)
+                    {
+                        if (UUID.TryParse(v, out UUID id) && id != UUID.Zero && seen.Add(id))
+                        {
+                            ExperienceInfo info = m_Service.GetExperience(id);
+                            if (info != null) keys.Add(ExperienceToOSD(info));
+                            else errorIds.Add(OSD.FromUUID(id));
+                        }
+                    }
+                }
+            }
+            OSDMap result = new OSDMap();
+            result["experience_keys"] = keys;
+            if (errorIds.Count > 0) result["error_ids"] = errorIds;
+            WriteLLSD(resp, result);
+        }
+
+        private void HandleFindExperienceByName(IOSHttpRequest req, IOSHttpResponse resp)
+        {
+            var qs = req.QueryString;
+            string query = (qs != null ? qs["query"] : null) ?? string.Empty;
+            int page = 0, pageSize = 30;
+            if (qs != null)
+            {
+                int.TryParse(qs["page"], out page);
+                if (!int.TryParse(qs["page_size"], out pageSize) || pageSize <= 0) pageSize = 30;
+            }
+
+            List<ExperienceInfo> found = m_Service.FindExperiences(query) ?? new List<ExperienceInfo>();
+            OSDArray keys = new OSDArray();
+            int start = page * pageSize;
+            for (int i = start; i < found.Count && i < start + pageSize; i++)
+                keys.Add(ExperienceToOSD(found[i]));
+
+            OSDMap result = new OSDMap();
+            result["experience_keys"] = keys;
+            WriteLLSD(resp, result);
         }
 
         public void Close() { }
@@ -322,6 +476,18 @@ namespace OpenSim.Region.CoreModules.Experience
                 "experience list-scripts [object-name-filter]",
                 "List scripts in the region with their item UUIDs (for 'experience assign')",
                 HandleListScripts);
+
+            MainConsole.Instance.Commands.AddCommand("Experience", false,
+                "experience unallow",
+                "experience unallow <name>",
+                "Remove an experience from THIS region's allow list (region admission off)",
+                HandleUnallowExperience);
+
+            MainConsole.Instance.Commands.AddCommand("Experience", false,
+                "experience create-land",
+                "experience create-land <name> [description]",
+                "Create a NON-grid-wide, NOT-auto-allowed experience (test subject for parcel-ALLOW precedence)",
+                HandleCreateLandExperience);
         }
 
         private void HandleCreateExperience(string module, string[] args)
@@ -750,6 +916,56 @@ namespace OpenSim.Region.CoreModules.Experience
                     : "No scripts found in this region.");
             else
                 MainConsole.Instance.Output($"\nTotal: {count} script item(s). Use the UUID with 'experience assign'.");
+        }
+
+        private void HandleUnallowExperience(string module, string[] args)
+        {
+            if (args.Length < 3)
+            {
+                MainConsole.Instance.Output("Usage: experience unallow <name>");
+                return;
+            }
+            string name = string.Join(" ", args, 2, args.Length - 2);
+            var exp = m_Service.GetExperienceByName(name);
+            if (exp == null)
+            {
+                MainConsole.Instance.Output($"Experience '{name}' not found.");
+                return;
+            }
+            m_Service.RemoveAllowedExperience(m_Scene.RegionInfo.RegionID, exp.ExperienceId);
+            MainConsole.Instance.Output(
+                $"Experience '{name}' removed from region '{m_Scene.RegionInfo.RegionName}' allow list. " +
+                "(Grid-wide experiences are still admitted everywhere unless blocked.)");
+        }
+
+        private void HandleCreateLandExperience(string module, string[] args)
+        {
+            if (args.Length < 3)
+            {
+                MainConsole.Instance.Output("Usage: experience create-land <name> [description]");
+                return;
+            }
+            string name = args[2];
+            string desc = args.Length > 3 ? string.Join(" ", args, 3, args.Length - 3) : "";
+            UUID ownerId = m_Scene.RegionInfo.EstateSettings.EstateOwner;
+
+            // NON-grid-wide (PROP_ENABLED only) and — unlike 'experience create' — NOT auto-allowed
+            // in the region. This is the clean test subject for parcel-ALLOW precedence: admitted
+            // ONLY where a parcel explicitly ALLOWs it.
+            var info = new ExperienceInfo
+            {
+                OwnerId = ownerId,
+                Name = name,
+                Description = desc,
+                Properties = ExperienceInfo.PROP_ENABLED
+            };
+            var created = m_Service.CreateExperience(info);
+            if (created != null)
+                MainConsole.Instance.Output(
+                    $"Created LAND-scoped experience '{name}' ({created.ExperienceId}) — non-grid-wide, NOT region-allowed. " +
+                    "Admit it by adding a parcel ALLOW entry (About Land > Experiences, or a script test).");
+            else
+                MainConsole.Instance.Output("Failed to create experience. Check logs.");
         }
     }
 }
