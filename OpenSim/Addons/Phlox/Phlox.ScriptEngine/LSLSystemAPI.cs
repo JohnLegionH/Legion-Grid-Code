@@ -12588,7 +12588,24 @@ public int llSetLinkGLTFOverrides(int link, int face, LSLList overrides)
                 return false;
             var pos = m_host.AbsolutePosition;
             ILandObject parcel = World.LandChannel.GetLandObject(pos.X, pos.Y);
-            return parcel != null && parcel.IsExperienceBlocked(experienceId);
+            bool blocked = parcel != null && parcel.IsExperienceBlocked(experienceId);
+
+            // ── TEMP DIAGNOSTIC (Slice-2 enforcement triage) — remove once resolved. Shows the
+            //    experience being checked, which parcel the object resolves to, and whether that
+            //    parcel actually holds Flags=16 entries (wrong-parcel vs UUID-mismatch vs load). ──
+            int total = 0, flag16 = 0; UUID firstBlocked = UUID.Zero;
+            var pal = parcel?.LandData?.ParcelAccessList;
+            if (pal != null)
+            {
+                total = pal.Count;
+                foreach (var e in pal)
+                    if ((int)e.Flags == 16) { flag16++; if (firstBlocked == UUID.Zero) firstBlocked = e.AgentID; }
+            }
+            m_log.DebugFormat("[EXP ENFORCE]: block-check exp={0} pos=<{1:F1},{2:F1}> parcelLocalID={3} name='{4}' entries={5} flag16={6} firstBlocked={7} => blocked={8}",
+                experienceId, pos.X, pos.Y, parcel?.LandData?.LocalID ?? -1, parcel?.LandData?.Name,
+                total, flag16, firstBlocked, blocked);
+
+            return blocked;
         }
 
         // ── 659: llRequestExperiencePermissions ──

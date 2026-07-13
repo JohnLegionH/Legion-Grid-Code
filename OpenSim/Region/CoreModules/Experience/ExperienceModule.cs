@@ -143,19 +143,42 @@ namespace OpenSim.Region.CoreModules.Experience
         // ══════════════════════════════════════════════════════════════════
         private void OnRegisterCaps(UUID agentID, Caps caps)
         {
+            // ── TEMP DIAGNOSTIC (Slice-2 caps triage) — remove once resolved. Distinguishes
+            //    "never called" (this line absent) from "silently threw" (catch line below). ──
+            m_log.DebugFormat("[EXP CAPS]: OnRegisterCaps firing for region '{0}', agent {1} (m_Service={2})",
+                m_Scene?.RegionInfo.RegionName, agentID, m_Service == null ? "NULL" : "ok");
+
             if (m_Service == null) return;
 
-            caps.RegisterSimpleHandler("RegionExperiences",
-                new SimpleStreamHandler("/" + UUID.Random(),
-                    (req, resp) => HandleRegionExperiences(req, resp)));
+            try
+            {
+                caps.RegisterSimpleHandler("RegionExperiences",
+                    new SimpleStreamHandler("/" + UUID.Random(),
+                        (req, resp) => HandleRegionExperiences(req, resp)));
 
-            caps.RegisterSimpleHandler("GetExperienceInfo",
-                new SimpleStreamHandler("/" + UUID.Random(),
-                    (req, resp) => HandleGetExperienceInfo(req, resp)));
+                // GetExperienceInfo: the viewer appends a "/id/" subpath to this cap URL
+                // (llexperiencecache: <cap>/id/?page_size=N&...). RegisterSimpleHandler registers
+                // EXACT-match only (m_simpleStreamHandlers), so "<cap>/id/..." never routed and the
+                // cap was never called -> Firestorm rendered "(untitled experience)". Register it as
+                // a VAR-PATH handler (matched by the keyword before the second slash): advertise the
+                // cap URL (addToListener:false), then add to the listener with varPath = true.
+                var infoHandler = new SimpleStreamHandler("/" + UUID.Random(),
+                    (req, resp) => HandleGetExperienceInfo(req, resp));
+                caps.RegisterSimpleHandler("GetExperienceInfo", infoHandler, addToListener: false);
+                caps.HttpListener.AddSimpleStreamHandler(infoHandler, true);
 
-            caps.RegisterSimpleHandler("FindExperienceByName",
-                new SimpleStreamHandler("/" + UUID.Random(),
-                    (req, resp) => HandleFindExperienceByName(req, resp)));
+                caps.RegisterSimpleHandler("FindExperienceByName",
+                    new SimpleStreamHandler("/" + UUID.Random(),
+                        (req, resp) => HandleFindExperienceByName(req, resp)));
+
+                m_log.DebugFormat("[EXP CAPS]: registered RegionExperiences + GetExperienceInfo + FindExperienceByName for region '{0}'",
+                    m_Scene?.RegionInfo.RegionName);
+            }
+            catch (Exception e)
+            {
+                m_log.ErrorFormat("[EXP CAPS]: cap registration FAILED for region '{0}': {1}",
+                    m_Scene?.RegionInfo.RegionName, e);
+            }
         }
 
         private void WriteLLSD(IOSHttpResponse resp, OSD payload)
@@ -230,6 +253,7 @@ namespace OpenSim.Region.CoreModules.Experience
             OSDArray keys = new OSDArray();
             OSDArray errorIds = new OSDArray();
             var seen = new HashSet<UUID>();
+            int resolved = 0;
             var qs = req.QueryString;
             if (qs != null)
             {
@@ -243,7 +267,7 @@ namespace OpenSim.Region.CoreModules.Experience
                         if (UUID.TryParse(v, out UUID id) && id != UUID.Zero && seen.Add(id))
                         {
                             ExperienceInfo info = m_Service.GetExperience(id);
-                            if (info != null) keys.Add(ExperienceToOSD(info));
+                            if (info != null) { keys.Add(ExperienceToOSD(info)); resolved++; }
                             else errorIds.Add(OSD.FromUUID(id));
                         }
                     }
@@ -252,6 +276,16 @@ namespace OpenSim.Region.CoreModules.Experience
             OSDMap result = new OSDMap();
             result["experience_keys"] = keys;
             if (errorIds.Count > 0) result["error_ids"] = errorIds;
+
+            // ── TEMP DIAGNOSTIC (Slice-2 name-resolution triage) — remove once resolved. If this
+            //    line never appears while the tab is open, the viewer isn't reaching the cap (routing);
+            //    requested>0/resolved=0 = lookup miss; resolved>0 with "(untitled)" still shown = the
+            //    response SHAPE is wrong for the parser. Names the branch in one line. ──
+            m_log.DebugFormat("[EXP INFO]: GetExperienceInfo path='{0}' requestedUUIDs={1} resolved={2} error_ids={3} keys=[experience_keys={4}{5}] firstName='{6}'",
+                req.Url?.AbsolutePath, seen.Count, resolved, errorIds.Count, keys.Count,
+                errorIds.Count > 0 ? ",error_ids" : "",
+                keys.Count > 0 ? ((OSDMap)keys[0])["name"].AsString() : "(none)");
+
             WriteLLSD(resp, result);
         }
 
@@ -274,6 +308,23 @@ namespace OpenSim.Region.CoreModules.Experience
 
             OSDMap result = new OSDMap();
             result["experience_keys"] = keys;
+
+            // ── TEMP DIAGNOSTIC (Slice-2 picker-search triage) — remove once resolved. If this line
+            //    never appears while searching, the viewer isn't reaching the cap (routing). If it
+            //    shows matched>0 with the name present, the cap is CORRECT and the miss is viewer-side:
+            //    the About Land "Allowed" picker filters out PROPERTY_GRID (1<<4) entries
+            //    (llfloaterland.cpp:3661 FilterWithProperty) — so a grid-wide experience is returned
+            //    by us but hidden by the picker. Per-entry props are logged to prove which. ──
+            var entrySummary = new System.Text.StringBuilder();
+            for (int i = 0; i < keys.Count; i++)
+            {
+                OSDMap e = (OSDMap)keys[i];
+                if (i > 0) entrySummary.Append(", ");
+                entrySummary.AppendFormat("'{0}'(props={1})", e["name"].AsString(), e["properties"].AsInteger());
+            }
+            m_log.DebugFormat("[EXP FIND]: FindExperienceByName path='{0}' query='{1}' page={2} page_size={3} matched={4} returned={5} entries=[{6}]",
+                req.Url?.AbsolutePath, query, page, pageSize, found.Count, keys.Count, entrySummary);
+
             WriteLLSD(resp, result);
         }
 
@@ -490,8 +541,20 @@ namespace OpenSim.Region.CoreModules.Experience
                 HandleCreateLandExperience);
         }
 
+        // Region-scoped console commands must act only on the console-selected region. This module
+        // is INonSharedRegionModule → one instance per region → each instance registered the same
+        // command, so a bare invocation runs the handler N times (the estate-reload triple-echo).
+        // Matches the stock LandManagementModule / RegionCommandsModule guard: proceed only when no
+        // region is selected (root) or the selected region is THIS instance's scene.
+        private bool WrongConsoleScene()
+        {
+            return !(MainConsole.Instance.ConsoleScene is null
+                     || MainConsole.Instance.ConsoleScene == m_Scene);
+        }
+
         private void HandleCreateExperience(string module, string[] args)
         {
+            if (WrongConsoleScene()) return;
             if (args.Length < 3)
             {
                 MainConsole.Instance.Output("Usage: experience create <name> [description]");
@@ -529,6 +592,7 @@ namespace OpenSim.Region.CoreModules.Experience
 
         private void HandleListExperiences(string module, string[] args)
         {
+            if (WrongConsoleScene()) return;
             var experiences = m_Service.FindExperiences("");
             if (experiences.Count == 0)
             {
@@ -548,6 +612,7 @@ namespace OpenSim.Region.CoreModules.Experience
 
         private void HandleExperienceInfo(string module, string[] args)
         {
+            if (WrongConsoleScene()) return;
             if (args.Length < 3)
             {
                 MainConsole.Instance.Output("Usage: experience info <name>");
@@ -583,6 +648,7 @@ namespace OpenSim.Region.CoreModules.Experience
 
         private void HandleDeleteExperience(string module, string[] args)
         {
+            if (WrongConsoleScene()) return;
             if (args.Length < 3)
             {
                 MainConsole.Instance.Output("Usage: experience delete <name>");
@@ -605,6 +671,7 @@ namespace OpenSim.Region.CoreModules.Experience
 
         private void HandleAllowExperience(string module, string[] args)
         {
+            if (WrongConsoleScene()) return;
             if (args.Length < 3)
             {
                 MainConsole.Instance.Output("Usage: experience allow <name>");
@@ -625,6 +692,7 @@ namespace OpenSim.Region.CoreModules.Experience
 
         private void HandleBlockExperience(string module, string[] args)
         {
+            if (WrongConsoleScene()) return;
             if (args.Length < 3)
             {
                 MainConsole.Instance.Output("Usage: experience block <name>");
@@ -645,6 +713,7 @@ namespace OpenSim.Region.CoreModules.Experience
 
         private void HandleKvList(string module, string[] args)
         {
+            if (WrongConsoleScene()) return;
             if (args.Length < 3)
             {
                 MainConsole.Instance.Output("Usage: experience kvlist <name>");
@@ -679,6 +748,7 @@ namespace OpenSim.Region.CoreModules.Experience
 
         private void HandleKvSet(string module, string[] args)
         {
+            if (WrongConsoleScene()) return;
             if (args.Length < 5)
             {
                 MainConsole.Instance.Output("Usage: experience kvset <experience-name> <key> <value>");
@@ -705,6 +775,7 @@ namespace OpenSim.Region.CoreModules.Experience
 
         private void HandleAssignExperience(string module, string[] args)
         {
+            if (WrongConsoleScene()) return;
             if (args.Length < 4)
             {
                 MainConsole.Instance.Output("Usage: experience assign <experience-name> <script-item-uuid>");
@@ -734,6 +805,7 @@ namespace OpenSim.Region.CoreModules.Experience
 
         private void HandleUnassignExperience(string module, string[] args)
         {
+            if (WrongConsoleScene()) return;
             if (args.Length < 3)
             {
                 MainConsole.Instance.Output("Usage: experience unassign <script-item-uuid>");
@@ -768,6 +840,7 @@ namespace OpenSim.Region.CoreModules.Experience
 
         private void HandleBlockParcel(string module, string[] args)
         {
+            if (WrongConsoleScene()) return;
             // experience block-parcel <exp-name-or-uuid> <parcel-localID>
             if (args.Length < 4)
             {
@@ -822,6 +895,7 @@ namespace OpenSim.Region.CoreModules.Experience
 
         private void HandleUnblockParcel(string module, string[] args)
         {
+            if (WrongConsoleScene()) return;
             // experience unblock-parcel <exp-name-or-uuid> <parcel-localID>
             if (args.Length < 4)
             {
@@ -866,6 +940,7 @@ namespace OpenSim.Region.CoreModules.Experience
 
         private void HandleListParcels(string module, string[] args)
         {
+            if (WrongConsoleScene()) return;
             var parcels = m_Scene.LandChannel.AllParcels();
             if (parcels == null || parcels.Count == 0)
             {
@@ -888,6 +963,7 @@ namespace OpenSim.Region.CoreModules.Experience
 
         private void HandleListScripts(string module, string[] args)
         {
+            if (WrongConsoleScene()) return;
             // experience list-scripts [object-name-filter]
             string filter = args.Length > 2 ? string.Join(" ", args, 2, args.Length - 2) : null;
 
@@ -920,6 +996,7 @@ namespace OpenSim.Region.CoreModules.Experience
 
         private void HandleUnallowExperience(string module, string[] args)
         {
+            if (WrongConsoleScene()) return;
             if (args.Length < 3)
             {
                 MainConsole.Instance.Output("Usage: experience unallow <name>");
@@ -940,6 +1017,7 @@ namespace OpenSim.Region.CoreModules.Experience
 
         private void HandleCreateLandExperience(string module, string[] args)
         {
+            if (WrongConsoleScene()) return;
             if (args.Length < 3)
             {
                 MainConsole.Instance.Output("Usage: experience create-land <name> [description]");

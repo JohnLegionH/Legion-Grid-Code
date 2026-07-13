@@ -1072,6 +1072,12 @@ namespace OpenSim.Region.CoreModules.World.Land
             else
                 remote_client.SendLandAccessListData(banlist, (uint)AccessList.Ban, LandData.LocalID);
 
+            // ── TEMP DIAGNOSTIC (Slice-2 serve triage) — remove once resolved. Shows whether the
+            //    viewer requested the experience flags (cap present) and how many entries this
+            //    parcel holds to send back (tab-empty = 0 here, or flags bit not requested). ──
+            m_log.DebugFormat("[EXP SERVE]: SendAccessList parcel {0} reqFlags={1} access={2} ban={3} allowExp={4} blockExp={5}",
+                LandData.LocalID, flags, accesslist.Count, banlist.Count, allowExpList.Count, blockExpList.Count);
+
             // Experience allow/block lists (Slice 2 serve-side). Send only when the client asked for
             // them (the viewer strips AL_ALLOW/BLOCK_EXPERIENCE from its request when the
             // RegionExperiences cap is absent) and only when non-empty — the viewer clears its
