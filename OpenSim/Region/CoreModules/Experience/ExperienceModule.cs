@@ -143,11 +143,6 @@ namespace OpenSim.Region.CoreModules.Experience
         // ══════════════════════════════════════════════════════════════════
         private void OnRegisterCaps(UUID agentID, Caps caps)
         {
-            // ── TEMP DIAGNOSTIC (Slice-2 caps triage) — remove once resolved. Distinguishes
-            //    "never called" (this line absent) from "silently threw" (catch line below). ──
-            m_log.DebugFormat("[EXP CAPS]: OnRegisterCaps firing for region '{0}', agent {1} (m_Service={2})",
-                m_Scene?.RegionInfo.RegionName, agentID, m_Service == null ? "NULL" : "ok");
-
             if (m_Service == null) return;
 
             try
@@ -170,13 +165,10 @@ namespace OpenSim.Region.CoreModules.Experience
                 caps.RegisterSimpleHandler("FindExperienceByName",
                     new SimpleStreamHandler("/" + UUID.Random(),
                         (req, resp) => HandleFindExperienceByName(req, resp)));
-
-                m_log.DebugFormat("[EXP CAPS]: registered RegionExperiences + GetExperienceInfo + FindExperienceByName for region '{0}'",
-                    m_Scene?.RegionInfo.RegionName);
             }
             catch (Exception e)
             {
-                m_log.ErrorFormat("[EXP CAPS]: cap registration FAILED for region '{0}': {1}",
+                m_log.ErrorFormat("[ExperienceModule]: cap registration FAILED for region '{0}': {1}",
                     m_Scene?.RegionInfo.RegionName, e);
             }
         }
@@ -253,7 +245,6 @@ namespace OpenSim.Region.CoreModules.Experience
             OSDArray keys = new OSDArray();
             OSDArray errorIds = new OSDArray();
             var seen = new HashSet<UUID>();
-            int resolved = 0;
             var qs = req.QueryString;
             if (qs != null)
             {
@@ -267,7 +258,7 @@ namespace OpenSim.Region.CoreModules.Experience
                         if (UUID.TryParse(v, out UUID id) && id != UUID.Zero && seen.Add(id))
                         {
                             ExperienceInfo info = m_Service.GetExperience(id);
-                            if (info != null) { keys.Add(ExperienceToOSD(info)); resolved++; }
+                            if (info != null) keys.Add(ExperienceToOSD(info));
                             else errorIds.Add(OSD.FromUUID(id));
                         }
                     }
@@ -276,16 +267,6 @@ namespace OpenSim.Region.CoreModules.Experience
             OSDMap result = new OSDMap();
             result["experience_keys"] = keys;
             if (errorIds.Count > 0) result["error_ids"] = errorIds;
-
-            // ── TEMP DIAGNOSTIC (Slice-2 name-resolution triage) — remove once resolved. If this
-            //    line never appears while the tab is open, the viewer isn't reaching the cap (routing);
-            //    requested>0/resolved=0 = lookup miss; resolved>0 with "(untitled)" still shown = the
-            //    response SHAPE is wrong for the parser. Names the branch in one line. ──
-            m_log.DebugFormat("[EXP INFO]: GetExperienceInfo path='{0}' requestedUUIDs={1} resolved={2} error_ids={3} keys=[experience_keys={4}{5}] firstName='{6}'",
-                req.Url?.AbsolutePath, seen.Count, resolved, errorIds.Count, keys.Count,
-                errorIds.Count > 0 ? ",error_ids" : "",
-                keys.Count > 0 ? ((OSDMap)keys[0])["name"].AsString() : "(none)");
-
             WriteLLSD(resp, result);
         }
 
@@ -312,23 +293,6 @@ namespace OpenSim.Region.CoreModules.Experience
 
             OSDMap result = new OSDMap();
             result["experience_keys"] = keys;
-
-            // ── TEMP DIAGNOSTIC (Slice-2 picker-search triage) — remove once resolved. If this line
-            //    never appears while searching, the viewer isn't reaching the cap (routing). If it
-            //    shows matched>0 with the name present, the cap is CORRECT and the miss is viewer-side:
-            //    the About Land "Allowed" picker filters out PROPERTY_GRID (1<<4) entries
-            //    (llfloaterland.cpp:3661 FilterWithProperty) — so a grid-wide experience is returned
-            //    by us but hidden by the picker. Per-entry props are logged to prove which. ──
-            var entrySummary = new System.Text.StringBuilder();
-            for (int i = 0; i < keys.Count; i++)
-            {
-                OSDMap e = (OSDMap)keys[i];
-                if (i > 0) entrySummary.Append(", ");
-                entrySummary.AppendFormat("'{0}'(props={1})", e["name"].AsString(), e["properties"].AsInteger());
-            }
-            m_log.DebugFormat("[EXP FIND]: FindExperienceByName path='{0}' query='{1}' page={2} page_size={3} matched={4} returned={5} entries=[{6}]",
-                req.Url?.AbsolutePath, query, page, pageSize, found.Count, keys.Count, entrySummary);
-
             WriteLLSD(resp, result);
         }
 
