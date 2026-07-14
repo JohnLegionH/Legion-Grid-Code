@@ -302,7 +302,11 @@ namespace OpenSim.Region.CoreModules.Experience
 
             List<ExperienceInfo> found = m_Service.FindExperiences(query) ?? new List<ExperienceInfo>();
             OSDArray keys = new OSDArray();
-            int start = page * pageSize;
+            // The viewer's page parameter is 1-BASED: the picker sends page=1 for the first
+            // search (llpanelexperiencepicker.cpp onBtnFind: mCurrentPage=1) and onPage()
+            // clamps to >=1. Treating it as 0-based made start = 30 and dropped EVERY result
+            // (the "returned=0 for all queries" bug). Clamp <=1 to page one.
+            int start = Math.Max(0, page - 1) * pageSize;
             for (int i = start; i < found.Count && i < start + pageSize; i++)
                 keys.Add(ExperienceToOSD(found[i]));
 
