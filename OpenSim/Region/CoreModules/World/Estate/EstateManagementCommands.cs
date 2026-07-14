@@ -101,18 +101,37 @@ namespace OpenSim.Region.CoreModules.World.Estate
                 ReloadEstateCommand);
         }
 
+        // Multi-scene guard: EstateManagementModule is non-shared, so Scene.AddCommand
+        // registers shared:false and ONE DELEGATE PER REGION accumulates — every estate
+        // command handler here fires N times per invocation (the experience block-parcel
+        // disease). Scope each firing to its own scene unless that scene is the console-
+        // selected one.
+        private bool WrongConsoleScene()
+        {
+            return !(MainConsole.Instance.ConsoleScene == null
+                     || MainConsole.Instance.ConsoleScene == m_module.Scene);
+        }
+
         protected void ReloadEstateCommand(string module, string[] cmd)
         {
+            // N per-region firings (see WrongConsoleScene). With a region selected, only
+            // that instance proceeds (was: the selected region reloaded N times); at root,
+            // every instance reloads ONLY its own scene — all regions covered exactly once,
+            // and 'all' can no longer multiply into N×N ForEachScene passes.
+            Scene selected = SceneManager.Instance.CurrentScene;
+            if (selected == null)
+            {
+                ReloadAndReport(m_module.Scene); // root: every instance covers its own region
+                return;
+            }
+            if (selected != m_module.Scene)
+                return;
+
             bool all = cmd.Length > 2 && cmd[2].Equals("all", StringComparison.InvariantCultureIgnoreCase);
             if (all)
-            {
                 SceneManager.Instance.ForEachScene(ReloadAndReport);
-            }
             else
-            {
-                Scene scene = SceneManager.Instance.CurrentScene ?? m_module.Scene;
-                ReloadAndReport(scene);
-            }
+                ReloadAndReport(selected);
         }
 
         private void ReloadAndReport(Scene scene)
@@ -132,6 +151,9 @@ namespace OpenSim.Region.CoreModules.World.Estate
         #region CommandHandlers
         protected void consoleSetTerrainTexture(string module, string[] args)
         {
+            // Each instance writes only ITS OWN scene (the x/y args scope the root-level
+            // broadcast); the guard additionally respects a console-selected region.
+            if (WrongConsoleScene()) return;
             string num = args[3];
             string uuid = args[4];
             int x = (args.Length > 5 ? int.Parse(args[5]) : -1);
@@ -171,6 +193,7 @@ namespace OpenSim.Region.CoreModules.World.Estate
         }
         protected void consoleSetTerrainPBR(string module, string[] args)
         {
+            if (WrongConsoleScene()) return; // see consoleSetTerrainTexture
             string num = args[3];
             string uuid = args[4];
             int x = (args.Length > 5 ? int.Parse(args[5]) : -1);
@@ -209,6 +232,7 @@ namespace OpenSim.Region.CoreModules.World.Estate
         }
         protected void consoleSetWaterHeight(string module, string[] args)
         {
+            if (WrongConsoleScene()) return; // see consoleSetTerrainTexture
             string heightstring = args[3];
 
             int x = (args.Length > 4 ? int.Parse(args[4]) : -1);
@@ -232,6 +256,7 @@ namespace OpenSim.Region.CoreModules.World.Estate
         }
         protected void consoleSetTerrainHeights(string module, string[] args)
         {
+            if (WrongConsoleScene()) return; // see consoleSetTerrainTexture
             string num = args[3];
             string min = args[4];
             string max = args[5];
@@ -288,6 +313,10 @@ namespace OpenSim.Region.CoreModules.World.Estate
 
         protected void ShowEstatesCommand(string module, string[] cmd)
         {
+            // At root every instance reports its own region (the "all estates" intent);
+            // with a region selected, only that instance reports (was: N lines regardless).
+            if (WrongConsoleScene()) return;
+
             StringBuilder report = new StringBuilder();
             RegionInfo ri = m_module.Scene.RegionInfo;
             EstateSettings es = ri.EstateSettings;

@@ -140,6 +140,11 @@ namespace OpenSim.Region.ClientStack.Linden
 
         protected void HandleDebugEq(string module, string[] args)
         {
+            // Registered per region instance (shared:false) — one delegate per region fires
+            // per invocation. Scope to the console-selected region; at root every instance
+            // still acts on its own scene (the per-region broadcast intent).
+            if (!(MainConsole.Instance.ConsoleScene == null || MainConsole.Instance.ConsoleScene == m_scene))
+                return;
 
             if (!(args.Length == 3 && int.TryParse(args[2], out int debugLevel)))
             {
@@ -154,6 +159,9 @@ namespace OpenSim.Region.ClientStack.Linden
 
         protected void HandleShowEq(string module, string[] args)
         {
+            if (!(MainConsole.Instance.ConsoleScene == null || MainConsole.Instance.ConsoleScene == m_scene))
+                return; // see HandleDebugEq
+
             MainConsole.Instance.Output($"Events in Scene {m_scene.Name} agents queues :");
 
             lock (queues)

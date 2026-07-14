@@ -166,6 +166,12 @@ namespace OpenSim.Region.CoreModules.Avatar.Attachments
 
         private void HandleDebugAttachmentsLog(string module, string[] args)
         {
+            // Registered per region instance (scene.AddCommand with a non-shared module =>
+            // shared:false) — one delegate per region fires per invocation. Scope to the
+            // console-selected region; at root every instance still acts on its own scene.
+            if (!(MainConsole.Instance.ConsoleScene == null || MainConsole.Instance.ConsoleScene == m_scene))
+                return;
+
             if (!(args.Length == 4 && int.TryParse(args[3], out int debugLevel)))
             {
                 MainConsole.Instance.Output("Usage: debug attachments log [0|1]");
@@ -179,6 +185,9 @@ namespace OpenSim.Region.CoreModules.Avatar.Attachments
 
         private void HandleDebugAttachmentsStatus(string module, string[] args)
         {
+            if (!(MainConsole.Instance.ConsoleScene == null || MainConsole.Instance.ConsoleScene == m_scene))
+                return; // see HandleDebugAttachmentsLog
+
             MainConsole.Instance.Output($"Settings for {m_scene.Name}");
             MainConsole.Instance.Output($"Debug logging level: {DebugLevel}");
         }
