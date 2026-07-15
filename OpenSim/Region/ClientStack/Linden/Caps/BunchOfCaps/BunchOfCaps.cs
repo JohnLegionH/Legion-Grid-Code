@@ -2338,8 +2338,11 @@ namespace OpenSim.Region.ClientStack.Linden
                         {
                             int now = Util.UnixTimeSinceEpoch();
                             int throttleSecs = ConfigOptions.DisplayNamesThrottleDays * 86400;
-                            // First-ever set (NameChanged == 0) is never throttled.
-                            if (account.NameChanged > 0 && (now - account.NameChanged) < throttleSecs)
+                            // First-ever set (NameChanged == 0) is never throttled. CLEARING
+                            // (reverting to the username) is exempt entirely — SL parity: only
+                            // SETTING a new name is once-per-week; a user who regrets a name
+                            // may revert anytime (Firestorm sends "" for both reset paths).
+                            if (!clearing && account.NameChanged > 0 && (now - account.NameChanged) < throttleSecs)
                             {
                                 status = 409; reason = "Too soon since last display name change";
                             }
@@ -2354,7 +2357,11 @@ namespace OpenSim.Region.ClientStack.Linden
                                 int prevNameChanged = account.NameChanged;
 
                                 account.DisplayName = clearing ? string.Empty : newName;
-                                account.NameChanged = now;
+                                // A clear does NOT reset/extend the throttle window (SL parity:
+                                // clearing doesn't grant a free rename — the week still counts
+                                // from the last SET), so NameChanged only moves on a set.
+                                if (!clearing)
+                                    account.NameChanged = now;
 
                                 if (m_userAccountService.StoreUserAccount(account))
                                 {
@@ -2368,7 +2375,12 @@ namespace OpenSim.Region.ClientStack.Linden
                                     updFirstName = account.FirstName;
                                     updLastName = account.LastName;
                                     updIsDefault = clearing;   // cleared => back to legacy default
-                                    updNextUpdate = DateTime.UtcNow.AddDays(ConfigOptions.DisplayNamesThrottleDays);
+                                    // Truthful next-allowed-change time: from the last SET (which
+                                    // a clear leaves untouched), not from "now" — after a clear
+                                    // the remaining window from the last set still applies.
+                                    updNextUpdate = account.NameChanged > 0
+                                        ? Util.ToDateTime(account.NameChanged).AddDays(ConfigOptions.DisplayNamesThrottleDays)
+                                        : DateTime.UtcNow;
                                 }
                                 else
                                 {
