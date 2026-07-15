@@ -2188,6 +2188,18 @@ namespace OpenSim.Region.ClientStack.Linden
             httpResponse.StatusCode = (int)HttpStatusCode.OK;
         }
 
+        // SL wire convention for the "username" field (verified against the viewer parser,
+        // llavatarname.cpp: its own fromString synthesis builds lowercased "first.last", and
+        // hides a historic "Resident" surname — username is then just "first"). The
+        // legacy_first_name / legacy_last_name fields stay proper-case and are separate.
+        private static string MakeSLUsername(string firstName, string lastName)
+        {
+            if (string.IsNullOrEmpty(lastName)
+                || lastName.Equals("Resident", StringComparison.OrdinalIgnoreCase))
+                return (firstName ?? string.Empty).ToLowerInvariant();
+            return (firstName + "." + lastName).ToLowerInvariant();
+        }
+
         public void GetDisplayNames(IOSHttpRequest httpRequest, IOSHttpResponse httpResponse)
         {
             if (httpRequest.HttpMethod != "GET")
@@ -2260,10 +2272,7 @@ namespace OpenSim.Region.ClientStack.Linden
                         }
 
                         LLSDxmlEncode2.AddMap(lsl);
-                        // TODO(display-names): SL's "username" is the lowercased "first.last"
-                        // account name, not the display string emitted here. Candidate
-                        // micro-fix (kept separate from the DisplayNameUpdate work).
-                        LLSDxmlEncode2.AddElem("username", fullname, lsl);
+                        LLSDxmlEncode2.AddElem("username", MakeSLUsername(ud.FirstName, ud.LastName), lsl);
                         LLSDxmlEncode2.AddElem("display_name", displayName, lsl);
                         LLSDxmlEncode2.AddElem("display_name_next_update", nextUpdate, lsl);
                         LLSDxmlEncode2.AddElem("display_name_expires", DateTime.UtcNow.AddMonths(1), lsl);
@@ -2444,10 +2453,7 @@ namespace OpenSim.Region.ClientStack.Linden
             // anyway (so that field is cosmetic).
             if (status == 200 && eq is not null && replyDisplayName is not null)
             {
-                // SL-style username is lowercased "first.last". NOTE: GetDisplayNames still
-                // emits the display string for its "username" field — a separate micro-fix,
-                // deliberately not bundled here (see the TODO there).
-                string username = (updFirstName + "." + updLastName).ToLowerInvariant();
+                string username = MakeSLUsername(updFirstName, updLastName);
                 string nextUpdateIso = updNextUpdate.ToString("yyyy-MM-ddTHH:mm:ss'Z'");
                 string expiresIso = DateTime.UtcNow.AddDays(1).ToString("yyyy-MM-ddTHH:mm:ss'Z'");
 
