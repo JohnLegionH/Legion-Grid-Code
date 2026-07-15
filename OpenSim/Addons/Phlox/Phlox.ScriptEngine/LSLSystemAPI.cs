@@ -12537,14 +12537,32 @@ public int llSetLinkGLTFOverrides(int link, int face, LSLList overrides)
             var expService = World?.RequestModuleInterface<IExperienceService>();
             if (expService == null) return false;
 
-            // Block-wins: a parcel BLOCK on this experience overrides region/grid/parcel allow.
+            // Block-wins: a parcel OR REGION block on this experience overrides every allow.
+            // Region block is absolute in SL terms: the estate Blocked list only carries
+            // grid-wide experiences (the panel filters enforce this), and parcel lists can't
+            // even contain grid-wide ones — so nothing at parcel level can re-admit a
+            // region-blocked experience.
             if (IsExperienceBlockedOnObjectParcel(experienceId)) return false;
+            if (IsExperienceBlockedInRegion(expService, experienceId)) return false;
 
             // Admission (Slice-2 allow-precedence): region-allowed OR grid-wide OR parcel-ALLOW.
             if (!IsExperienceAdmitted(expService, experienceId)) return false;
 
             // Agent must still have granted permission to the experience.
             return expService.IsAgentGranted(experienceId, agentId);
+        }
+
+        /// <summary>
+        /// Region-BLOCK check (the Region/Estate > Experiences panel's Blocked list). Same
+        /// block-wins tier as the parcel block: overrides region/grid/parcel allow.
+        /// Reads through the service each check (like GetAllowedExperiences in the
+        /// admission path), so panel edits take effect live — no restart.
+        /// </summary>
+        private bool IsExperienceBlockedInRegion(IExperienceService expService, UUID experienceId)
+        {
+            if (experienceId == UUID.Zero || World == null)
+                return false;
+            return expService.GetBlockedExperiences(World.RegionInfo.RegionID).Contains(experienceId);
         }
 
         /// <summary>
@@ -12611,13 +12629,15 @@ public int llSetLinkGLTFOverrides(int link, int face, LSLList overrides)
                 return;
             }
 
-            // Block-wins: a parcel BLOCK on this experience overrides region/grid/parcel allow.
-            // Deny instead of auto-granting when the script's object sits on a blocking parcel.
-            if (IsExperienceBlockedOnObjectParcel(experienceId))
+            // Block-wins: a parcel OR REGION block on this experience overrides every allow.
+            // Deny instead of auto-granting when blocked (see IsExperienceBlockedInRegion for
+            // why region block is absolute).
+            if (IsExperienceBlockedOnObjectParcel(experienceId) ||
+                IsExperienceBlockedInRegion(expService, experienceId))
             {
                 m_ScriptEngine.PostScriptEvent(m_itemID, new EventParams(
                     "experience_permissions_denied",
-                    new object[] { agent, ExperienceInfo.XP_ERROR_NOT_PERMITTED }, // 4 — blocked on this parcel
+                    new object[] { agent, ExperienceInfo.XP_ERROR_NOT_PERMITTED }, // 4 — blocked on this parcel or region
                     new DetectParams[0]));
                 return;
             }
