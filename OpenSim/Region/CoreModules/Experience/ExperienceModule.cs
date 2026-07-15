@@ -116,7 +116,77 @@ namespace OpenSim.Region.CoreModules.Experience
             // allow/block data itself still flows over the UDP ParcelAccessList path.
             scene.EventManager.OnRegisterCaps += OnRegisterCaps;
 
+            // The Region/Estate > Experiences panel edits arrive on TWO wires: the caps
+            // POST (full lists, sent when the user clicks Apply) AND the per-item
+            // EstateOwnerMessage "estateexperiencedelta" fired immediately on each
+            // dialog-confirmed add/remove. SL applies on the delta — a user who confirms
+            // the dialog and closes the floater without Apply would silently lose the
+            // edit if we only handled the POST. Handle both.
+            scene.EventManager.OnNewClient += OnNewClient;
+
             m_log.InfoFormat("[ExperienceModule]: Experience system active for region '{0}'", scene.RegionInfo.RegionName);
+        }
+
+        private void OnNewClient(IClientAPI client)
+        {
+            client.OnEstateExperienceDelta += HandleEstateExperienceDelta;
+        }
+
+        // Flags per the viewer (llregionflags.h): TRUSTED_ADD=1<<2, TRUSTED_REMOVE=1<<3,
+        // ALLOWED_ADD=1<<4, ALLOWED_REMOVE=1<<5, BLOCKED_ADD=1<<6, BLOCKED_REMOVE=1<<7;
+        // ESTATE_ACCESS_NO_REPLY=1<<10 suppresses the "setexperience" echo (the viewer
+        // sets it on all but the last item of a multi-select batch). The apply-to-all/
+        // managed-estates bits (1<<0, 1<<1) are accepted as this-estate: Legion runs one
+        // estate per region here. LLClientView already gated on CanIssueEstateCommand.
+        private void HandleEstateExperienceDelta(IClientAPI client, UUID invoice, uint flags, UUID experienceID)
+        {
+            if (m_Service == null || experienceID == UUID.Zero) return;
+            UUID regionId = m_Scene.RegionInfo.RegionID;
+
+            const uint TRUSTED_ADD = 1u << 2, TRUSTED_REMOVE = 1u << 3;
+            const uint ALLOWED_ADD = 1u << 4, ALLOWED_REMOVE = 1u << 5;
+            const uint BLOCKED_ADD = 1u << 6, BLOCKED_REMOVE = 1u << 7;
+            const uint NO_REPLY = 1u << 10;
+
+            if ((flags & ALLOWED_ADD) != 0)
+                m_Service.AllowExperience(regionId, experienceID);
+            else if ((flags & ALLOWED_REMOVE) != 0)
+                m_Service.RemoveAllowedExperience(regionId, experienceID);
+            else if ((flags & BLOCKED_ADD) != 0)
+                m_Service.BlockExperience(regionId, experienceID);
+            else if ((flags & BLOCKED_REMOVE) != 0)
+                m_Service.RemoveBlockedExperience(regionId, experienceID);
+            else if ((flags & (TRUSTED_ADD | TRUSTED_REMOVE)) != 0)
+            {
+                // Trusted is not implemented (consent-bypass semantics deferred — see the
+                // POST handler note). The authoritative echo below reports trusted as
+                // empty, so the panel visibly reverts the entry — honest, not silent.
+                m_log.DebugFormat(
+                    "[ExperienceModule]: estateexperiencedelta TRUSTED edit for {0} by {1} in '{2}' not applied — trusted list not implemented.",
+                    experienceID, client.AgentId, m_Scene.RegionInfo.RegionName);
+            }
+            else
+            {
+                m_log.DebugFormat(
+                    "[ExperienceModule]: estateexperiencedelta with unrecognized flags {0} from {1} — ignored.",
+                    flags, client.AgentId);
+                return;
+            }
+
+            m_log.DebugFormat(
+                "[ExperienceModule]: estateexperiencedelta flags={0} exp={1} by {2} in '{3}' applied.",
+                flags, experienceID, client.AgentId, m_Scene.RegionInfo.RegionName);
+
+            // Authoritative echo (unless suppressed): the updated lists, which the panel
+            // renders directly — what it shows is exactly what the DB now holds.
+            if ((flags & NO_REPLY) == 0)
+            {
+                client.SendEstateExperienceList(invoice,
+                    m_Scene.RegionInfo.EstateSettings.EstateID,
+                    m_Service.GetBlockedExperiences(regionId).ToArray(),
+                    Array.Empty<UUID>(), // trusted — honestly empty
+                    m_Service.GetAllowedExperiences(regionId).ToArray());
+            }
         }
 
         public void RegionLoaded(Scene scene)
@@ -128,6 +198,7 @@ namespace OpenSim.Region.CoreModules.Experience
         public void RemoveRegion(Scene scene)
         {
             if (!m_Enabled) return;
+            scene.EventManager.OnNewClient -= OnNewClient;
             scene.EventManager.OnRegisterCaps -= OnRegisterCaps;
             scene.UnregisterModuleInterface<IExperienceService>(m_Service);
             scene.UnregisterModuleInterface<ExperienceModule>(this);
@@ -149,7 +220,7 @@ namespace OpenSim.Region.CoreModules.Experience
             {
                 caps.RegisterSimpleHandler("RegionExperiences",
                     new SimpleStreamHandler("/" + UUID.Random(),
-                        (req, resp) => HandleRegionExperiences(req, resp)));
+                        (req, resp) => HandleRegionExperiences(req, resp, agentID)));
 
                 // GetExperienceInfo: the viewer appends a "/id/" subpath to this cap URL
                 // (llexperiencecache: <cap>/id/?page_size=N&...). RegisterSimpleHandler registers
@@ -217,24 +288,108 @@ namespace OpenSim.Region.CoreModules.Experience
             return m;
         }
 
-        private void HandleRegionExperiences(IOSHttpRequest req, IOSHttpResponse resp)
+        private void HandleRegionExperiences(IOSHttpRequest req, IOSHttpResponse resp, UUID agentID)
         {
             UUID regionId = m_Scene.RegionInfo.RegionID;
             if (req.HttpMethod == "POST")
             {
-                // Region/estate experience MANAGEMENT (the Region-Info Experiences panel writing
-                // allowed/blocked/trusted) is DEFERRED as its own future item — open permission
-                // question: who may edit, estate owner only or also managers? We do NOT silently
-                // accept-and-discard (that would lie to the panel: the edit appears to succeed then
-                // vanishes — the DisplayNames silent-gate anti-pattern). Instead reject-shaped: echo
-                // the CURRENT lists back so the panel re-renders the truth (the edit visibly reverts).
-                m_log.DebugFormat(
-                    "[ExperienceModule]: RegionExperiences POST rejected in '{0}' — region/estate experience management is deferred (Slice 2 target is the parcel Land tab).",
-                    m_Scene.RegionInfo.RegionName);
-                WriteLLSD(resp, BuildRegionExperiencesLLSD(regionId));
+                HandleRegionExperiencesPost(req, resp, agentID, regionId);
                 return;
             }
             // GET — real region allowed/blocked (also makes the Region-Info panel read-correct).
+            WriteLLSD(resp, BuildRegionExperiencesLLSD(regionId));
+        }
+
+        // Region/Estate > Experiences panel write. Wire contract (llfloaterregioninfo.cpp
+        // LLPanelRegionExperiences::sendUpdate): the panel POSTs FULL lists every time —
+        // { allowed:[uuid...], blocked:[uuid...], trusted:[uuid...] } — and expects the
+        // updated lists back in the same shape as GET (infoCallback -> processResponse).
+        // An emptied list arrives as an undefined/absent key (the viewer builds it by
+        // appending to a fresh LLSD, so zero items = undef, not an empty array) — treat
+        // missing keys as empty. Rejections are reject-shaped: echo the CURRENT lists so
+        // the panel visibly reverts (no silent gate).
+        //
+        // Permission: match SL and the rest of the estate machinery — the viewer gates the
+        // panel on isGodlike || canManageEstate (refreshFromRegion), and every estate
+        // method in LLClientView gates on CanIssueEstateCommand(agentId, false) (= admin
+        // OR estate manager/owner); we use exactly that check.
+        //
+        // TRUSTED: deliberately NOT implemented — SL-trusted experiences bypass per-agent
+        // consent (no permission dialog), a security-sensitive enforcement change that is
+        // not "small and clear". We keep serving trusted=[] and reject trusted edits by
+        // reversion (the panel shows the entry vanish — honest), logged below.
+        private void HandleRegionExperiencesPost(IOSHttpRequest req, IOSHttpResponse resp, UUID agentID, UUID regionId)
+        {
+            bool authorized = m_Scene.Permissions.CanIssueEstateCommand(agentID, false);
+            if (!authorized)
+            {
+                m_log.DebugFormat(
+                    "[ExperienceModule]: RegionExperiences POST by {0} in '{1}' REJECTED — not estate owner/manager/admin (reject-shaped echo).",
+                    agentID, m_Scene.RegionInfo.RegionName);
+                WriteLLSD(resp, BuildRegionExperiencesLLSD(regionId));
+                return;
+            }
+
+            OSDMap body = null;
+            try
+            {
+                body = OSDParser.DeserializeLLSDXml(req.InputStream) as OSDMap;
+            }
+            catch (Exception e)
+            {
+                m_log.DebugFormat("[ExperienceModule]: RegionExperiences POST parse error: {0}", e.Message);
+            }
+            if (body is null)
+            {
+                WriteLLSD(resp, BuildRegionExperiencesLLSD(regionId)); // reject-shaped
+                return;
+            }
+
+            static HashSet<UUID> ReadIdList(OSDMap m, string key)
+            {
+                var set = new HashSet<UUID>();
+                if (m.TryGetValue(key, out OSD osd) && osd is OSDArray arr)
+                    foreach (OSD e in arr)
+                    {
+                        UUID id = e.AsUUID();
+                        if (id != UUID.Zero) set.Add(id);
+                    }
+                return set; // missing/undef key (viewer's emptied list) => empty
+            }
+
+            var postedAllowed = ReadIdList(body, "allowed");
+            var postedBlocked = ReadIdList(body, "blocked");
+            var postedTrusted = ReadIdList(body, "trusted");
+
+            // An id in both posted lists would fight the service's mutual exclusion
+            // (allow removes block and vice versa); blocked wins, matching block-wins
+            // enforcement precedence.
+            postedAllowed.ExceptWith(postedBlocked);
+
+            var currentAllowed = new HashSet<UUID>(m_Service.GetAllowedExperiences(regionId));
+            var currentBlocked = new HashSet<UUID>(m_Service.GetBlockedExperiences(regionId));
+
+            int changes = 0;
+            foreach (UUID id in postedAllowed)
+                if (!currentAllowed.Contains(id) && m_Service.AllowExperience(regionId, id)) changes++;
+            foreach (UUID id in currentAllowed)
+                if (!postedAllowed.Contains(id) && m_Service.RemoveAllowedExperience(regionId, id)) changes++;
+            foreach (UUID id in postedBlocked)
+                if (!currentBlocked.Contains(id) && m_Service.BlockExperience(regionId, id)) changes++;
+            foreach (UUID id in currentBlocked)
+                if (!postedBlocked.Contains(id) && m_Service.RemoveBlockedExperience(regionId, id)) changes++;
+
+            if (postedTrusted.Count > 0)
+                m_log.DebugFormat(
+                    "[ExperienceModule]: RegionExperiences POST by {0} in '{1}' included {2} TRUSTED entr{3} — trusted is not implemented (consent-bypass semantics deferred); entries not persisted, panel will revert them.",
+                    agentID, m_Scene.RegionInfo.RegionName, postedTrusted.Count, postedTrusted.Count == 1 ? "y" : "ies");
+
+            m_log.DebugFormat(
+                "[ExperienceModule]: RegionExperiences POST by {0} in '{1}': {2} change(s) applied (allowed={3}, blocked={4}).",
+                agentID, m_Scene.RegionInfo.RegionName, changes, postedAllowed.Count, postedBlocked.Count);
+
+            // Respond with the fresh persisted state in GET shape — the panel re-renders
+            // from this, so what it shows is exactly what the DB now holds.
             WriteLLSD(resp, BuildRegionExperiencesLLSD(regionId));
         }
 

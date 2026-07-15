@@ -509,6 +509,11 @@ namespace OpenSim.Framework
 
     public delegate void SimWideDeletesDelegate(IClientAPI client,UUID agentID, int flags, UUID targetID);
 
+    // Region/Estate > Experiences panel per-item edit (EstateOwnerMessage
+    // "estateexperiencedelta"): flags carry the list + operation
+    // (ESTATE_EXPERIENCE_{ALLOWED,BLOCKED,TRUSTED}_{ADD,REMOVE} plus NO_REPLY).
+    public delegate void EstateExperienceDelta(IClientAPI client, UUID invoice, uint flags, UUID experienceID);
+
     public delegate void SendPostcard(IClientAPI client);
     public delegate void ChangeInventoryItemFlags(IClientAPI client, UUID itemID, uint flags);
 
@@ -1013,6 +1018,7 @@ namespace OpenSim.Framework
         event GroupVoteHistoryRequest OnGroupVoteHistoryRequest;
         event SimWideDeletesDelegate OnSimWideDeletes;
         event SimWideDeletesDelegate OnEstateObjectReturn;
+        event EstateExperienceDelta OnEstateExperienceDelta;
         event SendPostcard OnSendPostcard;
         event ChangeInventoryItemFlags OnChangeInventoryItemFlags;
         event MuteListEntryUpdate OnUpdateMuteListEntry;
@@ -1255,6 +1261,12 @@ namespace OpenSim.Framework
 
 
         void SendEstateList(UUID invoice, int code, UUID[] Data, uint estateID);
+
+        // EstateOwnerMessage "setexperience" reply — the authoritative echo of the region
+        // experience lists after an estateexperiencedelta edit (viewer parser:
+        // LLDispatchSetEstateExperience — strings are estate_id, send_to_agent_only,
+        // counts for blocked/trusted/allowed, then the UUIDs as BINARY params).
+        void SendEstateExperienceList(UUID invoice, uint estateID, UUID[] blocked, UUID[] trusted, UUID[] allowed);
 
         void SendBannedUserList(UUID invoice, EstateBan[] banlist, uint estateID);
 

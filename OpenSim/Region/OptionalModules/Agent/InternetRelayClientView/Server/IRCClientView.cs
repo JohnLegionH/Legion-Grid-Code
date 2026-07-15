@@ -893,6 +893,7 @@ namespace OpenSim.Region.OptionalModules.Agent.InternetRelayClientView.Server
         public event GroupVoteHistoryRequest OnGroupVoteHistoryRequest;
         public event SimWideDeletesDelegate OnSimWideDeletes;
         public event SimWideDeletesDelegate OnEstateObjectReturn;
+        public event EstateExperienceDelta OnEstateExperienceDelta;
         public event SendPostcard OnSendPostcard;
         public event ChangeInventoryItemFlags OnChangeInventoryItemFlags;
         public event MuteListEntryUpdate OnUpdateMuteListEntry;
@@ -1264,6 +1265,10 @@ namespace OpenSim.Region.OptionalModules.Agent.InternetRelayClientView.Server
         public void SendEstateList(UUID invoice, int code, UUID[] Data, uint estateID)
         {
 
+        }
+
+        public void SendEstateExperienceList(UUID invoice, uint estateID, UUID[] blocked, UUID[] trusted, UUID[] allowed)
+        {
         }
 
         public void SendBannedUserList(UUID invoice, EstateBan[] banlist, uint estateID)

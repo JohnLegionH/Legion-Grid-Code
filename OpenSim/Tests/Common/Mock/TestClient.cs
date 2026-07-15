@@ -337,6 +337,7 @@ namespace OpenSim.Tests.Common
         public event GroupVoteHistoryRequest OnGroupVoteHistoryRequest;
         public event SimWideDeletesDelegate OnSimWideDeletes;
         public event SimWideDeletesDelegate OnEstateObjectReturn;
+        public event EstateExperienceDelta OnEstateExperienceDelta;
         public event SendPostcard OnSendPostcard;
         public event ChangeInventoryItemFlags OnChangeInventoryItemFlags;
         public event MuteListEntryUpdate OnUpdateMuteListEntry;
@@ -1086,6 +1087,10 @@ namespace OpenSim.Tests.Common
         }
 
         public void SendEstateList(UUID invoice, int code, UUID[] Data, uint estateID)
+        {
+        }
+
+        public void SendEstateExperienceList(UUID invoice, uint estateID, UUID[] blocked, UUID[] trusted, UUID[] allowed)
         {
         }
 

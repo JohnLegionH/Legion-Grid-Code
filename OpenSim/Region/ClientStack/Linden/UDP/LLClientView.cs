@@ -278,6 +278,7 @@ namespace OpenSim.Region.ClientStack.LindenUDP
         public event GroupVoteHistoryRequest OnGroupVoteHistoryRequest;
         public event SimWideDeletesDelegate OnSimWideDeletes;
         public event SimWideDeletesDelegate OnEstateObjectReturn;
+        public event EstateExperienceDelta OnEstateExperienceDelta;
         public event SendPostcard OnSendPostcard;
         public event ChangeInventoryItemFlags OnChangeInventoryItemFlags;
         public event MuteListEntryUpdate OnUpdateMuteListEntry;
@@ -6353,6 +6354,46 @@ namespace OpenSim.Region.ClientStack.LindenUDP
             } while (TotalnumberIDs > 0);
         }
 
+        // EstateOwnerMessage "setexperience" — authoritative echo of the region experience
+        // lists after an estateexperiencedelta edit. Wire per the viewer parser
+        // (LLDispatchSetEstateExperience): strings[0]=estate_id, [1]=send_to_agent_only,
+        // [2..4]=counts (blocked, trusted, allowed — that order), then the UUIDs as
+        // BINARY 16-byte params in the same order. Panel lists are capped at
+        // ESTATE_MAX_EXPERIENCE_IDS=8 per list, so no 63-id pagination is needed here.
+        public void SendEstateExperienceList(UUID invoice, uint estateID, UUID[] blocked, UUID[] trusted, UUID[] allowed)
+        {
+            blocked ??= Array.Empty<UUID>();
+            trusted ??= Array.Empty<UUID>();
+            allowed ??= Array.Empty<UUID>();
+
+            EstateOwnerMessagePacket packet = new();
+            packet.AgentData.TransactionID = UUID.Random();
+            packet.AgentData.AgentID = m_agentId;
+            packet.AgentData.SessionID = SessionId;
+            packet.MethodData.Invoice = invoice;
+            packet.MethodData.Method = Utils.StringToBytes("setexperience");
+
+            int total = blocked.Length + trusted.Length + allowed.Length;
+            var returnblock = new EstateOwnerMessagePacket.ParamListBlock[5 + total];
+            for (int i = 0; i < returnblock.Length; i++)
+                returnblock[i] = new EstateOwnerMessagePacket.ParamListBlock();
+
+            returnblock[0].Parameter = Utils.StringToBytes(estateID.ToString());
+            returnblock[1].Parameter = Utils.StringToBytes("0"); // send_to_agent_only
+            returnblock[2].Parameter = Utils.StringToBytes(blocked.Length.ToString());
+            returnblock[3].Parameter = Utils.StringToBytes(trusted.Length.ToString());
+            returnblock[4].Parameter = Utils.StringToBytes(allowed.Length.ToString());
+
+            int j = 5;
+            foreach (UUID id in blocked) returnblock[j++].Parameter = id.GetBytes();
+            foreach (UUID id in trusted) returnblock[j++].Parameter = id.GetBytes();
+            foreach (UUID id in allowed) returnblock[j++].Parameter = id.GetBytes();
+
+            packet.ParamList = returnblock;
+            packet.Header.Reliable = true;
+            OutPacket(packet, ThrottleOutPacketType.Task);
+        }
+
         public void SendBannedUserList(UUID invoice, EstateBan[] bl, uint estateID)
         {
             List<UUID> BannedUsers = new();
@@ -10889,6 +10930,21 @@ namespace OpenSim.Region.ClientStack.LindenUDP
 
                         c.OnUpdateEstateAccessDeltaRequest?.Invoke(c, messagePacket.MethodData.Invoice, estateAccessType, new UUID(Utils.BytesToString(messagePacket.ParamList[2].Parameter)));
 
+                    }
+                    return;
+
+                case "estateexperiencedelta":
+                    // Region/Estate > Experiences per-item edit (llfloaterregioninfo
+                    // sendEstateExperienceDelta): ParamList[0]=agentID, [1]=flags,
+                    // [2]=experienceID. Same gate as every estate method here.
+                    if (c.m_scene.Permissions.CanIssueEstateCommand(c.m_agentId, false))
+                    {
+                        if (messagePacket.ParamList.Length >= 3 &&
+                            uint.TryParse(Utils.BytesToString(messagePacket.ParamList[1].Parameter), out uint expDeltaFlags) &&
+                            UUID.TryParse(Utils.BytesToString(messagePacket.ParamList[2].Parameter), out UUID expDeltaId))
+                        {
+                            c.OnEstateExperienceDelta?.Invoke(c, messagePacket.MethodData.Invoice, expDeltaFlags, expDeltaId);
+                        }
                     }
                     return;
                 case "simulatormessage":
