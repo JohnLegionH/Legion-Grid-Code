@@ -116,6 +116,49 @@ namespace OpenSim.Data.MySQL
             }
         }
 
+        // PERSISTENCE V1.1: transactional store kill-switch. True (default) wraps the
+        // multi-statement writers (StoreObject / StorePrimInventory / RemoveObject) in one
+        // MySqlTransaction per logical operation — all-or-nothing against crash/kill/drop.
+        // False reverts to the legacy autocommit-per-statement behavior. Set by
+        // SimulationDataService from [DatabaseService] UseTransactionalStore via reflection
+        // (the ISimulationDataStore plugin contract only carries a connection string).
+        // The setter is invoked exactly once at startup, hence the single mode log line.
+        private bool m_useTransactionalStore = true;
+        public bool UseTransactionalStore
+        {
+            get { return m_useTransactionalStore; }
+            set
+            {
+                m_useTransactionalStore = value;
+                m_log.InfoFormat(
+                    "[REGION DB]: Transactional store {0} — StoreObject/StorePrimInventory/RemoveObject {1}",
+                    value ? "ENABLED" : "DISABLED",
+                    value ? "commit atomically per logical operation"
+                          : "run legacy autocommit-per-statement (kill-switch active)");
+            }
+        }
+
+        // Begin a transaction on the per-call connection when the transactional store is
+        // enabled; null means legacy autocommit (commands tolerate a null Transaction).
+        private MySqlTransaction BeginStoreTransaction(MySqlConnection dbcon)
+        {
+            return m_useTransactionalStore ? dbcon.BeginTransaction() : null;
+        }
+
+        private void RollbackQuietly(MySqlTransaction tx)
+        {
+            if (tx == null)
+                return;
+            try { tx.Rollback(); }
+            catch (Exception e)
+            {
+                // A rollback on a dead/dropped connection throws — the transaction is
+                // implicitly rolled back server-side anyway. Log and let the ORIGINAL
+                // exception propagate from the caller.
+                m_log.Warn("[REGION DB]: rollback after failed store also failed (connection likely dead; server rolls back implicitly): " + e.Message);
+            }
+        }
+
         public void Dispose() {}
 
         public virtual void StoreObject(SceneObjectGroup obj, UUID regionUUID)
@@ -126,8 +169,16 @@ namespace OpenSim.Data.MySQL
                 {
                     dbcon.Open();
 
+                    // PERSISTENCE V1.1: one transaction per linkset — a 50-prim object is
+                    // one commit instead of 100 autocommits. On failure everything rolls
+                    // back: the DB keeps the complete OLD state (no Frankenstein linksets,
+                    // audit §4a'). Also faster: one fsync per linkset instead of per row.
+                    MySqlTransaction tx = BeginStoreTransaction(dbcon);
+                    try
+                    {
                     using (MySqlCommand cmd = dbcon.CreateCommand())
                     {
+                        cmd.Transaction = tx;
                         foreach (SceneObjectPart prim in obj.Parts)
                         {
                             cmd.Parameters.Clear();
@@ -243,6 +294,23 @@ namespace OpenSim.Data.MySQL
                             ExecuteNonQuery(cmd);
                         }
                     }
+                    tx?.Commit();
+                    }
+                    catch (Exception e)
+                    {
+                        m_log.ErrorFormat(
+                            "[REGION DB]: StoreObject FAILED for group {0} ({1} prim(s)) in region {2}: {3}{4}",
+                            obj.UUID, obj.Parts.Length, regionUUID, e.Message,
+                            m_useTransactionalStore
+                                ? " — transaction rolled back, DB keeps the previous complete state; the scene retains the in-memory copy and the next backup cycle retries."
+                                : " — LEGACY MODE (UseTransactionalStore=false): a partial linkset may now be persisted.");
+                        RollbackQuietly(tx);
+                        throw;
+                    }
+                    finally
+                    {
+                        tx?.Dispose();
+                    }
                     dbcon.Close();
                 }
             }
@@ -259,8 +327,15 @@ namespace OpenSim.Data.MySQL
                 {
                     dbcon.Open();
 
+                    // PERSISTENCE V1.1: SELECT + three DELETEs in one transaction — hygiene
+                    // tier (audit §4d): a crash between the deletes previously left orphan
+                    // primshapes/primitems rows accumulating invisibly.
+                    MySqlTransaction tx = BeginStoreTransaction(dbcon);
+                    try
+                    {
                     using (MySqlCommand cmd = dbcon.CreateCommand())
                     {
+                        cmd.Transaction = tx;
                         cmd.CommandText = "select UUID from prims where SceneGroupID= ?UUID";
                         cmd.Parameters.AddWithValue("UUID", obj.ToString());
 
@@ -272,6 +347,7 @@ namespace OpenSim.Data.MySQL
 
                         if(uuids.Count == 0)
                         {
+                            tx?.Commit(); // nothing written; close out the read cleanly
                             dbcon.Close();
                             return;
                         }
@@ -306,9 +382,25 @@ namespace OpenSim.Data.MySQL
 
                         cmd.CommandText = "delete from primitems where primID " + sqlparams;
                         ExecuteNonQuery(cmd);
-
-                        dbcon.Close();
                     }
+                    tx?.Commit();
+                    }
+                    catch (Exception e)
+                    {
+                        m_log.ErrorFormat(
+                            "[REGION DB]: RemoveObject FAILED for group {0} ({1} prim(s)) in region {2}: {3}{4}",
+                            obj, uuids.Count, regionUUID, e.Message,
+                            m_useTransactionalStore
+                                ? " — transaction rolled back (no orphan rows)."
+                                : " — LEGACY MODE: orphan primshapes/primitems rows may remain.");
+                        RollbackQuietly(tx);
+                        throw;
+                    }
+                    finally
+                    {
+                        tx?.Dispose();
+                    }
+                    dbcon.Close();
                 }
             }
         }
@@ -2016,8 +2108,18 @@ namespace OpenSim.Data.MySQL
                 {
                     dbcon.Open();
 
+                    // PERSISTENCE V1.1: the audit's headline case — a naked DELETE-then-
+                    // INSERT previously meant a crash between them destroyed inventory that
+                    // was ALREADY safely persisted. One transaction converts that to
+                    // "update lost, old inventory intact" (rollback restores the deleted
+                    // rows). The empty-items early return commits the bare DELETE — that IS
+                    // the new complete state, not a torn one.
+                    MySqlTransaction tx = BeginStoreTransaction(dbcon);
+                    try
+                    {
                     using (MySqlCommand cmd = dbcon.CreateCommand())
                     {
+                        cmd.Transaction = tx;
                         cmd.CommandText = "delete from primitems where primID = ?PrimID";
                         cmd.Parameters.AddWithValue("primID", primID.ToString());
 
@@ -2025,6 +2127,7 @@ namespace OpenSim.Data.MySQL
 
                         if (items.Count == 0)
                         {
+                            tx?.Commit();
                             dbcon.Close();
                             return;
                         }
@@ -2054,6 +2157,23 @@ namespace OpenSim.Data.MySQL
 
                             ExecuteNonQuery(cmd);
                         }
+                    }
+                    tx?.Commit();
+                    }
+                    catch (Exception e)
+                    {
+                        m_log.ErrorFormat(
+                            "[REGION DB]: StorePrimInventory FAILED for prim {0} ({1} item(s)): {2}{3}",
+                            primID, items.Count, e.Message,
+                            m_useTransactionalStore
+                                ? " — transaction rolled back, previously persisted inventory intact; retried on the next backup cycle."
+                                : " — LEGACY MODE (UseTransactionalStore=false): the prim's persisted inventory may now be empty or partial.");
+                        RollbackQuietly(tx);
+                        throw;
+                    }
+                    finally
+                    {
+                        tx?.Dispose();
                     }
                     dbcon.Close();
                 }

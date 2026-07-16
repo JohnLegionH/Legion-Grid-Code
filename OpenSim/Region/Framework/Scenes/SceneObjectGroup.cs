@@ -2438,7 +2438,15 @@ namespace OpenSim.Region.Framework.Scenes
             }
             catch (Exception e)
             {
-                m_log.Error($"[SCENE]: Storing of {Name}, {UUID} in {m_scene.RegionInfo.RegionName} failed: {e.Message}");
+                m_log.Error($"[SCENE]: Storing of {Name}, {UUID} ({PrimCount} prim(s)) in {m_scene.RegionInfo.RegionName} failed: {e.Message} — object kept in memory and re-flagged dirty; the next backup cycle retries.");
+                // PERSISTENCE V1.1 (B3): the dirty flag was cleared BEFORE the store (see
+                // above) — without this restore, a transient SQL failure (deadlock, timeout,
+                // dropped connection) meant the object was never re-stored until something
+                // touched it again (audit §3 ordering note). Re-flagging is strictly safe:
+                // worst case is one redundant store. With the transactional store the DB
+                // still holds the previous complete state; in legacy mode this retry is
+                // what heals a partial write.
+                HasGroupChanged = true;
             }
         }
 

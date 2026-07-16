@@ -1526,7 +1526,20 @@ namespace OpenSim.Region.Framework.Scenes
                 {
                     datastore.StorePrimInventory(m_part.UUID, itemsvalues);
                 }
-                catch {}
+                catch (Exception e)
+                {
+                    // PERSISTENCE V1.1 (B3): this was a bare `catch {}` — a failed inventory
+                    // rewrite was silently forgotten forever (audit §2.4). Log with enough
+                    // context to find the prim, then RETHROW: the only caller is
+                    // SceneObjectGroup.ProcessBackup, whose catch re-flags the group dirty so
+                    // the next backup cycle retries (inventory is stored unconditionally on
+                    // every group backup — the HasInventoryChanged gate above is commented
+                    // out — so the group retry covers this path too).
+                    m_log.ErrorFormat(
+                        "[PRIM INVENTORY]: StorePrimInventory FAILED for prim {0} '{1}' ({2} item(s)): {3}",
+                        m_part.UUID, m_part.Name, itemsvalues.Count, e.Message);
+                    throw;
+                }
 //            }
         }
 

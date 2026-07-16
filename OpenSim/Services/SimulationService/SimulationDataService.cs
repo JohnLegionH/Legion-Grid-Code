@@ -42,9 +42,9 @@ namespace OpenSim.Services.SimulationService
 {
     public class SimulationDataService : ServiceBase, ISimulationDataService
     {
-//        private static readonly ILog m_log =
-//                LogManager.GetLogger(
-//                MethodBase.GetCurrentMethod().DeclaringType);
+        private static readonly ILog m_log =
+                LogManager.GetLogger(
+                MethodBase.GetCurrentMethod().DeclaringType);
 
         protected ISimulationDataStore m_database;
 
@@ -77,6 +77,22 @@ namespace OpenSim.Services.SimulationService
             m_database = LoadPlugin<ISimulationDataStore>(dllName, new Object[] { connString });
             if (m_database == null)
                 throw new Exception("Could not find a storage interface in the given module");
+
+            // PERSISTENCE V1.1 kill-switch: [DatabaseService] UseTransactionalStore
+            // (default true) — false reverts the multi-statement region writers to legacy
+            // autocommit-per-statement. The ISimulationDataStore contract only carries a
+            // connection string, so the flag is passed to providers that opt in by exposing
+            // a public bool UseTransactionalStore property (reflection keeps this layer
+            // provider-agnostic; providers without the property are unaffected). The
+            // provider's setter logs the active mode once at startup.
+            bool useTx = dbConfig == null || dbConfig.GetBoolean("UseTransactionalStore", true);
+            var txProp = m_database.GetType().GetProperty("UseTransactionalStore");
+            if (txProp != null && txProp.PropertyType == typeof(bool) && txProp.CanWrite)
+                txProp.SetValue(m_database, useTx);
+            else if (!useTx)
+                m_log.WarnFormat(
+                    "[SIMULATION DATA SERVICE]: UseTransactionalStore=false is set but storage provider {0} has no such switch — setting ignored.",
+                    m_database.GetType().Name);
         }
 
         public void StoreObject(SceneObjectGroup obj, UUID regionUUID)
