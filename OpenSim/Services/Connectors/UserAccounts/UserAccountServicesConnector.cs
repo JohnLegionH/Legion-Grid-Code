@@ -358,6 +358,55 @@ namespace OpenSim.Services.Connectors
             return true;
         }
 
+        // DisplayNames Pass C: the narrowly-scoped display-name wire (METHOD=setdisplayname),
+        // NOT gated by AllowSetAccount on the Robust side. Failures are LOUD and name the
+        // likely cause — in particular an old Robust without this method falls to its
+        // unknown-method path and replies a bare Failure, which we call out explicitly
+        // (the FIX-6 lesson: no silent stubs, no mystery falses).
+        public virtual bool SetDisplayName(UUID principalID, string displayName, int nameChanged)
+        {
+            Dictionary<string, object> sendData = new Dictionary<string, object>
+            {
+                ["VERSIONMIN"] = ProtocolVersions.ClientProtocolVersionMin.ToString(),
+                ["VERSIONMAX"] = ProtocolVersions.ClientProtocolVersionMax.ToString(),
+                ["METHOD"] = "setdisplayname",
+                ["PrincipalID"] = principalID.ToString(),
+                ["DisplayName"] = displayName ?? string.Empty,
+                ["NameChanged"] = nameChanged.ToString()
+            };
+
+            string uri = m_ServerURI + "/accounts";
+            string reply;
+            try
+            {
+                reply = SynchronousRestFormsRequester.MakeRequest("POST", uri,
+                        ServerUtils.BuildQueryString(sendData), m_Auth);
+            }
+            catch (Exception e)
+            {
+                m_log.WarnFormat("[ACCOUNTS CONNECTOR]: SetDisplayName to {0} failed: exception: {1}", uri, e.Message);
+                return false;
+            }
+
+            if (string.IsNullOrEmpty(reply))
+            {
+                m_log.WarnFormat("[ACCOUNTS CONNECTOR]: SetDisplayName to {0} failed: empty reply", uri);
+                return false;
+            }
+
+            Dictionary<string, object> replyData = ServerUtils.ParseXmlResponse(reply);
+            if (replyData == null || !replyData.TryGetValue("result", out object res) ||
+                !"success".Equals(res?.ToString(), StringComparison.OrdinalIgnoreCase))
+            {
+                string snippet = reply.Length > 200 ? reply.Substring(0, 200) : reply;
+                m_log.WarnFormat(
+                    "[ACCOUNTS CONNECTOR]: SetDisplayName to {0} FAILED: {1} — if this Robust predates DisplayNames Pass C it lacks METHOD=setdisplayname (its log will show 'unknown method request: setdisplayname'); deploy the matching Robust build.",
+                    uri, snippet);
+                return false;
+            }
+            return true;
+        }
+
         /// <summary>
         /// Create user remotely. Note this this is not part of the IUserAccountsService
         /// </summary>

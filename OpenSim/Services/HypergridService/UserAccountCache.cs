@@ -114,6 +114,14 @@ namespace OpenSim.Services.HypergridService
         {
             return false;
         }
+
+        // Read-only HG cache: foreign visitors can't set display names through this
+        // path (their home grid owns the account). Refusing here is correct, not a
+        // silent stub — the cap handler surfaces the failure to the viewer.
+        public bool SetDisplayName(UUID principalID, string displayName, int nameChanged)
+        {
+            return false;
+        }
         #endregion
 
     }

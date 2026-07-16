@@ -215,6 +215,17 @@ namespace OpenSim.Region.CoreModules.ServiceConnectorsOut.UserAccounts
             return ok;
         }
 
+        // Scoped display-name write (DisplayNames Pass C) — METHOD=setdisplayname via the
+        // inherited wire connector; NOT gated by AllowSetAccount on Robust. Invalidate the
+        // region cache on success so the next read fetches the authoritative row.
+        public override bool SetDisplayName(UUID principalID, string displayName, int nameChanged)
+        {
+            bool ok = base.SetDisplayName(principalID, displayName, nameChanged);
+            if (ok)
+                m_Cache.Invalidate(principalID);
+            return ok;
+        }
+
         #endregion
     }
 }

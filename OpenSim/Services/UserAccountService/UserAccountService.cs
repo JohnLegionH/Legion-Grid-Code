@@ -349,6 +349,39 @@ namespace OpenSim.Services.UserAccountService
             return m_Database.Store(d);
         }
 
+        // DisplayNames Pass C: scoped write of ONLY DisplayName + NameChanged — the narrow
+        // path that lets the operator close the general AllowSetAccount gate. Validation
+        // lives HERE (the service must not trust the simulator): mirror of the cap rules —
+        // empty = clear (valid); otherwise <= 31 chars, no control chars, not whitespace.
+        public bool SetDisplayName(UUID principalID, string displayName, int nameChanged)
+        {
+            if (principalID.IsZero())
+                return false;
+
+            displayName = (displayName ?? string.Empty).Trim();
+            if (displayName.Length > 0)
+            {
+                if (displayName.Length > 31 || string.IsNullOrWhiteSpace(displayName))
+                    return false;
+                foreach (char c in displayName)
+                    if (char.IsControl(c))
+                        return false;
+            }
+            if (nameChanged < 0)
+                return false;
+
+            UserAccount account = GetUserAccount(UUID.Zero, principalID);
+            if (account == null)
+            {
+                m_log.WarnFormat("[USER ACCOUNT SERVICE]: SetDisplayName for unknown account {0}", principalID);
+                return false;
+            }
+
+            account.DisplayName = displayName;
+            account.NameChanged = nameChanged;
+            return StoreUserAccount(account);
+        }
+
         public List<UserAccount> GetUserAccounts(UUID scopeID, string query)
         {
             UserAccountData[] d = m_Database.GetUsers(scopeID, query.Trim());

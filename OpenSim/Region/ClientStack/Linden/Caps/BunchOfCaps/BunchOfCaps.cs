@@ -2372,7 +2372,12 @@ namespace OpenSim.Region.ClientStack.Linden
                                 if (!clearing)
                                     account.NameChanged = now;
 
-                                if (m_userAccountService.StoreUserAccount(account))
+                                // DisplayNames Pass C: scoped wire (METHOD=setdisplayname) —
+                                // updates ONLY DisplayName + NameChanged, so Robust's broad
+                                // AllowSetAccount gate can stay closed. Everything else about
+                                // this cap (throttle, clear-exemption, EQ reply, broadcast)
+                                // is unchanged.
+                                if (m_userAccountService.SetDisplayName(m_AgentID, account.DisplayName, account.NameChanged))
                                 {
                                     m_userAccountService.InvalidateCache(m_AgentID);
                                     // Effective name the viewer should show: the legacy name

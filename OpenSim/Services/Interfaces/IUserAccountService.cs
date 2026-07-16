@@ -208,6 +208,15 @@ namespace OpenSim.Services.Interfaces
         /// <returns></returns>
         bool StoreUserAccount(UserAccount data);
 
+        /// <summary>
+        /// DisplayNames Pass C: narrowly-scoped update of ONLY DisplayName + NameChanged.
+        /// Exists so the SetDisplayName cap does not need the general setaccount wire
+        /// (AllowSetAccount), which opens arbitrary account-field writes. An empty
+        /// displayName is a CLEAR (revert to username). Validation is server-side —
+        /// the service must not trust the simulator.
+        /// </summary>
+        bool SetDisplayName(UUID principalID, string displayName, int nameChanged);
+
         void InvalidateCache(UUID userID);
     }
 }

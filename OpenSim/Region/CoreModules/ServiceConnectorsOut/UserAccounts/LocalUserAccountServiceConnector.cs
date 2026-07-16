@@ -243,6 +243,17 @@ namespace OpenSim.Region.CoreModules.ServiceConnectorsOut.UserAccounts
             return ret;
         }
 
+        // Scoped display-name write (DisplayNames Pass C). Invalidate rather than
+        // re-cache: the service composed the change onto a fresh fetch, so the next
+        // read repopulates from the authoritative row.
+        public bool SetDisplayName(UUID principalID, string displayName, int nameChanged)
+        {
+            bool ret = UserAccountService.SetDisplayName(principalID, displayName, nameChanged);
+            if (ret)
+                m_Cache.Invalidate(principalID);
+            return ret;
+        }
+
         public void InvalidateCache(UUID userID)
         {
             m_Cache.Invalidate(userID);

@@ -116,6 +116,12 @@ namespace OpenSim.Server.Handlers.UserAccounts
                             m_log.Warn("[USER SERVICE HANDLER]: setaccount rejected because AllowSetAccount is false. Set AllowSetAccount = true in the UserAccountService config to permit remote account stores (e.g. display-name changes).");
                             return FailureResult();
                         }
+                    case "setdisplayname":
+                        // DisplayNames Pass C: narrowly-scoped display-name write.
+                        // Deliberately NOT behind AllowSetAccount — it can update ONLY
+                        // DisplayName + NameChanged (validated in the service), which is
+                        // exactly why the broad setaccount gate can stay closed.
+                        return SetDisplayName(request);
                 }
 
                 m_log.DebugFormat("[USER SERVICE HANDLER]: unknown method request: {0}", method);
@@ -334,6 +340,36 @@ namespace OpenSim.Server.Handlers.UserAccounts
             result["result"] = existingAccount.ToKeyValuePairs();
             return ResultToBytes(result);
         }
+
+        // DisplayNames Pass C: METHOD=setdisplayname — PrincipalID, DisplayName (empty =
+        // clear), NameChanged (unix seconds). Field-scoped by construction: the request
+        // carries nothing else the service will read. Success/failure only (no account
+        // echo — the simulator already holds the account and invalidates its cache).
+        byte[] SetDisplayName(Dictionary<string, object> request)
+        {
+            object otmp;
+            UUID principalID = UUID.Zero;
+            if (!request.TryGetValue("PrincipalID", out otmp) || !UUID.TryParse(otmp.ToString(), out principalID) || principalID.IsZero())
+                return FailureResult();
+
+            string displayName = request.TryGetValue("DisplayName", out otmp) && otmp != null
+                ? otmp.ToString() : string.Empty;
+
+            int nameChanged = 0;
+            if (!request.TryGetValue("NameChanged", out otmp) || !int.TryParse(otmp.ToString(), out nameChanged))
+                return FailureResult();
+
+            if (!m_UserAccountService.SetDisplayName(principalID, displayName, nameChanged))
+            {
+                m_log.WarnFormat(
+                    "[USER ACCOUNT SERVER POST HANDLER]: setdisplayname failed for {0} (validation or store)",
+                    principalID);
+                return FailureResult();
+            }
+            return ResultSuccessBytes;
+        }
+
+        private static byte[] ResultSuccessBytes = osUTF8.GetASCIIBytes("<?xml version =\"1.0\"?><ServerResponse><result>Success</result></ServerResponse>");
 
         byte[] CreateUser(Dictionary<string, object> request)
         {
