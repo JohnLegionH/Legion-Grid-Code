@@ -53,10 +53,12 @@ namespace OpenSim.Services.Interfaces
         public const int XP_ERROR_KEY_NOT_FOUND = 14;
         public const int XP_ERROR_RETRY_UPDATE = 15;
         public const int XP_ERROR_MATURITY_EXCEEDED = 16;
-        // ── Legion-only extensions — NOT in SL (whose XP_ERROR enum ends at 16). These MUST NEVER
-        //    be emitted in SL-facing output (dataserver payloads or experience_permissions_denied):
-        //    a script calling llGetExperienceErrorMessage(17|18) on real SL gets "unknown error".
-        //    Kept defined for internal/diagnostic use only; as of EXP-ERRCODE-1 they have zero emit sites.
+        // Real SL codes (SL wiki Experience error table, Aug-2025): 17 = "not allowed to run
+        // on this land", 18 = "experience permissions request timed out". EXP-ERRCODE-1's
+        // earlier claim that SL's enum ends at 16 (and its never-emit policy for 17/18) was
+        // factually wrong and corrected by EXP-CONFORMANCE-3: 17 is emitted for land-scope
+        // denials; 18 has no Legion emit site (permissions never time out under auto-grant)
+        // but is a valid SL code, not a Legion extension.
         public const int XP_ERROR_NOT_PERMITTED_LAND = 17;
         public const int XP_ERROR_REQUEST_PERM_TIMEOUT = 18;
 

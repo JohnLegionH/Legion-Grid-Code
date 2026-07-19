@@ -11971,7 +11971,8 @@ public int llSetLinkGLTFOverrides(int link, int face, LSLList overrides)
                 case 14: return "key doesn't exist";
                 case 15: return "retry update";
                 case 16: return "experience content rating too high";
-                case 17: return "experience permissions request timed out";
+                case 17: return "not allowed to run on this land";
+                case 18: return "experience permissions request timed out";
                 default: return "unknown error id";
             }
         }
@@ -12645,7 +12646,7 @@ public int llSetLinkGLTFOverrides(int link, int face, LSLList overrides)
             {
                 m_ScriptEngine.PostScriptEvent(m_itemID, new EventParams(
                     "experience_permissions_denied",
-                    new object[] { agent, ExperienceInfo.XP_ERROR_NOT_PERMITTED }, // 4 — blocked on this parcel or region
+                    new object[] { agent, ExperienceInfo.XP_ERROR_NOT_PERMITTED_LAND }, // 17 — blocked on this parcel or region (SL land-scope code)
                     new DetectParams[0]));
                 return;
             }
@@ -12655,7 +12656,7 @@ public int llSetLinkGLTFOverrides(int link, int face, LSLList overrides)
             {
                 m_ScriptEngine.PostScriptEvent(m_itemID, new EventParams(
                     "experience_permissions_denied",
-                    new object[] { agent, ExperienceInfo.XP_ERROR_NOT_PERMITTED }, // 4 — not admitted here (region/grid/parcel)
+                    new object[] { agent, ExperienceInfo.XP_ERROR_NOT_PERMITTED_LAND }, // 17 — not enabled for this land (region/grid/parcel admission)
                     new DetectParams[0]));
                 return;
             }
