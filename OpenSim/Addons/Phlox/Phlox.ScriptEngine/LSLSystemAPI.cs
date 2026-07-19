@@ -11360,7 +11360,7 @@ public int llSetLinkGLTFOverrides(int link, int face, LSLList overrides)
                     var expService = World?.RequestModuleInterface<IExperienceService>();
                     UUID expId = GetScriptExperienceId();
                     if (expId == UUID.Zero) expId = m_host.OwnerID;
-                    if (string.IsNullOrEmpty(key) || key.Length > 255 || expService == null)
+                    if (string.IsNullOrEmpty(key) || key.Length > ExperienceInfo.MAX_KEY_LENGTH || expService == null)
                         payload = "0," + ExperienceInfo.XP_ERROR_STORAGE_EXCEPTION;
                     else
                         // Service returns bare false for dup AND error (indistinguishable); both map
@@ -11421,7 +11421,7 @@ public int llSetLinkGLTFOverrides(int link, int face, LSLList overrides)
                     // distinguished from unconditional and behaves as unconditional. Not hit by the
                     // current test scripts; would need a service-layer flag to fix exactly.
                     string checkArg = (checkedFlag != 0) ? (originalValue ?? string.Empty) : string.Empty;
-                    if (string.IsNullOrEmpty(key) || key.Length > 255 || expService == null)
+                    if (string.IsNullOrEmpty(key) || key.Length > ExperienceInfo.MAX_KEY_LENGTH || expService == null)
                         payload = "0," + ExperienceInfo.XP_ERROR_STORAGE_EXCEPTION;
                     else
                         // LIMITATION: the service returns bare false for CAS-fail, key-not-found,
@@ -11453,10 +11453,16 @@ public int llSetLinkGLTFOverrides(int link, int face, LSLList overrides)
                     UUID expId = GetScriptExperienceId();
                     if (expId == UUID.Zero) expId = m_host.OwnerID;
                     // SL echoes the deleted value, so read it before deleting (two service calls — fine here).
+                    // ReadKeyValue is null only when the key row does not exist (ExecuteScalar null),
+                    // "" when it exists with an empty value — so null cleanly identifies the SL
+                    // KEY_NOT_FOUND (14) case; an existing key whose delete fails stays a storage error.
                     string deleted = expService?.ReadKeyValue(expId, key);
-                    payload = (expService != null && expService.DeleteKeyValue(expId, key))
-                        ? "1," + (deleted ?? string.Empty)
-                        : "0," + ExperienceInfo.XP_ERROR_STORAGE_EXCEPTION;
+                    if (expService != null && expService.DeleteKeyValue(expId, key))
+                        payload = "1," + (deleted ?? string.Empty);
+                    else
+                        payload = "0," + (deleted == null
+                            ? ExperienceInfo.XP_ERROR_KEY_NOT_FOUND
+                            : ExperienceInfo.XP_ERROR_STORAGE_EXCEPTION);
                 }
                 catch (Exception ex)
                 {
@@ -11960,9 +11966,11 @@ public int llSetLinkGLTFOverrides(int link, int face, LSLList overrides)
                 case 11: return "experience data quota exceeded";
                 case 12: return "key-value store is disabled";
                 case 13: return "key-value store communication failed";
-                case 14: return "key already exists";
-                case 15: return "content rating too high";
-                case 16: return "not allowed to run in current location";
+                // 14-16 were shifted/stale vs both SL and ExperienceInfo's constants (14 is
+                // KEY_NOT_FOUND — actively emitted by the KV functions — not "already exists").
+                case 14: return "key doesn't exist";
+                case 15: return "retry update";
+                case 16: return "experience content rating too high";
                 case 17: return "experience permissions request timed out";
                 default: return "unknown error id";
             }
@@ -12705,13 +12713,16 @@ public int llSetLinkGLTFOverrides(int link, int face, LSLList overrides)
         {
             UUID agentId;
             if (!UUID.TryParse(agent, out agentId)) return 0;
+            if (agentId == UUID.Zero) return 0;
 
-            var expService = World?.RequestModuleInterface<IExperienceService>();
-            UUID experienceId = GetScriptExperienceId();
+            // Consistent with HasExperiencePermission (block-wins > admission > agent grant)
+            // plus a root-presence requirement: an agent who granted once but is elsewhere on
+            // the grid — or whose experience is blocked where this object sits — is not "in"
+            // the experience here. Previously this checked only the bare grant.
+            ScenePresence sp = World?.GetScenePresence(agentId);
+            if (sp == null || sp.IsChildAgent) return 0;
 
-            if (expService == null || experienceId == UUID.Zero) return 0;
-
-            return expService.IsAgentGranted(experienceId, agentId) ? 1 : 0;
+            return HasExperiencePermission(agentId) ? 1 : 0;
         }
 
         // ── 661: llGetExperienceDetails ──
@@ -12729,15 +12740,22 @@ public int llSetLinkGLTFOverrides(int link, int face, LSLList overrides)
             if (exp == null)
                 return new LSLList();
 
-            // SL format: [name, owner, description, group, maturity, metadata]
+            // SL layout: [ name, owner key, experience id, state (integer), state message,
+            // group key ]. State uses the XP_ERROR vocabulary: NONE (0) for a valid enabled
+            // experience. Legion has no suspended concept, so the only non-zero state it can
+            // report is EXPERIENCE_DISABLED (8) when PROP_ENABLED is clear; the message comes
+            // from the shared ExperienceInfo table so the two can never drift apart.
+            int state = (exp.Properties & ExperienceInfo.PROP_ENABLED) != 0
+                ? ExperienceInfo.XP_ERROR_NONE
+                : ExperienceInfo.XP_ERROR_EXPERIENCE_DISABLED;
             return new LSLList(new object[]
             {
                 exp.Name ?? string.Empty,
                 exp.OwnerId.ToString(),
-                exp.Description ?? string.Empty,
-                exp.GroupId.ToString(),
-                exp.Maturity,
-                string.Empty
+                exp.ExperienceId.ToString(),
+                state,
+                ExperienceInfo.GetErrorMessage(state),
+                exp.GroupId.ToString()
             });
         }
 
