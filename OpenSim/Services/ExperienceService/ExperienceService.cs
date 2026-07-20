@@ -73,7 +73,7 @@ namespace OpenSim.Services.ExperienceService
                         }
                     }
                     s_schemaEnsured = true;
-                    m_log.Info("[ExperienceService]: Schema ensured (6x CREATE TABLE IF NOT EXISTS)");
+                    m_log.Info("[ExperienceService]: Schema ensured (7x CREATE TABLE IF NOT EXISTS)");
                 }
                 catch (Exception e)
                 {
@@ -134,6 +134,18 @@ namespace OpenSim.Services.ExperienceService
             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4",
 
             @"CREATE TABLE IF NOT EXISTS `experience_blocked` (
+                `region_id` char(36) NOT NULL,
+                `experience_id` char(36) NOT NULL,
+                PRIMARY KEY (`region_id`,`experience_id`)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4",
+
+            // Region trusted list (EXP-SLICE-0.5, DEC-4/Option A). Structurally identical to
+            // experience_allowed / experience_blocked — same char(36) columns, composite PK,
+            // InnoDB/utf8mb4 — so the three region lists stay consistent. Additive CREATE IF
+            // NOT EXISTS: a live grid is untouched (existing tables not ALTERed); a fresh
+            // bootstrap gets it. Enforcement (trusted bypasses per-agent consent) is deferred
+            // to the consent slice (DEC-1); this table only stores the list.
+            @"CREATE TABLE IF NOT EXISTS `experience_trusted` (
                 `region_id` char(36) NOT NULL,
                 `experience_id` char(36) NOT NULL,
                 PRIMARY KEY (`region_id`,`experience_id`)
@@ -782,9 +794,16 @@ namespace OpenSim.Services.ExperienceService
             return GetRegionExperienceList(regionId, "experience_blocked");
         }
 
+        public List<UUID> GetTrustedExperiences(UUID regionId)
+        {
+            return GetRegionExperienceList(regionId, "experience_trusted");
+        }
+
         public bool AllowExperience(UUID regionId, UUID experienceId)
         {
-            // Remove from blocked if present, add to allowed
+            // Remove from blocked if present, add to allowed. Allowed and trusted are the
+            // "permit" family (both let the experience run) and may coexist, so allowing does
+            // NOT clear trusted — only the contradictory blocked state is cleared.
             RemoveRegionExperience(regionId, experienceId, "experience_blocked");
             return AddRegionExperience(regionId, experienceId, "experience_allowed");
         }
@@ -796,14 +815,30 @@ namespace OpenSim.Services.ExperienceService
 
         public bool BlockExperience(UUID regionId, UUID experienceId)
         {
-            // Remove from allowed if present, add to blocked
+            // Block is the absolute deny state: it must clear BOTH permit-family lists
+            // (allowed AND trusted) so a blocked experience can never remain permitted.
             RemoveRegionExperience(regionId, experienceId, "experience_allowed");
+            RemoveRegionExperience(regionId, experienceId, "experience_trusted");
             return AddRegionExperience(regionId, experienceId, "experience_blocked");
         }
 
         public bool RemoveBlockedExperience(UUID regionId, UUID experienceId)
         {
             return RemoveRegionExperience(regionId, experienceId, "experience_blocked");
+        }
+
+        public bool TrustExperience(UUID regionId, UUID experienceId)
+        {
+            // Trusted is a stronger allow; it must NOT coexist with blocked (contradiction),
+            // so trusting clears the blocked state. It does not clear allowed — {allowed,
+            // trusted} are compatible permit states (see AllowExperience).
+            RemoveRegionExperience(regionId, experienceId, "experience_blocked");
+            return AddRegionExperience(regionId, experienceId, "experience_trusted");
+        }
+
+        public bool RemoveTrustedExperience(UUID regionId, UUID experienceId)
+        {
+            return RemoveRegionExperience(regionId, experienceId, "experience_trusted");
         }
 
         // ══════════════════════════════════════════════════════════════════

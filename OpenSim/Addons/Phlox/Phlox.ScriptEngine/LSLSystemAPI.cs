@@ -12585,6 +12585,12 @@ public int llSetLinkGLTFOverrides(int link, int face, LSLList overrides)
         {
             if (expService.GetAllowedExperiences(World.RegionInfo.RegionID).Contains(experienceId))
                 return true;
+            // ENFORCEMENT SEAM (deferred to consent slice, DEC-1): a region-TRUSTED experience
+            // is a stronger allow and should also admit here — i.e. add
+            //   expService.GetTrustedExperiences(World.RegionInfo.RegionID).Contains(experienceId)
+            // The trusted LIST is persisted as of EXP-SLICE-0.5, but wiring it into admission
+            // is a runtime behavior change, so it lands with the consent flow (DEC-1) alongside
+            // trusted-bypasses-consent — NOT in the data/UI slice. No behavior added here.
             var info = expService.GetExperience(experienceId);
             if (info != null && info.IsGridWide)
                 return true;
@@ -12692,7 +12698,15 @@ public int llSetLinkGLTFOverrides(int link, int face, LSLList overrides)
                 return;
             }
 
-            // Auto-grant since viewer-native experience dialogs require viewer support
+            // ENFORCEMENT SEAM (trusted-bypasses-consent, deferred to consent slice DEC-1):
+            // this auto-grant is exactly the consent-model decision point. When the SL consent
+            // flow lands, a NON-trusted experience will send the ScriptQuestionExperience
+            // dialog and await the agent's answer here; a region-TRUSTED experience
+            // (expService.GetTrustedExperiences(regionId).Contains(experienceId)) will keep
+            // bypassing the dialog and grant silently. Firestorm 7.2.2 already supports the
+            // dialog (llviewermessage.cpp process_script_question + ScriptQuestionExperience);
+            // the branch is intentionally NOT implemented in EXP-SLICE-0.5 — the trusted list
+            // is stored but has no effect on grants yet. Today: unconditional auto-grant.
             // Permission is persisted in MySQL via ExperienceService
             expService.GrantPermission(experienceId, agentId);
 

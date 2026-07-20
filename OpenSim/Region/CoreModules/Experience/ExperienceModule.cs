@@ -316,9 +316,17 @@ namespace OpenSim.Region.CoreModules.Experience
             foreach (UUID id in m_Service.GetAllowedExperiences(regionId)) allowed.Add(OSD.FromUUID(id));
             OSDArray blocked = new OSDArray();
             foreach (UUID id in m_Service.GetBlockedExperiences(regionId)) blocked.Add(OSD.FromUUID(id));
+            OSDArray trusted = new OSDArray();
+            foreach (UUID id in m_Service.GetTrustedExperiences(regionId)) trusted.Add(OSD.FromUUID(id));
             m["allowed"] = allowed;
             m["blocked"] = blocked;
-            m["trusted"] = new OSDArray();   // estate-level "trusted" not modelled — honestly empty
+            // Wire key "trusted" — the Region/Estate > Experiences panel reads
+            // content["trusted"] into its Trusted list editor (Firestorm 7.2.2
+            // llfloaterregioninfo.cpp:3274, LLPanelRegionExperiences::processResponse) and
+            // POSTs it back via addIds(mTrusted) (:3428). EXP-SLICE-0.5 (DEC-4/Option A):
+            // the list is now real; trusted-bypasses-consent ENFORCEMENT is deferred to the
+            // consent slice (DEC-1).
+            m["trusted"] = trusted;
             // "default" omitted: the Region panel reads it CONDITIONALLY
             // (llfloaterregioninfo.cpp:3266-3268 `if(content.has("default"))`), so omission
             // is the correct wire encoding of "no default experience" — a concept Legion
@@ -352,10 +360,11 @@ namespace OpenSim.Region.CoreModules.Experience
         // method in LLClientView gates on CanIssueEstateCommand(agentId, false) (= admin
         // OR estate manager/owner); we use exactly that check.
         //
-        // TRUSTED: deliberately NOT implemented — SL-trusted experiences bypass per-agent
-        // consent (no permission dialog), a security-sensitive enforcement change that is
-        // not "small and clear". We keep serving trusted=[] and reject trusted edits by
-        // reversion (the panel shows the entry vanish — honest), logged below.
+        // TRUSTED: list is persisted as of EXP-SLICE-0.5 (DEC-4/Option A) — trust/untrust
+        // edits round-trip through TrustExperience/RemoveTrustedExperience below, same as
+        // allowed/blocked. The trusted-bypasses-per-agent-consent ENFORCEMENT is still
+        // deferred to the consent slice (DEC-1): storing the list has no runtime effect on
+        // script permission grants yet (see the seam comments in LSLSystemAPI.cs).
         private void HandleRegionExperiencesPost(IOSHttpRequest req, IOSHttpResponse resp, UUID agentID, UUID regionId)
         {
             bool authorized = m_Scene.Permissions.CanIssueEstateCommand(agentID, false);
@@ -399,32 +408,36 @@ namespace OpenSim.Region.CoreModules.Experience
             var postedBlocked = ReadIdList(body, "blocked");
             var postedTrusted = ReadIdList(body, "trusted");
 
-            // An id in both posted lists would fight the service's mutual exclusion
-            // (allow removes block and vice versa); blocked wins, matching block-wins
-            // enforcement precedence.
+            // Blocked wins over both permit-family lists (matching block-wins enforcement
+            // precedence). Allowed and trusted may coexist, so they are NOT de-duped against
+            // each other — an id the estate owner placed in both editors stays in both.
             postedAllowed.ExceptWith(postedBlocked);
+            postedTrusted.ExceptWith(postedBlocked);
 
             var currentAllowed = new HashSet<UUID>(m_Service.GetAllowedExperiences(regionId));
             var currentBlocked = new HashSet<UUID>(m_Service.GetBlockedExperiences(regionId));
+            var currentTrusted = new HashSet<UUID>(m_Service.GetTrustedExperiences(regionId));
 
             int changes = 0;
             foreach (UUID id in postedAllowed)
                 if (!currentAllowed.Contains(id) && m_Service.AllowExperience(regionId, id)) changes++;
             foreach (UUID id in currentAllowed)
                 if (!postedAllowed.Contains(id) && m_Service.RemoveAllowedExperience(regionId, id)) changes++;
+            // Blocked before trusted: BlockExperience clears the trusted table for that id, so
+            // applying blocks first keeps a re-blocked id out of trusted. Posted sets are
+            // disjoint from blocked (ExceptWith above), so this never fights the trusted adds.
             foreach (UUID id in postedBlocked)
                 if (!currentBlocked.Contains(id) && m_Service.BlockExperience(regionId, id)) changes++;
             foreach (UUID id in currentBlocked)
                 if (!postedBlocked.Contains(id) && m_Service.RemoveBlockedExperience(regionId, id)) changes++;
-
-            if (postedTrusted.Count > 0)
-                m_log.DebugFormat(
-                    "[ExperienceModule]: RegionExperiences POST by {0} in '{1}' included {2} TRUSTED entr{3} — trusted is not implemented (consent-bypass semantics deferred); entries not persisted, panel will revert them.",
-                    agentID, m_Scene.RegionInfo.RegionName, postedTrusted.Count, postedTrusted.Count == 1 ? "y" : "ies");
+            foreach (UUID id in postedTrusted)
+                if (!currentTrusted.Contains(id) && m_Service.TrustExperience(regionId, id)) changes++;
+            foreach (UUID id in currentTrusted)
+                if (!postedTrusted.Contains(id) && m_Service.RemoveTrustedExperience(regionId, id)) changes++;
 
             m_log.DebugFormat(
-                "[ExperienceModule]: RegionExperiences POST by {0} in '{1}': {2} change(s) applied (allowed={3}, blocked={4}).",
-                agentID, m_Scene.RegionInfo.RegionName, changes, postedAllowed.Count, postedBlocked.Count);
+                "[ExperienceModule]: RegionExperiences POST by {0} in '{1}': {2} change(s) applied (allowed={3}, blocked={4}, trusted={5}).",
+                agentID, m_Scene.RegionInfo.RegionName, changes, postedAllowed.Count, postedBlocked.Count, postedTrusted.Count);
 
             // Respond with the fresh persisted state in GET shape — the panel re-renders
             // from this, so what it shows is exactly what the DB now holds.

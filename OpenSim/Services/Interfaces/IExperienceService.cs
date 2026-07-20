@@ -49,13 +49,19 @@ namespace OpenSim.Services.Interfaces
         /// <summary>Returns total bytes used by this experience's KV store.</summary>
         long DataSizeKeyValue(UUID experienceId);
 
-        // ── Region Allow/Block Lists ──
+        // ── Region Allow/Block/Trust Lists ──
         List<UUID> GetAllowedExperiences(UUID regionId);
         List<UUID> GetBlockedExperiences(UUID regionId);
+        /// <summary>Region trusted experiences (EXP-SLICE-0.5). Trusted is a stronger allow;
+        /// mutually exclusive with blocked, compatible with allowed.</summary>
+        List<UUID> GetTrustedExperiences(UUID regionId);
         bool AllowExperience(UUID regionId, UUID experienceId);
         bool RemoveAllowedExperience(UUID regionId, UUID experienceId);
         bool BlockExperience(UUID regionId, UUID experienceId);
         bool RemoveBlockedExperience(UUID regionId, UUID experienceId);
+        /// <summary>Add to the region trusted list (clears blocked; leaves allowed).</summary>
+        bool TrustExperience(UUID regionId, UUID experienceId);
+        bool RemoveTrustedExperience(UUID regionId, UUID experienceId);
 
         // ── Script ↔ Experience association persistence (EXP-PERSIST-1) ──
         /// <summary>Persist (or update) a script's experience association, keyed by script ItemID.</summary>
