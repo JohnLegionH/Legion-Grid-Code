@@ -252,6 +252,31 @@ namespace OpenSim.Region.CoreModules.Experience
                 caps.RegisterSimpleHandler("GetMetadata",
                     new SimpleStreamHandler("/" + UUID.Random(),
                         (req, resp) => HandleGetMetadata(req, resp)));
+
+                // AgentExperiences (Slice 2): the agent's OWNED experiences -> floater Owned tab.
+                // GET bare URL -> { experience_ids:[…] }; the viewer maps experience_ids to the
+                // Owned tab (llfloaterexperiences.cpp:148,155). POST (acquire) is deferred
+                // (Slice 5/DEC-3) — handled as a no-op read, never auto-creates.
+                caps.RegisterSimpleHandler("AgentExperiences",
+                    new SimpleStreamHandler("/" + UUID.Random(),
+                        (req, resp) => HandleAgentExperiences(req, resp, agentID)));
+
+                // GetExperiences (Slice 2): the agent's per-agent allowed/blocked permission
+                // lists -> floater Allowed/Blocked tabs. GET bare URL ->
+                // { experiences:[granted…], blocked:[blocked…] } (tabMap experiences->Allowed,
+                // blocked->Blocked, llfloaterexperiences.cpp:146-147).
+                caps.RegisterSimpleHandler("GetExperiences",
+                    new SimpleStreamHandler("/" + UUID.Random(),
+                        (req, resp) => HandleGetExperiences(req, resp, agentID)));
+
+                // ExperiencePreferences (Slice 2): view/set the agent's per-experience Allow/Block
+                // preference. GET "?<exp_id>" reads; PUT { "<exp_id>":{permission:"Allow"|"Block"} }
+                // sets; DELETE "?<exp_id>" forgets (llexperiencecache.cpp:762-839). All return
+                // { experiences, blocked }. The consent dialog's "Block Experience" button PUTs
+                // here (llviewermessage.cpp script_question_cb -> setExperiencePermission "Block").
+                caps.RegisterSimpleHandler("ExperiencePreferences",
+                    new SimpleStreamHandler("/" + UUID.Random(),
+                        (req, resp) => HandleExperiencePreferences(req, resp, agentID)));
             }
             catch (Exception e)
             {
@@ -585,6 +610,100 @@ namespace OpenSim.Region.CoreModules.Experience
                     result["experience"] = OSD.FromUUID(experienceId);
             }
             WriteLLSD(resp, result);
+        }
+
+        // AgentExperiences (Slice 2). GET -> the agent's OWNED experiences as experience_ids
+        // (viewer Owned tab). SL's Owned list is what the agent created/acquired; Legion serves
+        // GetExperiencesByOwner. POST is the "Acquire an Experience" path — DEFERRED (Slice 5/
+        // DEC-3): we never auto-create; a POST just returns the current owned list (the viewer's
+        // Acquire button stays disabled because we omit the "purchase" key), so nothing breaks.
+        private void HandleAgentExperiences(IOSHttpRequest req, IOSHttpResponse resp, UUID agentID)
+        {
+            OSDArray ids = new OSDArray();
+            foreach (ExperienceInfo info in m_Service.GetExperiencesByOwner(agentID))
+                ids.Add(OSD.FromUUID(info.ExperienceId));
+            OSDMap result = new OSDMap();
+            result["experience_ids"] = ids;
+            WriteLLSD(resp, result);
+        }
+
+        // GetExperiences (Slice 2). GET -> the agent's per-agent Allowed(granted)/Blocked lists
+        // as { experiences, blocked } (viewer Allowed/Blocked tabs, tabMap
+        // llfloaterexperiences.cpp:146-147).
+        private void HandleGetExperiences(IOSHttpRequest req, IOSHttpResponse resp, UUID agentID)
+        {
+            WriteLLSD(resp, BuildAgentPrefsLLSD(agentID));
+        }
+
+        // Shared { experiences:[granted], blocked:[blocked] } document for GetExperiences and
+        // every ExperiencePreferences verb. The viewer scans these two arrays for a given
+        // experience id to decide Allow/Block/Forget (llfloaterexperienceprofile.cpp:487-488,
+        // 892-894), and fills the floater Allowed/Blocked tabs from them.
+        private OSDMap BuildAgentPrefsLLSD(UUID agentID)
+        {
+            OSDArray allowed = new OSDArray();
+            foreach (UUID id in m_Service.GetAgentExperiences(agentID)) allowed.Add(OSD.FromUUID(id));
+            OSDArray blocked = new OSDArray();
+            foreach (UUID id in m_Service.GetAgentBlockedExperiences(agentID)) blocked.Add(OSD.FromUUID(id));
+            OSDMap m = new OSDMap();
+            m["experiences"] = allowed;
+            m["blocked"] = blocked;
+            return m;
+        }
+
+        // ExperiencePreferences (Slice 2) — GET/PUT/DELETE (llexperiencecache.cpp:762-839).
+        //   GET    "?<exp_id>"                              -> read (no mutation)
+        //   PUT    { "<exp_id>":{ permission:"Allow"|"Block" } } -> Grant / Deny
+        //   DELETE "?<exp_id>"                              -> Forget
+        // All return the shared { experiences, blocked } document. The consent dialog's Block
+        // button reaches here as PUT permission="Block" (llviewermessage.cpp script_question_cb),
+        // so a block persists to experience_permissions (granted=0) and the NEXT
+        // llRequestExperiencePermissions denies via IsAgentBlocked (code 4) — closing the D1 loop.
+        private void HandleExperiencePreferences(IOSHttpRequest req, IOSHttpResponse resp, UUID agentID)
+        {
+            string method = req.HttpMethod;
+            if (method == "PUT")
+            {
+                try
+                {
+                    if (OSDParser.DeserializeLLSDXml(req.InputStream) is OSDMap body)
+                    {
+                        foreach (string key in body.Keys)
+                        {
+                            if (!UUID.TryParse(key, out UUID expId) || expId == UUID.Zero) continue;
+                            string permission = (body[key] as OSDMap)?["permission"].AsString();
+                            if (permission == "Allow") m_Service.GrantPermission(expId, agentID);
+                            else if (permission == "Block") m_Service.DenyPermission(expId, agentID);
+                            InvalidatePermission(expId, agentID); // keep the script-side cache honest
+                        }
+                    }
+                }
+                catch (Exception e)
+                {
+                    m_log.DebugFormat("[ExperienceModule]: ExperiencePreferences PUT parse error: {0}", e.Message);
+                }
+            }
+            else if (method == "DELETE")
+            {
+                UUID expId = ParseQueryUuid(req);
+                if (expId != UUID.Zero)
+                {
+                    m_Service.ForgetPermission(expId, agentID);
+                    InvalidatePermission(expId, agentID);
+                }
+            }
+            // GET falls through to the read below. All verbs return the fresh prefs document.
+            WriteLLSD(resp, BuildAgentPrefsLLSD(agentID));
+        }
+
+        // The permission caps address a single experience as a RAW UUID query string ("?<uuid>",
+        // no key=value) — llexperiencecache.cpp:770,824. Parse it out of the URL query.
+        private static UUID ParseQueryUuid(IOSHttpRequest req)
+        {
+            string q = req.Url?.Query;
+            if (string.IsNullOrEmpty(q)) return UUID.Zero;
+            q = q.TrimStart('?').Trim();
+            return UUID.TryParse(q, out UUID id) ? id : UUID.Zero;
         }
 
         public void Close() { }

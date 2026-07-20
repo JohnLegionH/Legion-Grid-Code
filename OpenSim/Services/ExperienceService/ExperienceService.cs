@@ -594,6 +594,36 @@ namespace OpenSim.Services.ExperienceService
             return results;
         }
 
+        public List<UUID> GetAgentBlockedExperiences(UUID agentId)
+        {
+            // Mirror of GetAgentExperiences with granted=0 — the agent's per-agent BLOCKED list
+            // (distinct from the region experience_blocked table). Backs the ExperiencePreferences
+            // / GetExperiences "blocked" array.
+            var results = new List<UUID>();
+            try
+            {
+                using (var conn = GetConnection())
+                using (var cmd = new MySqlCommand(
+                    "SELECT experience_id FROM experience_permissions WHERE agent_id=@aid AND granted=0", conn))
+                {
+                    cmd.Parameters.AddWithValue("@aid", agentId.ToString());
+                    using (var reader = cmd.ExecuteReader())
+                    {
+                        while (reader.Read())
+                        {
+                            if (UUID.TryParse(reader.GetString("experience_id"), out UUID eid))
+                                results.Add(eid);
+                        }
+                    }
+                }
+            }
+            catch (Exception e)
+            {
+                m_log.ErrorFormat("[ExperienceService]: GetAgentBlockedExperiences error: {0}", e.Message);
+            }
+            return results;
+        }
+
         // ══════════════════════════════════════════════════════════════════
         // Key-Value Store
         // ══════════════════════════════════════════════════════════════════
