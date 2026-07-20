@@ -34,9 +34,14 @@ namespace OpenSim.Services.Interfaces
         bool DenyPermission(UUID experienceId, UUID agentId);
         bool ForgetPermission(UUID experienceId, UUID agentId);
         List<UUID> GetAgentExperiences(UUID agentId);
-        /// <summary>The agent's per-agent BLOCKED experiences (granted=0) — distinct from the
-        /// region block list. Backs GetExperiences / ExperiencePreferences "blocked".</summary>
+        /// <summary>The agent's per-agent BLOCKED experiences from the dedicated
+        /// experience_agent_blocked table — distinct from the region block list. Backs
+        /// GetExperiences / ExperiencePreferences "blocked".</summary>
         List<UUID> GetAgentBlockedExperiences(UUID agentId);
+        /// <summary>Add an experience to the agent's personal block list.</summary>
+        bool BlockExperienceForAgent(UUID agentId, UUID experienceId);
+        /// <summary>Remove an experience from the agent's personal block list.</summary>
+        bool UnblockExperienceForAgent(UUID agentId, UUID experienceId);
 
         // ── Key-Value Store ──
         /// <summary>Read a value. Returns null if key not found.</summary>

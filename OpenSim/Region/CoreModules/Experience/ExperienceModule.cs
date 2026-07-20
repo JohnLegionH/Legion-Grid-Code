@@ -672,8 +672,18 @@ namespace OpenSim.Region.CoreModules.Experience
                         {
                             if (!UUID.TryParse(key, out UUID expId) || expId == UUID.Zero) continue;
                             string permission = (body[key] as OSDMap)?["permission"].AsString();
-                            if (permission == "Allow") m_Service.GrantPermission(expId, agentID);
-                            else if (permission == "Block") m_Service.DenyPermission(expId, agentID);
+                            // Allow and Block are mutually exclusive so the experience appears in
+                            // exactly one of the GET response's {experiences, blocked} arrays.
+                            if (permission == "Allow")
+                            {
+                                m_Service.UnblockExperienceForAgent(agentID, expId);
+                                m_Service.GrantPermission(expId, agentID);
+                            }
+                            else if (permission == "Block")
+                            {
+                                m_Service.BlockExperienceForAgent(agentID, expId);
+                                m_Service.ForgetPermission(expId, agentID); // block revokes any grant
+                            }
                             InvalidatePermission(expId, agentID); // keep the script-side cache honest
                         }
                     }
@@ -685,10 +695,12 @@ namespace OpenSim.Region.CoreModules.Experience
             }
             else if (method == "DELETE")
             {
+                // Forget -> back to undecided: clear BOTH the grant and the personal block.
                 UUID expId = ParseQueryUuid(req);
                 if (expId != UUID.Zero)
                 {
                     m_Service.ForgetPermission(expId, agentID);
+                    m_Service.UnblockExperienceForAgent(agentID, expId);
                     InvalidatePermission(expId, agentID);
                 }
             }

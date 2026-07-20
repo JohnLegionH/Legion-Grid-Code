@@ -73,7 +73,7 @@ namespace OpenSim.Services.ExperienceService
                         }
                     }
                     s_schemaEnsured = true;
-                    m_log.Info("[ExperienceService]: Schema ensured (7x CREATE TABLE IF NOT EXISTS)");
+                    m_log.Info("[ExperienceService]: Schema ensured (8x CREATE TABLE IF NOT EXISTS)");
                 }
                 catch (Exception e)
                 {
@@ -149,6 +149,19 @@ namespace OpenSim.Services.ExperienceService
                 `region_id` char(36) NOT NULL,
                 `experience_id` char(36) NOT NULL,
                 PRIMARY KEY (`region_id`,`experience_id`)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4",
+
+            // Per-AGENT experience block list (EXP-SLICE-2 CAP-EPREF, John-approved). The
+            // resident's personal ""never this experience"" set, keyed by agent (vs the region
+            // experience_blocked table keyed by region). Structurally identical to
+            // experience_trusted — same char(36) columns, composite PK, InnoDB/utf8mb4.
+            // Additive CREATE IF NOT EXISTS: a live grid is untouched (no ALTER of existing
+            // tables); a fresh bootstrap gets it. Backs GetAgentBlockedExperiences and the D1
+            // consent Block button.
+            @"CREATE TABLE IF NOT EXISTS `experience_agent_blocked` (
+                `agent_id` char(36) NOT NULL,
+                `experience_id` char(36) NOT NULL,
+                PRIMARY KEY (`agent_id`,`experience_id`)
             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4",
 
             @"CREATE TABLE IF NOT EXISTS `script_experiences` (
@@ -482,16 +495,18 @@ namespace OpenSim.Services.ExperienceService
 
         public bool IsAgentBlocked(UUID experienceId, UUID agentId)
         {
+            // The agent's personal block now lives in the dedicated experience_agent_blocked
+            // table (John-approved), NOT experience_permissions.granted=0 — the block list is
+            // decoupled from grant records.
             try
             {
                 using (var conn = GetConnection())
                 using (var cmd = new MySqlCommand(
-                    "SELECT granted FROM experience_permissions WHERE experience_id=@eid AND agent_id=@aid", conn))
+                    "SELECT 1 FROM experience_agent_blocked WHERE agent_id=@aid AND experience_id=@eid", conn))
                 {
-                    cmd.Parameters.AddWithValue("@eid", experienceId.ToString());
                     cmd.Parameters.AddWithValue("@aid", agentId.ToString());
-                    var result = cmd.ExecuteScalar();
-                    return result != null && Convert.ToInt32(result) == 0;
+                    cmd.Parameters.AddWithValue("@eid", experienceId.ToString());
+                    return cmd.ExecuteScalar() != null;
                 }
             }
             catch (Exception e)
@@ -596,15 +611,15 @@ namespace OpenSim.Services.ExperienceService
 
         public List<UUID> GetAgentBlockedExperiences(UUID agentId)
         {
-            // Mirror of GetAgentExperiences with granted=0 — the agent's per-agent BLOCKED list
-            // (distinct from the region experience_blocked table). Backs the ExperiencePreferences
-            // / GetExperiences "blocked" array.
+            // The agent's per-agent BLOCKED list from the dedicated experience_agent_blocked
+            // table (distinct from the region experience_blocked table). Backs the
+            // ExperiencePreferences / GetExperiences "blocked" array.
             var results = new List<UUID>();
             try
             {
                 using (var conn = GetConnection())
                 using (var cmd = new MySqlCommand(
-                    "SELECT experience_id FROM experience_permissions WHERE agent_id=@aid AND granted=0", conn))
+                    "SELECT experience_id FROM experience_agent_blocked WHERE agent_id=@aid", conn))
                 {
                     cmd.Parameters.AddWithValue("@aid", agentId.ToString());
                     using (var reader = cmd.ExecuteReader())
@@ -622,6 +637,51 @@ namespace OpenSim.Services.ExperienceService
                 m_log.ErrorFormat("[ExperienceService]: GetAgentBlockedExperiences error: {0}", e.Message);
             }
             return results;
+        }
+
+        // Agent-scoped block/unblock — mirrors the region AddRegionExperience/RemoveRegionExperience
+        // pattern (INSERT IGNORE / DELETE on a two-column table), but keyed by agent_id instead of
+        // region_id. The block list is the resident's personal "never this experience" set.
+        public bool BlockExperienceForAgent(UUID agentId, UUID experienceId)
+        {
+            try
+            {
+                using (var conn = GetConnection())
+                using (var cmd = new MySqlCommand(
+                    "INSERT IGNORE INTO experience_agent_blocked (agent_id, experience_id) VALUES (@aid, @eid)", conn))
+                {
+                    cmd.Parameters.AddWithValue("@aid", agentId.ToString());
+                    cmd.Parameters.AddWithValue("@eid", experienceId.ToString());
+                    cmd.ExecuteNonQuery();
+                    return true;
+                }
+            }
+            catch (Exception e)
+            {
+                m_log.ErrorFormat("[ExperienceService]: BlockExperienceForAgent error: {0}", e.Message);
+                return false;
+            }
+        }
+
+        public bool UnblockExperienceForAgent(UUID agentId, UUID experienceId)
+        {
+            try
+            {
+                using (var conn = GetConnection())
+                using (var cmd = new MySqlCommand(
+                    "DELETE FROM experience_agent_blocked WHERE agent_id=@aid AND experience_id=@eid", conn))
+                {
+                    cmd.Parameters.AddWithValue("@aid", agentId.ToString());
+                    cmd.Parameters.AddWithValue("@eid", experienceId.ToString());
+                    cmd.ExecuteNonQuery();
+                    return true;
+                }
+            }
+            catch (Exception e)
+            {
+                m_log.ErrorFormat("[ExperienceService]: UnblockExperienceForAgent error: {0}", e.Message);
+                return false;
+            }
         }
 
         // ══════════════════════════════════════════════════════════════════

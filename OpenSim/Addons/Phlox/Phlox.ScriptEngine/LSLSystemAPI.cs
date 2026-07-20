@@ -12704,22 +12704,26 @@ public int llSetLinkGLTFOverrides(int link, int face, LSLList overrides)
                 return;
             }
 
+            // Agent's PERSONAL block wins over everything below — checked BEFORE the already-
+            // granted short-circuit so a resident who blocks an experience is never re-granted
+            // (the D1 consent Block button persists here via ExperiencePreferences ->
+            // experience_agent_blocked). SL has no dedicated agent-block error code in the 0-18
+            // enum; 4 (XP_ERROR_NOT_PERMITTED, "operation not permitted") is the correct code.
+            if (expService.IsAgentBlocked(experienceId, agentId))
+            {
+                m_ScriptEngine.PostScriptEvent(m_itemID, new EventParams(
+                    "experience_permissions_denied",
+                    new object[] { agent, ExperienceInfo.XP_ERROR_NOT_PERMITTED }, // 4 — agent has personally blocked this experience
+                    new DetectParams[0]));
+                return;
+            }
+
             // Check if agent already granted
             if (expService.IsAgentGranted(experienceId, agentId))
             {
                 m_ScriptEngine.PostScriptEvent(m_itemID, new EventParams(
                     "experience_permissions",
                     new object[] { agent },
-                    new DetectParams[0]));
-                return;
-            }
-
-            // Check if agent explicitly blocked
-            if (expService.IsAgentBlocked(experienceId, agentId))
-            {
-                m_ScriptEngine.PostScriptEvent(m_itemID, new EventParams(
-                    "experience_permissions_denied",
-                    new object[] { agent, ExperienceInfo.XP_ERROR_NOT_PERMITTED }, // 4 — agent explicitly blocked
                     new DetectParams[0]));
                 return;
             }
