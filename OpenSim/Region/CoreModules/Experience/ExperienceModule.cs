@@ -236,6 +236,22 @@ namespace OpenSim.Region.CoreModules.Experience
                 caps.RegisterSimpleHandler("FindExperienceByName",
                     new SimpleStreamHandler("/" + UUID.Random(),
                         (req, resp) => HandleFindExperienceByName(req, resp)));
+
+                // GetCreatorExperiences (Slice 1): the experiences this agent may contribute
+                // scripts to. Un-greys the script editor's "Experience" dropdown
+                // (llpreviewscript.cpp:2039-2057) and fills the floater Contributor tab
+                // (llfloaterexperiences.cpp:153). GET, bare URL; agent from the cap context.
+                caps.RegisterSimpleHandler("GetCreatorExperiences",
+                    new SimpleStreamHandler("/" + UUID.Random(),
+                        (req, resp) => HandleGetCreatorExperiences(req, resp, agentID)));
+
+                // GetMetadata (Slice 1): which experience a given task-inventory SCRIPT is
+                // associated with. POST { object-id, item-id, fields:["experience"] } ->
+                // { experience: <uuid> } (llexperiencecache.cpp:581-627). Powers the script
+                // editor / item-props "associated experience" display.
+                caps.RegisterSimpleHandler("GetMetadata",
+                    new SimpleStreamHandler("/" + UUID.Random(),
+                        (req, resp) => HandleGetMetadata(req, resp)));
             }
             catch (Exception e)
             {
@@ -522,6 +538,53 @@ namespace OpenSim.Region.CoreModules.Experience
             if (q >= 0) path = path.Substring(0, q);
             return path + "?page=" + page + "&page_size=" + pageSize +
                    "&query=" + Uri.EscapeDataString(query ?? string.Empty);
+        }
+
+        // GetCreatorExperiences (Slice 1). GET, bare URL — no request params; the agent is the
+        // one this cap was seeded for. The viewer reads the response's "experience_ids" array
+        // (llpreviewscript.cpp:2057 setExperienceIds(result["experience_ids"]);
+        // llfloaterexperiences.cpp:251 content["experience_ids"]). SL's full semantic is
+        // owner ∪ groups where the agent holds ExperienceCreator power; Legion serves the
+        // owner-only core here (GetExperiencesByOwner). The group union arrives with the
+        // GetExperiencesByGroup service query in Slice 4 — noted, not stubbed.
+        private void HandleGetCreatorExperiences(IOSHttpRequest req, IOSHttpResponse resp, UUID agentID)
+        {
+            OSDArray ids = new OSDArray();
+            foreach (ExperienceInfo info in m_Service.GetExperiencesByOwner(agentID))
+                ids.Add(OSD.FromUUID(info.ExperienceId));
+            OSDMap result = new OSDMap();
+            result["experience_ids"] = ids;
+            WriteLLSD(resp, result);
+        }
+
+        // GetMetadata (Slice 1). POST body { object-id, item-id, fields:[...] }; the viewer only
+        // ever requests the "experience" field (llexperiencecache.cpp:596-601) and reads back
+        // result["experience"] (:608 has-check, :626 asUUID). We resolve the script item's
+        // associated experience via the same lookup the script engine uses
+        // (GetScriptExperience: in-memory map, then persisted script_experiences). No association
+        // -> omit the key, which the viewer treats as a benign "no experience" (:608-623).
+        private void HandleGetMetadata(IOSHttpRequest req, IOSHttpResponse resp)
+        {
+            UUID itemId = UUID.Zero;
+            try
+            {
+                if (OSDParser.DeserializeLLSDXml(req.InputStream) is OSDMap body &&
+                    body.TryGetValue("item-id", out OSD itemOsd))
+                    itemId = itemOsd.AsUUID();
+            }
+            catch (Exception e)
+            {
+                m_log.DebugFormat("[ExperienceModule]: GetMetadata parse error: {0}", e.Message);
+            }
+
+            OSDMap result = new OSDMap();
+            if (itemId != UUID.Zero)
+            {
+                UUID experienceId = GetScriptExperience(itemId);
+                if (experienceId != UUID.Zero)
+                    result["experience"] = OSD.FromUUID(experienceId);
+            }
+            WriteLLSD(resp, result);
         }
 
         public void Close() { }
