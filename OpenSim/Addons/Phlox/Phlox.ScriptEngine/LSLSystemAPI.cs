@@ -1329,6 +1329,32 @@ namespace Phlox.ScriptEngine
 
         private IClientAPI m_waitingForScriptAnswer = null;
 
+        // ── Experience permission consent (DEC-1) ──────────────────────────────
+        // JoinAnExperience script-permission bit (Firestorm llscriptruntimeperms.h:63,
+        // (0x1<<13)); this is LSL PERMISSION_EXPERIENCE. The ScriptQuestion must carry this
+        // bit for the viewer to render the experience participation dialog
+        // (llviewermessage.cpp:7341 gates the dialog on a non-zero known permission bit).
+        private const int PERMISSION_EXPERIENCE = 0x2000;
+        // SL experience permission requests time out (XP_ERROR code 18). The exact SL window
+        // is unverified (ledger UNV-EXP-TIMEOUT); regular llRequestPermissions has NO timeout
+        // so there is no in-tree precedent to match. 120s is a conservative documented choice.
+        private const int EXPERIENCE_PERM_TIMEOUT_MS = 120000;
+
+        private sealed class PendingExperiencePerm
+        {
+            public UUID AgentId;
+            public UUID ExperienceId;
+            public IClientAPI Client;
+            public System.Threading.Timer Timer;
+        }
+        // Keyed by script ItemID (m_itemID). LSLSystemAPI is per-script-instance, so this holds
+        // at most one entry; keying by ItemID makes the answer correlation explicit and safe —
+        // two objects prompting the same agent have distinct ItemIDs and never cross, and the
+        // answer packet (which carries no ExperienceID) is matched back by TaskID + ItemID.
+        private readonly Dictionary<UUID, PendingExperiencePerm> m_pendingExpPerms = new Dictionary<UUID, PendingExperiencePerm>();
+        private readonly object m_pendingExpLock = new object();
+        private IClientAPI m_expHookedClient = null;
+
         private UUID InventorySelf()
         {
             return GetInventorySelf()?.ItemID ?? UUID.Zero;
@@ -12583,14 +12609,14 @@ public int llSetLinkGLTFOverrides(int link, int face, LSLList overrides)
         /// </summary>
         private bool IsExperienceAdmitted(IExperienceService expService, UUID experienceId)
         {
-            if (expService.GetAllowedExperiences(World.RegionInfo.RegionID).Contains(experienceId))
+            UUID regionId = World.RegionInfo.RegionID;
+            if (expService.GetAllowedExperiences(regionId).Contains(experienceId))
                 return true;
-            // ENFORCEMENT SEAM (deferred to consent slice, DEC-1): a region-TRUSTED experience
-            // is a stronger allow and should also admit here — i.e. add
-            //   expService.GetTrustedExperiences(World.RegionInfo.RegionID).Contains(experienceId)
-            // The trusted LIST is persisted as of EXP-SLICE-0.5, but wiring it into admission
-            // is a runtime behavior change, so it lands with the consent flow (DEC-1) alongside
-            // trusted-bypasses-consent — NOT in the data/UI slice. No behavior added here.
+            // A region-TRUSTED experience is a stronger allow, so it also admits (DEC-1 /
+            // CAP-RE-TRUST-ENF). trusted∩blocked is kept empty at write time and the caller
+            // applies block-wins BEFORE admission, so this can never re-admit a blocked one.
+            if (expService.GetTrustedExperiences(regionId).Contains(experienceId))
+                return true;
             var info = expService.GetExperience(experienceId);
             if (info != null && info.IsGridWide)
                 return true;
@@ -12698,29 +12724,138 @@ public int llSetLinkGLTFOverrides(int link, int face, LSLList overrides)
                 return;
             }
 
-            // ENFORCEMENT SEAM (trusted-bypasses-consent, deferred to consent slice DEC-1):
-            // this auto-grant is exactly the consent-model decision point. When the SL consent
-            // flow lands, a NON-trusted experience will send the ScriptQuestionExperience
-            // dialog and await the agent's answer here; a region-TRUSTED experience
-            // (expService.GetTrustedExperiences(regionId).Contains(experienceId)) will keep
-            // bypassing the dialog and grant silently. Firestorm 7.2.2 already supports the
-            // dialog (llviewermessage.cpp process_script_question + ScriptQuestionExperience);
-            // the branch is intentionally NOT implemented in EXP-SLICE-0.5 — the trusted list
-            // is stored but has no effect on grants yet. Today: unconditional auto-grant.
-            // Permission is persisted in MySQL via ExperienceService
+            // Consent model (DEC-1). A region-TRUSTED experience bypasses the participation
+            // dialog and grants silently (this completes CAP-RE-TRUST-ENF). Every other
+            // experience now PROMPTS the agent and AWAITS the answer — the former unconditional
+            // auto-grant is gone.
+            UUID regionId = World.RegionInfo.RegionID;
+            if (expService.GetTrustedExperiences(regionId).Contains(experienceId))
+            {
+                GrantExperienceAndNotify(expService, experienceId, agentId, agent);
+                return;
+            }
+
+            // Non-trusted: send the experience question and await the answer. Mirrors the
+            // regular llRequestPermissions await (this file, llRequestPermissions:
+            // hook OnScriptAnswer + OnConnectionClosed, then SendScriptQuestion) — but resolves
+            // to experience_permissions / _denied instead of run_time_permissions, and adds the
+            // SL timeout (code 18). Do NOT grant until the answer arrives.
+            string ownerName = m_host.ParentGroup.RootPart.OwnerID.ToString();
+            UserAccount ownerAcct = World?.UserAccountService?.GetUserAccount(
+                World.RegionInfo.ScopeID, m_host.ParentGroup.RootPart.OwnerID);
+            if (ownerAcct != null) ownerName = ownerAcct.FirstName + " " + ownerAcct.LastName;
+            if (string.IsNullOrEmpty(ownerName)) ownerName = "(unknown)";
+
+            RegisterPendingExperiencePerm(sp.ControllingClient, experienceId, agentId);
+            sp.ControllingClient.SendScriptQuestion(
+                m_host.UUID, m_host.ParentGroup.RootPart.Name, ownerName, m_itemID,
+                PERMISSION_EXPERIENCE, experienceId);
+        }
+
+        // Grant + persist an experience permission and post the experience_permissions event.
+        // Shared by the trusted-bypass path and the accepted-answer path.
+        private void GrantExperienceAndNotify(IExperienceService expService, UUID experienceId, UUID agentId, string agent)
+        {
             expService.GrantPermission(experienceId, agentId);
-
-            var expModule = GetExperienceModule();
-            expModule?.InvalidatePermission(experienceId, agentId);
-
+            GetExperienceModule()?.InvalidatePermission(experienceId, agentId);
             m_ScriptEngine.PostScriptEvent(m_itemID, new EventParams(
-                "experience_permissions",
-                new object[] { agent },
-                new DetectParams[0]));
-
+                "experience_permissions", new object[] { agent }, new DetectParams[0]));
             var expInfo = expService.GetExperience(experienceId);
-            m_log.InfoFormat("[PhloxAPI]: Experience permission auto-granted: agent={0} experience={1}",
+            m_log.InfoFormat("[PhloxAPI]: Experience permission granted: agent={0} experience={1}",
                 agentId, expInfo?.Name ?? experienceId.ToString());
+        }
+
+        // Record a pending experience-permission request (keyed by m_itemID) and start its
+        // timeout. Hooks the controlling client's answer/disconnect events (re-hooking if the
+        // target client changed, mirroring the regular path's single-client tracking).
+        private void RegisterPendingExperiencePerm(IClientAPI client, UUID experienceId, UUID agentId)
+        {
+            lock (m_pendingExpLock)
+            {
+                // Replace any prior pending request for this script (a re-request supersedes).
+                if (m_pendingExpPerms.TryGetValue(m_itemID, out PendingExperiencePerm prior))
+                {
+                    prior.Timer?.Dispose();
+                    m_pendingExpPerms.Remove(m_itemID);
+                }
+                if (m_expHookedClient != client)
+                {
+                    if (m_expHookedClient != null)
+                    {
+                        m_expHookedClient.OnScriptAnswer -= HandleExperienceScriptAnswer;
+                        m_expHookedClient.OnConnectionClosed -= HandleExperienceConnectionClosed;
+                    }
+                    client.OnScriptAnswer += HandleExperienceScriptAnswer;
+                    client.OnConnectionClosed += HandleExperienceConnectionClosed;
+                    m_expHookedClient = client;
+                }
+                var pending = new PendingExperiencePerm { AgentId = agentId, ExperienceId = experienceId, Client = client };
+                pending.Timer = new System.Threading.Timer(
+                    _ => ResolveExperiencePerm(m_itemID, granted: false, errorCode: ExperienceInfo.XP_ERROR_REQUEST_PERM_TIMEOUT),
+                    null, EXPERIENCE_PERM_TIMEOUT_MS, System.Threading.Timeout.Infinite);
+                m_pendingExpPerms[m_itemID] = pending;
+            }
+        }
+
+        // ScriptAnswerYes arrived (via OnScriptAnswer). Correlate by TaskID (this object) +
+        // ItemID; a non-zero JoinAnExperience bit means the agent accepted, zero means denied.
+        private void HandleExperienceScriptAnswer(IClientAPI client, UUID taskID, UUID itemID, int answer)
+        {
+            if (taskID != m_host.UUID) return;
+            bool granted = (answer & PERMISSION_EXPERIENCE) != 0;
+            ResolveExperiencePerm(itemID, granted,
+                granted ? ExperienceInfo.XP_ERROR_NONE : ExperienceInfo.XP_ERROR_NOT_PERMITTED);
+        }
+
+        // Agent disconnected mid-dialog: resolve every request pending on this client as denied.
+        private void HandleExperienceConnectionClosed(IClientAPI client)
+        {
+            List<UUID> pendingKeys;
+            lock (m_pendingExpLock)
+                pendingKeys = new List<UUID>(m_pendingExpPerms.Keys);
+            foreach (UUID itemId in pendingKeys)
+                ResolveExperiencePerm(itemId, granted: false, errorCode: ExperienceInfo.XP_ERROR_NOT_PERMITTED);
+        }
+
+        // The single resolution point for grant / user-deny / timeout / disconnect. Removes the
+        // pending entry atomically under the lock (first resolver wins — no double-post),
+        // disposes the timer, and unhooks the client once nothing is pending; the DB grant and
+        // the script event are done OUTSIDE the lock. Cleanup happens on every path — no leak.
+        private void ResolveExperiencePerm(UUID itemID, bool granted, int errorCode)
+        {
+            PendingExperiencePerm pending;
+            IClientAPI clientToUnhook = null;
+            lock (m_pendingExpLock)
+            {
+                if (!m_pendingExpPerms.TryGetValue(itemID, out pending))
+                    return; // already resolved by another path
+                m_pendingExpPerms.Remove(itemID);
+                pending.Timer?.Dispose();
+                if (m_pendingExpPerms.Count == 0 && m_expHookedClient != null)
+                {
+                    clientToUnhook = m_expHookedClient;
+                    m_expHookedClient = null;
+                }
+            }
+            if (clientToUnhook != null)
+            {
+                clientToUnhook.OnScriptAnswer -= HandleExperienceScriptAnswer;
+                clientToUnhook.OnConnectionClosed -= HandleExperienceConnectionClosed;
+            }
+
+            string agent = pending.AgentId.ToString();
+            var expService = World?.RequestModuleInterface<IExperienceService>();
+            if (granted && expService != null)
+            {
+                GrantExperienceAndNotify(expService, pending.ExperienceId, pending.AgentId, agent);
+            }
+            else
+            {
+                m_ScriptEngine.PostScriptEvent(m_itemID, new EventParams(
+                    "experience_permissions_denied",
+                    new object[] { agent, errorCode },
+                    new DetectParams[0]));
+            }
         }
 
         // ── 660: llAgentInExperience ──

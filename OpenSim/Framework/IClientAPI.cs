@@ -1257,6 +1257,10 @@ namespace OpenSim.Framework
                                   uint flags, UUID flImageID, UUID imageID, string profileURL, UUID partnerID);
 
         void SendScriptQuestion(UUID taskID, string taskName, string ownerName, UUID itemID, int question);
+        /// <summary>Experience-aware overload (DEC-1 consent): when experienceID is non-zero,
+        /// the ScriptQuestion carries the Experience block so the viewer renders the
+        /// experience participation dialog. Zero = a normal script-permission question.</summary>
+        void SendScriptQuestion(UUID taskID, string taskName, string ownerName, UUID itemID, int question, UUID experienceID);
         void SendHealth(float health);
 
 

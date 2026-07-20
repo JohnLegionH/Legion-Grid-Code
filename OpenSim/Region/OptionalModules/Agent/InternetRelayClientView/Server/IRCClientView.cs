@@ -1257,6 +1257,11 @@ namespace OpenSim.Region.OptionalModules.Agent.InternetRelayClientView.Server
 
         }
 
+        public void SendScriptQuestion(UUID taskID, string taskName, string ownerName, UUID itemID, int question, UUID experienceID)
+        {
+
+        }
+
         public void SendHealth(float health)
         {
 

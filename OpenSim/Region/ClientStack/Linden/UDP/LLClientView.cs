@@ -12277,12 +12277,30 @@ namespace OpenSim.Region.ClientStack.LindenUDP
 
         public void SendScriptQuestion(UUID taskID, string taskName, string ownerName, UUID itemID, int question)
         {
+            SendScriptQuestion(taskID, taskName, ownerName, itemID, question, UUID.Zero);
+        }
+
+        public void SendScriptQuestion(UUID taskID, string taskName, string ownerName, UUID itemID, int question, UUID experienceID)
+        {
             ScriptQuestionPacket scriptQuestion = (ScriptQuestionPacket)PacketPool.Instance.GetPacket(PacketType.ScriptQuestion);
             scriptQuestion.Data.TaskID = taskID;
             scriptQuestion.Data.ItemID = itemID;
             scriptQuestion.Data.Questions = question;
             scriptQuestion.Data.ObjectName = Util.StringToBytes256(taskName);
             scriptQuestion.Data.ObjectOwner = Util.StringToBytes256(ownerName);
+            // Experience consent (DEC-1). The ScriptQuestion Experience block is MANDATORY in
+            // serialization for this OpenMetaverse build (0.9.4 allocates it in the ctor and
+            // ToBytes NREs if it is null — verified at code time), so we NEVER null it: we set
+            // its id explicitly every send — the real experience id for an experience request,
+            // UUID.Zero for a normal question. The explicit overwrite also prevents a pooled
+            // packet from leaking a previous request's experience id onto a later dialog.
+            // Firestorm raises the ScriptQuestionExperience participation dialog only when this
+            // id is non-zero AND the JoinAnExperience bit (0x2000) is set
+            // (llviewermessage.cpp:7297,7341,7459; llscriptruntimeperms.h:63); a zero id reads
+            // as a normal ScriptQuestion, so existing permission dialogs are unaffected.
+            if (scriptQuestion.Experience == null)
+                scriptQuestion.Experience = new ScriptQuestionPacket.ExperienceBlock();
+            scriptQuestion.Experience.ExperienceID = experienceID;
             OutPacket(scriptQuestion, ThrottleOutPacketType.Task);
         }
 

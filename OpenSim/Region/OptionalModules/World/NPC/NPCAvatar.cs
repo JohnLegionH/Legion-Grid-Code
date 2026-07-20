@@ -1090,6 +1090,9 @@ namespace OpenSim.Region.OptionalModules.World.NPC
         public void SendScriptQuestion(UUID objectID, string taskName, string ownerName, UUID itemID, int question)
         {
         }
+        public void SendScriptQuestion(UUID objectID, string taskName, string ownerName, UUID itemID, int question, UUID experienceID)
+        {
+        }
         public void SendHealth(float health)
         {
         }
