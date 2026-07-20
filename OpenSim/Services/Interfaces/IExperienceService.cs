@@ -21,6 +21,9 @@ namespace OpenSim.Services.Interfaces
         bool DeleteExperience(UUID experienceId);
         List<ExperienceInfo> GetExperiencesByOwner(UUID ownerId);
         List<ExperienceInfo> FindExperiences(string query);
+        /// <summary>Paged name search (stable order) — offset/limit window for the
+        /// FindExperienceByName cap's viewer-driven pagination.</summary>
+        List<ExperienceInfo> FindExperiences(string query, int offset, int limit);
 
         // ── Permission Grants ──
         /// <summary>Returns true if agent has granted permission to this experience</summary>

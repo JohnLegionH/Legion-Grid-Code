@@ -266,12 +266,47 @@ namespace OpenSim.Region.CoreModules.Experience
             if (info.IsPrivate)  props |= VP_PRIVATE;
             if (!info.IsEnabled) props |= VP_DISABLED;
             m["properties"] = OSD.FromInteger(props);
-            m["maturity"] = OSD.FromInteger(info.Maturity);
+            m["maturity"] = OSD.FromInteger(MaturityToSimAccess(info.Maturity));
             m["quota"] = OSD.FromInteger(128);
+            // Relative TTL in seconds — the viewer converts it to absolute on receipt
+            // (llexperiencecache.cpp:230-232 `row[EXPIRES].asReal() + getTotalSeconds()`).
+            // Without it a row NEVER expires from the viewer cache. 600 = the viewer's own
+            // DEFAULT_EXPIRATION (llexperiencecache.cpp:85).
+            m["expiration"] = OSD.FromInteger(600);
+            m["extended_metadata"] = OSD.FromString(BuildExtendedMetadata(info));
             if (info.OwnerId != UUID.Zero) m["agent_id"] = OSD.FromUUID(info.OwnerId);
             if (info.GroupId != UUID.Zero) m["group_id"] = OSD.FromUUID(info.GroupId);
             if (!string.IsNullOrEmpty(info.Slurl)) m["slurl"] = OSD.FromString(info.Slurl);
             return m;
+        }
+
+        // Wire maturity is the viewer's SIM_ACCESS namespace — 13/21/42 (Firestorm 7.2.2
+        // indra_constants.h:163-167) — NOT our internal 0/1/2. The profile floater classifies
+        // with `maturity <= SIM_ACCESS_*` (llfloaterexperienceprofile.cpp:267-288), so raw
+        // 0/1/2 rendered EVERYTHING (including Adult) as General. Unknown values map to
+        // Adult: over-restrict, never under-rate.
+        private static int MaturityToSimAccess(int maturity)
+        {
+            switch (maturity)
+            {
+                case 0: return 13;   // PG      -> SIM_ACCESS_PG
+                case 1: return 21;   // Mature  -> SIM_ACCESS_MATURE
+                case 2: return 42;   // Adult   -> SIM_ACCESS_ADULT
+                default: return 42;
+            }
+        }
+
+        // extended_metadata is an LLSD-XML document serialized INTO A STRING: the profile
+        // floater feeds it to LLSDXMLParser and reads keys "logo" and "marketplace"
+        // (llfloaterexperienceprofile.cpp:58,66,419-467). Always emitted — a zero-UUID logo
+        // and an empty marketplace hide their panels viewer-side (:437-448, :454-465), which
+        // is the correct display for "not set".
+        private static string BuildExtendedMetadata(ExperienceInfo info)
+        {
+            OSDMap meta = new OSDMap();
+            meta["logo"] = OSD.FromUUID(info.Logo);
+            meta["marketplace"] = OSD.FromString(info.Marketplace ?? string.Empty);
+            return OSDParser.SerializeLLSDXmlString(meta);
         }
 
         private OSDMap BuildRegionExperiencesLLSD(UUID regionId)
@@ -284,7 +319,10 @@ namespace OpenSim.Region.CoreModules.Experience
             m["allowed"] = allowed;
             m["blocked"] = blocked;
             m["trusted"] = new OSDArray();   // estate-level "trusted" not modelled — honestly empty
-            // "default" intentionally omitted (no default experience)
+            // "default" omitted: the Region panel reads it CONDITIONALLY
+            // (llfloaterregioninfo.cpp:3266-3268 `if(content.has("default"))`), so omission
+            // is the correct wire encoding of "no default experience" — a concept Legion
+            // doesn't model. Verified against Firestorm 7.2.2, 2026-07-19.
             return m;
         }
 
@@ -436,19 +474,41 @@ namespace OpenSim.Region.CoreModules.Experience
                 if (!int.TryParse(qs["page_size"], out pageSize) || pageSize <= 0) pageSize = 30;
             }
 
-            List<ExperienceInfo> found = m_Service.FindExperiences(query) ?? new List<ExperienceInfo>();
-            OSDArray keys = new OSDArray();
             // The viewer's page parameter is 1-BASED: the picker sends page=1 for the first
-            // search (llpanelexperiencepicker.cpp onBtnFind: mCurrentPage=1) and onPage()
-            // clamps to >=1. Treating it as 0-based made start = 30 and dropped EVERY result
+            // search (llpanelexperiencepicker.cpp mCurrentPage=1) and onPage() clamps to >=1
+            // (:443-446). Treating it as 0-based made start = 30 and dropped EVERY result
             // (the "returned=0 for all queries" bug). Clamp <=1 to page one.
-            int start = Math.Max(0, page - 1) * pageSize;
-            for (int i = start; i < found.Count && i < start + pageSize; i++)
+            if (page < 1) page = 1;
+
+            // Page in SQL (the old service call was hard-capped at 50 rows, making results
+            // beyond ~2 pages unreachable). Fetch one extra row to detect a next page.
+            int start = (page - 1) * pageSize;
+            List<ExperienceInfo> found = m_Service.FindExperiences(query, start, pageSize + 1)
+                ?? new List<ExperienceInfo>();
+
+            bool hasNext = found.Count > pageSize;
+            OSDArray keys = new OSDArray();
+            for (int i = 0; i < found.Count && i < pageSize; i++)
                 keys.Add(ExperienceToOSD(found[i]));
 
             OSDMap result = new OSDMap();
             result["experience_keys"] = keys;
+            // The picker enables its page buttons purely on the PRESENCE of these keys
+            // (llpanelexperiencepicker.cpp:248-249) and re-requests via ?page=N±1
+            // (onPage :443-446 -> findExperienceByNameCoro's ?page=&page_size=&query= URL);
+            // the values are never dereferenced, but we emit real re-query URLs for honesty.
+            if (hasNext) result["next_page_url"] = OSD.FromString(PageUrl(req, query, page + 1, pageSize));
+            if (page > 1) result["previous_page_url"] = OSD.FromString(PageUrl(req, query, page - 1, pageSize));
             WriteLLSD(resp, result);
+        }
+
+        private static string PageUrl(IOSHttpRequest req, string query, int page, int pageSize)
+        {
+            string path = req.RawUrl ?? string.Empty;
+            int q = path.IndexOf('?');
+            if (q >= 0) path = path.Substring(0, q);
+            return path + "?page=" + page + "&page_size=" + pageSize +
+                   "&query=" + Uri.EscapeDataString(query ?? string.Empty);
         }
 
         public void Close() { }

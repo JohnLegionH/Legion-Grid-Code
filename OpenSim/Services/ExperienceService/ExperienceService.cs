@@ -409,13 +409,26 @@ namespace OpenSim.Services.ExperienceService
 
         public List<ExperienceInfo> FindExperiences(string query)
         {
+            // Legacy unpaged form — first 50 matches, as before.
+            return FindExperiences(query, 0, 50);
+        }
+
+        public List<ExperienceInfo> FindExperiences(string query, int offset, int limit)
+        {
             var results = new List<ExperienceInfo>();
+            if (offset < 0) offset = 0;
+            if (limit <= 0) return results;
             try
             {
                 using (var conn = GetConnection())
-                using (var cmd = new MySqlCommand("SELECT * FROM experiences WHERE name LIKE @q LIMIT 50", conn))
+                // ORDER BY is load-bearing: without a stable order, LIMIT windows can
+                // overlap or skip rows between pages. experience_id breaks name ties.
+                using (var cmd = new MySqlCommand(
+                    "SELECT * FROM experiences WHERE name LIKE @q ORDER BY name, experience_id LIMIT @off, @lim", conn))
                 {
                     cmd.Parameters.AddWithValue("@q", "%" + (query ?? "") + "%");
+                    cmd.Parameters.AddWithValue("@off", offset);
+                    cmd.Parameters.AddWithValue("@lim", limit);
                     using (var reader = cmd.ExecuteReader())
                     {
                         while (reader.Read())
