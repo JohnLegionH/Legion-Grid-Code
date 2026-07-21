@@ -409,6 +409,19 @@ namespace OpenSim.Services.ExperienceService
             }
         }
 
+        public bool IsExperienceContributor(UUID experienceId, UUID agentId)
+        {
+            // Owner-only: an agent may contribute scripts to experiences they OWN. This matches
+            // the owner-only GetCreatorExperiences list the viewer populates the "Use Experience"
+            // dropdown from — so the agent can only pick, and thus only associate, experiences
+            // they own. The group-ExperienceCreator union (for group-owned experiences) needs
+            // group-power access (module/client layer, not this data service) and lands in Slice 4
+            // alongside GetCreatorExperiences' group union — deferred, NOT stubbed-false.
+            if (agentId.IsZero()) return false;
+            ExperienceInfo info = GetExperience(experienceId);
+            return info != null && info.OwnerId == agentId;
+        }
+
         public List<ExperienceInfo> GetExperiencesByOwner(UUID ownerId)
         {
             var results = new List<ExperienceInfo>();

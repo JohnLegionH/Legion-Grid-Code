@@ -845,12 +845,11 @@ namespace OpenSim.Region.CoreModules.Experience
             }
 
             if (m_Service == null) return false;
-            ExperienceInfo info = m_Service.GetExperience(experienceId);
-            if (info == null || info.OwnerId != agentId)
+            if (!m_Service.IsExperienceContributor(experienceId, agentId))
             {
                 m_log.WarnFormat(
-                    "[ExperienceModule]: agent {0} may not associate script {1} with experience {2} (not owner) — association unchanged",
-                    agentId, scriptItemId, experienceId);
+                    "[ExperienceModule]: agent {0} is not a contributor to experience {1} — cannot associate script {2}",
+                    agentId, experienceId, scriptItemId);
                 return false;
             }
 

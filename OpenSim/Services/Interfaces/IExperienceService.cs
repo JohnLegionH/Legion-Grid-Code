@@ -20,6 +20,10 @@ namespace OpenSim.Services.Interfaces
         bool UpdateExperience(ExperienceInfo info);
         bool DeleteExperience(UUID experienceId);
         List<ExperienceInfo> GetExperiencesByOwner(UUID ownerId);
+        /// <summary>True if the agent may contribute scripts to this experience. Owner-only at
+        /// the data layer (an agent contributes to experiences they own); the group-
+        /// ExperienceCreator union lands with GetCreatorExperiences' group union in Slice 4.</summary>
+        bool IsExperienceContributor(UUID experienceId, UUID agentId);
         List<ExperienceInfo> FindExperiences(string query);
         /// <summary>Paged name search (stable order) — offset/limit window for the
         /// FindExperienceByName cap's viewer-driven pagination.</summary>
