@@ -422,6 +422,17 @@ namespace OpenSim.Services.ExperienceService
             return info != null && info.OwnerId == agentId;
         }
 
+        public bool IsExperienceAdmin(UUID experienceId, UUID agentId)
+        {
+            // Owner-only at the data layer — EXACTLY parallel to IsExperienceContributor above.
+            // The group GP_EXPERIENCE_ADMIN (bit 49) union needs group-power access (the groups
+            // module / client layer, not this data service), so the module's admin gate ORs this
+            // owner check with the group-power check. See ExperienceModule.IsAgentExperienceAdmin.
+            if (agentId.IsZero()) return false;
+            ExperienceInfo info = GetExperience(experienceId);
+            return info != null && info.OwnerId == agentId;
+        }
+
         public List<ExperienceInfo> GetExperiencesByOwner(UUID ownerId)
         {
             var results = new List<ExperienceInfo>();

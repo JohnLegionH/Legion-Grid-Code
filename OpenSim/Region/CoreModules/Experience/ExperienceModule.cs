@@ -281,6 +281,20 @@ namespace OpenSim.Region.CoreModules.Experience
                 caps.RegisterSimpleHandler("ExperiencePreferences",
                     new SimpleStreamHandler("/" + UUID.Random(),
                         (req, resp) => HandleExperiencePreferences(req, resp, agentID)));
+
+                // IsExperienceAdmin (Slice 3): gates the profile Edit button. GET
+                // ?experience_id=<uuid> -> {status:bool} (llexperiencecache.cpp getExperienceAdmin:
+                // url += "?experience_id="; viewer reads result["status"]).
+                caps.RegisterSimpleHandler("IsExperienceAdmin",
+                    new SimpleStreamHandler("/" + UUID.Random(),
+                        (req, resp) => HandleIsExperienceAdmin(req, resp, agentID)));
+
+                // UpdateExperience (Slice 3): profile edit Save. POSTs the experience map
+                // (llexperiencecache.cpp updateExperienceCoro postAndSuspend) ->
+                // { experience_keys:[updated] }. Admin-gated; group_id is owner-only.
+                caps.RegisterSimpleHandler("UpdateExperience",
+                    new SimpleStreamHandler("/" + UUID.Random(),
+                        (req, resp) => HandleUpdateExperience(req, resp, agentID)));
             }
             catch (Exception e)
             {
@@ -720,6 +734,157 @@ namespace OpenSim.Region.CoreModules.Experience
             if (string.IsNullOrEmpty(q)) return UUID.Zero;
             q = q.TrimStart('?').Trim();
             return UUID.TryParse(q, out UUID id) ? id : UUID.Zero;
+        }
+
+        // ── Experience profile administration (Slice 3) ──────────────────────────
+        // Full SL admin check: experience OWNER, OR a member of the experience's group holding
+        // GP_EXPERIENCE_ADMIN (bit 49). The owner half reuses the data-layer IsExperienceAdmin;
+        // the group half needs group-power access (groups module), which only exists here — so
+        // the combined check lives in the module, mirroring SL/Tranquillity's module-level check.
+        private bool IsAgentExperienceAdmin(UUID agentId, ExperienceInfo info)
+        {
+            if (info == null || agentId == UUID.Zero) return false;
+            if (info.OwnerId == agentId) return true; // owner
+            if (info.GroupId != UUID.Zero &&
+                AgentHasGroupPower(agentId, info.GroupId, GroupPowers.ExperienceAdmin))
+                return true;                          // group Experience Admin (bit 49)
+            return false;
+        }
+
+        // True if the agent holds the given power in the group. Uses GetMembershipData(group,
+        // agent) so it works for ANY group the agent belongs to (not just their active group).
+        private bool AgentHasGroupPower(UUID agentId, UUID groupId, GroupPowers power)
+        {
+            var groups = m_Scene?.RequestModuleInterface<IGroupsModule>();
+            if (groups == null) return false;
+            GroupMembershipData m = groups.GetMembershipData(groupId, agentId);
+            return m != null && (m.GroupPowers & (ulong)power) != 0;
+        }
+
+        // IsExperienceAdmin cap: GET ?experience_id=<uuid> -> {status:bool}.
+        private void HandleIsExperienceAdmin(IOSHttpRequest req, IOSHttpResponse resp, UUID agentID)
+        {
+            UUID expId = UUID.Zero;
+            var qs = req.QueryString;
+            if (qs != null) UUID.TryParse(qs["experience_id"], out expId);
+            ExperienceInfo info = expId != UUID.Zero ? m_Service.GetExperience(expId) : null;
+            OSDMap result = new OSDMap();
+            result["status"] = OSD.FromBoolean(IsAgentExperienceAdmin(agentID, info));
+            WriteLLSD(resp, result);
+        }
+
+        // UpdateExperience cap: profile edit Save. POST the experience map; admin-gated write.
+        // The viewer sends name/description/slurl/maturity(13/21/42)/extended_metadata/properties/
+        // group_id (llfloaterexperienceprofile.cpp updatePackage:786-836). Response is
+        // { experience_keys:[ updated ] } — same row shape as GetExperienceInfo (reused
+        // ExperienceToOSD, so maturity re-emits as 13/21/42). group_id is OWNER-ONLY.
+        //
+        // D-NAME (deliberate documented exception): SL additionally runs Name/Description through
+        // a G-rating content filter with an UNPUBLISHED objectionable-word list. That rule set is
+        // not replicable exactly; per decision we do NOT implement a guessed filter (a wrong
+        // filter is a half-measure the other way). We enforce only verifiable validation:
+        // required non-empty name, and length clamps to the schema columns (name 64, desc 256).
+        private void HandleUpdateExperience(IOSHttpRequest req, IOSHttpResponse resp, UUID agentID)
+        {
+            OSDMap body = null;
+            try { body = OSDParser.DeserializeLLSDXml(req.InputStream) as OSDMap; }
+            catch (Exception e) { m_log.DebugFormat("[ExperienceModule]: UpdateExperience parse error: {0}", e.Message); }
+            if (body == null) { WriteLLSD(resp, new OSDMap()); return; }
+
+            UUID expId = body.ContainsKey("public_id") ? body["public_id"].AsUUID() : UUID.Zero;
+            ExperienceInfo info = expId != UUID.Zero ? m_Service.GetExperience(expId) : null;
+            if (info == null) { WriteLLSD(resp, new OSDMap()); return; }
+
+            // GATE: only an experience admin (owner OR group ExperienceAdmin) may edit.
+            if (!IsAgentExperienceAdmin(agentID, info))
+            {
+                m_log.WarnFormat("[ExperienceModule]: agent {0} is not an admin of experience {1} — UpdateExperience rejected", agentID, expId);
+                WriteLLSD(resp, BuildUpdateExperienceResponse(info)); // reject-shaped: echo unchanged
+                return;
+            }
+
+            // Editable fields (all admins). Name: required — an empty name keeps the existing one.
+            if (body.ContainsKey("name"))
+            {
+                string name = body["name"].AsString();
+                if (!string.IsNullOrEmpty(name)) info.Name = name.Length > 64 ? name.Substring(0, 64) : name;
+            }
+            if (body.ContainsKey("description"))
+            {
+                string desc = body["description"].AsString() ?? string.Empty;
+                info.Description = desc.Length > 256 ? desc.Substring(0, 256) : desc;
+            }
+            if (body.ContainsKey("slurl")) info.Slurl = body["slurl"].AsString() ?? string.Empty;
+            if (body.ContainsKey("maturity")) info.Maturity = SimAccessToMaturity(body["maturity"].AsInteger());
+            if (body.ContainsKey("properties")) info.Properties = ViewerPropsToInternal(body["properties"].AsInteger());
+            if (body.ContainsKey("extended_metadata")) ApplyExtendedMetadata(info, body["extended_metadata"].AsString());
+
+            // GROUP FIELD IS OWNER-ONLY: only the experience owner may change the group. An admin
+            // who is not the owner keeps the existing group (SL: "only the owner can change the
+            // group; all other editable fields may be set by any experience administrator").
+            if (body.ContainsKey("group_id"))
+            {
+                UUID newGroup = body["group_id"].AsUUID();
+                if (newGroup != info.GroupId)
+                {
+                    if (info.OwnerId == agentID)
+                        info.GroupId = newGroup;
+                    else
+                        m_log.WarnFormat("[ExperienceModule]: agent {0} is admin but not owner of experience {1} — group change ignored (owner-only)", agentID, expId);
+                }
+            }
+
+            m_Service.UpdateExperience(info);
+            m_log.InfoFormat("[ExperienceModule]: experience {0} ('{1}') updated by {2}", expId, info.Name, agentID);
+            WriteLLSD(resp, BuildUpdateExperienceResponse(info));
+        }
+
+        // The updated experience in the viewer-expected shape { experience_keys:[ row ] } — the
+        // profile floater reads experience_keys[0] as the authoritative result. Reuses
+        // ExperienceToOSD (Slice 0) so maturity/extended_metadata/properties round-trip.
+        private OSDMap BuildUpdateExperienceResponse(ExperienceInfo info)
+        {
+            OSDArray keys = new OSDArray();
+            keys.Add(ExperienceToOSD(info));
+            OSDMap m = new OSDMap();
+            m["experience_keys"] = keys;
+            return m;
+        }
+
+        // Reverse of MaturityToSimAccess: viewer SIM_ACCESS (13/21/42) -> internal 0/1/2.
+        private static int SimAccessToMaturity(int simAccess)
+        {
+            if (simAccess >= 42) return 2; // Adult
+            if (simAccess >= 21) return 1; // Mature
+            return 0;                      // General (13 or lower)
+        }
+
+        // Reverse of ExperienceToOSD's property mapping: viewer bits (GRID 1<<4, PRIVATE 1<<5,
+        // DISABLED 1<<6) -> internal PROP_ENABLED/GRIDWIDE/PRIVATE. DISABLED bit clear => enabled.
+        // Grid-wide has no viewer checkbox, so it's preserved from the value the viewer echoes.
+        private static int ViewerPropsToInternal(int viewerProps)
+        {
+            const int VP_GRID = 1 << 4, VP_PRIVATE = 1 << 5, VP_DISABLED = 1 << 6;
+            int props = 0;
+            if ((viewerProps & VP_DISABLED) == 0) props |= ExperienceInfo.PROP_ENABLED;
+            if ((viewerProps & VP_GRID) != 0) props |= ExperienceInfo.PROP_GRIDWIDE;
+            if ((viewerProps & VP_PRIVATE) != 0) props |= ExperienceInfo.PROP_PRIVATE;
+            return props;
+        }
+
+        // Decode the viewer's extended_metadata (LLSD-XML string) -> logo + marketplace.
+        private void ApplyExtendedMetadata(ExperienceInfo info, string metaXml)
+        {
+            if (string.IsNullOrEmpty(metaXml)) return;
+            try
+            {
+                if (OSDParser.DeserializeLLSDXml(metaXml) is OSDMap meta)
+                {
+                    if (meta.ContainsKey("logo")) info.Logo = meta["logo"].AsUUID();
+                    if (meta.ContainsKey("marketplace")) info.Marketplace = meta["marketplace"].AsString() ?? string.Empty;
+                }
+            }
+            catch (Exception e) { m_log.DebugFormat("[ExperienceModule]: extended_metadata decode error: {0}", e.Message); }
         }
 
         public void Close() { }

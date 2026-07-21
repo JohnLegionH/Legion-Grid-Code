@@ -24,6 +24,10 @@ namespace OpenSim.Services.Interfaces
         /// the data layer (an agent contributes to experiences they own); the group-
         /// ExperienceCreator union lands with GetCreatorExperiences' group union in Slice 4.</summary>
         bool IsExperienceContributor(UUID experienceId, UUID agentId);
+        /// <summary>True if the agent may administer (edit the profile of) this experience.
+        /// Owner-only at the data layer; the group GP_EXPERIENCE_ADMIN union is applied by the
+        /// module's admin gate (needs group-power access).</summary>
+        bool IsExperienceAdmin(UUID experienceId, UUID agentId);
         List<ExperienceInfo> FindExperiences(string query);
         /// <summary>Paged name search (stable order) — offset/limit window for the
         /// FindExperienceByName cap's viewer-driven pagination.</summary>
