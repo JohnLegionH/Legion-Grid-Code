@@ -1335,10 +1335,10 @@ namespace Phlox.ScriptEngine
         // bit for the viewer to render the experience participation dialog
         // (llviewermessage.cpp:7341 gates the dialog on a non-zero known permission bit).
         private const int PERMISSION_EXPERIENCE = 0x2000;
-        // SL experience permission requests time out (XP_ERROR code 18). The exact SL window
-        // is unverified (ledger UNV-EXP-TIMEOUT); regular llRequestPermissions has NO timeout
-        // so there is no in-tree precedent to match. 120s is a conservative documented choice.
-        private const int EXPERIENCE_PERM_TIMEOUT_MS = 120000;
+        // SL experience permission requests time out (XP_ERROR code 18). SL wiki
+        // (llRequestExperiencePermissions): the request "will time out after at least 5 minutes"
+        // — a 300s floor. Set to 300s to be SL-compliant (D1 shipped a non-compliant 120s).
+        private const int EXPERIENCE_PERM_TIMEOUT_MS = 300000;
 
         private sealed class PendingExperiencePerm
         {
@@ -11375,6 +11375,23 @@ public int llSetLinkGLTFOverrides(int link, int face, LSLList overrides)
         // with the existing owner-namespace fallback.
         // ══════════════════════════════════════════════════════════════════
 
+        // Byte size of a KV string, UTF-8 — matches MySQL LENGTH() (utf8mb4 bytes) used by
+        // DataSizeKeyValue, so used-bytes and projected-bytes are the same basis.
+        private static long KvBytes(string s) => s == null ? 0 : System.Text.Encoding.UTF8.GetByteCount(s);
+
+        // True if updating `key` to `value` would push the experience's KV store over the SL
+        // 128 MiB quota. Delta-aware: replacing an existing key swaps its value (key stays);
+        // a new key adds the whole pair. Basis: key+value bytes (SL's exact counting basis is
+        // undocumented — keys+values is the conservative choice, matching DataSizeKeyValue).
+        private bool ExceedsQuota(IExperienceService expService, UUID expId, string key, string value)
+        {
+            long used = expService.DataSizeKeyValue(expId);
+            string existing = expService.ReadKeyValue(expId, key); // null iff key absent
+            long oldPair = existing != null ? KvBytes(key) + KvBytes(existing) : 0;
+            long newPair = KvBytes(key) + KvBytes(value);
+            return used - oldPair + newPair > ExperienceInfo.MAX_DATA_QUOTA;
+        }
+
         public string llCreateKeyValue(string key, string value)
         {
             UUID reqID = UUID.Random();
@@ -11388,6 +11405,10 @@ public int llSetLinkGLTFOverrides(int link, int face, LSLList overrides)
                     if (expId == UUID.Zero) expId = m_host.OwnerID;
                     if (string.IsNullOrEmpty(key) || key.Length > ExperienceInfo.MAX_KEY_LENGTH || expService == null)
                         payload = "0," + ExperienceInfo.XP_ERROR_STORAGE_EXCEPTION;
+                    else if (expService.DataSizeKeyValue(expId) + KvBytes(key) + KvBytes(value) > ExperienceInfo.MAX_DATA_QUOTA)
+                        // Quota (SL 128 MiB): a create only ADDS a pair; reject if that would push
+                        // total KV bytes over the limit -> XP_ERROR_QUOTA_EXCEEDED (11), no write.
+                        payload = "0," + ExperienceInfo.XP_ERROR_QUOTA_EXCEEDED;
                     else
                         // Service returns bare false for dup AND error (indistinguishable); both map
                         // to STORAGE_EXCEPTION (13) — SL-valid for a create failure.
@@ -11449,6 +11470,11 @@ public int llSetLinkGLTFOverrides(int link, int face, LSLList overrides)
                     string checkArg = (checkedFlag != 0) ? (originalValue ?? string.Empty) : string.Empty;
                     if (string.IsNullOrEmpty(key) || key.Length > ExperienceInfo.MAX_KEY_LENGTH || expService == null)
                         payload = "0," + ExperienceInfo.XP_ERROR_STORAGE_EXCEPTION;
+                    else if (ExceedsQuota(expService, expId, key, value))
+                        // Quota (SL 128 MiB): projected total after this update exceeds the limit
+                        // -> XP_ERROR_QUOTA_EXCEEDED (11), no write. (If a CAS would also fail, this
+                        // returns 11 rather than 15 — a benign imprecision at the quota boundary.)
+                        payload = "0," + ExperienceInfo.XP_ERROR_QUOTA_EXCEEDED;
                     else
                         // LIMITATION: the service returns bare false for CAS-fail, key-not-found,
                         // and error alike — cannot distinguish; emits RETRY_UPDATE (15) for all.
@@ -11566,9 +11592,9 @@ public int llSetLinkGLTFOverrides(int link, int face, LSLList overrides)
                     var expService = World?.RequestModuleInterface<IExperienceService>();
                     UUID expId = GetScriptExperienceId();
                     if (expId == UUID.Zero) expId = m_host.OwnerID;
-                    // SL success is "1,<used>,<quota>" (two ints). LIMITATION: quota is the nominal
-                    // MAX_DATA_QUOTA constant; Legion does not currently ENFORCE it — the second int
-                    // is informational only.
+                    // SL success is "1,<used>,<quota>": first int = bytes used, second = TOTAL quota
+                    // (128 MiB), NOT free-remaining (UNV-5, SL wiki llDataSizeKeyValue). The quota is
+                    // now ENFORCED at write time (llCreateKeyValue/llUpdateKeyValue emit code 11).
                     payload = (expService == null)
                         ? "0," + ExperienceInfo.XP_ERROR_STORAGE_EXCEPTION
                         : "1," + expService.DataSizeKeyValue(expId) + "," + ExperienceInfo.MAX_DATA_QUOTA;
@@ -12572,16 +12598,26 @@ public int llSetLinkGLTFOverrides(int link, int face, LSLList overrides)
             var expService = World?.RequestModuleInterface<IExperienceService>();
             if (expService == null) return false;
 
+            // OTH-1: this is an AGENT-affecting check, so evaluate parcel block/allow at the
+            // AGENT's parcel (where the experience effect lands), not the object's — when the
+            // agent has a root presence in THIS region. Falls back to the object's parcel if the
+            // agent isn't resolvable here (child agent / another region), preserving prior
+            // behavior. Region block and grid-wide/region-allow are location-independent.
+            Vector3 checkPos = m_host != null ? m_host.AbsolutePosition : Vector3.Zero;
+            ScenePresence sp = World.GetScenePresence(agentId);
+            if (sp != null && !sp.IsChildAgent)
+                checkPos = sp.AbsolutePosition;
+
             // Block-wins: a parcel OR REGION block on this experience overrides every allow.
             // Region block is absolute in SL terms: the estate Blocked list only carries
             // grid-wide experiences (the panel filters enforce this), and parcel lists can't
             // even contain grid-wide ones — so nothing at parcel level can re-admit a
             // region-blocked experience.
-            if (IsExperienceBlockedOnObjectParcel(experienceId)) return false;
+            if (IsExperienceBlockedOnParcelAt(experienceId, checkPos)) return false;
             if (IsExperienceBlockedInRegion(expService, experienceId)) return false;
 
             // Admission (Slice-2 allow-precedence): region-allowed OR grid-wide OR parcel-ALLOW.
-            if (!IsExperienceAdmitted(expService, experienceId)) return false;
+            if (!IsExperienceAdmittedAt(expService, experienceId, checkPos)) return false;
 
             // Agent must still have granted permission to the experience.
             return expService.IsAgentGranted(experienceId, agentId);
@@ -12607,7 +12643,14 @@ public int llSetLinkGLTFOverrides(int link, int face, LSLList overrides)
         /// explicitly ALLOWs it (Flags=8, which admits a non-grid-wide experience that isn't
         /// region-allowed). IsAgentGranted is still required by the callers on top of this.
         /// </summary>
+        // Object-context admission (grant-time / object-affecting): uses the OBJECT's parcel.
         private bool IsExperienceAdmitted(IExperienceService expService, UUID experienceId)
+            => IsExperienceAdmittedAt(expService, experienceId,
+                   m_host != null ? m_host.AbsolutePosition : Vector3.Zero);
+
+        // Admission at a specific position (OTH-1): region-allowed OR grid-wide OR the parcel at
+        // `pos` explicitly ALLOWs it. The caller applies block-wins BEFORE this.
+        private bool IsExperienceAdmittedAt(IExperienceService expService, UUID experienceId, Vector3 pos)
         {
             UUID regionId = World.RegionInfo.RegionID;
             if (expService.GetAllowedExperiences(regionId).Contains(experienceId))
@@ -12620,32 +12663,35 @@ public int llSetLinkGLTFOverrides(int link, int face, LSLList overrides)
             var info = expService.GetExperience(experienceId);
             if (info != null && info.IsGridWide)
                 return true;
-            return IsExperienceAllowedOnObjectParcel(experienceId);
+            return IsExperienceAllowedOnParcelAt(experienceId, pos);
         }
 
-        /// <summary>
-        /// Parcel-ALLOW check for the object's current parcel (symmetric to the block check).
-        /// </summary>
+        // Parcel-ALLOW at the object's parcel (object-context callers).
         private bool IsExperienceAllowedOnObjectParcel(UUID experienceId)
+            => IsExperienceAllowedOnParcelAt(experienceId,
+                   m_host != null ? m_host.AbsolutePosition : Vector3.Zero);
+
+        // Parcel-ALLOW at a specific position (OTH-1).
+        private bool IsExperienceAllowedOnParcelAt(UUID experienceId, Vector3 pos)
         {
             if (experienceId == UUID.Zero || m_host == null || World == null)
                 return false;
-            var pos = m_host.AbsolutePosition;
             ILandObject parcel = World.LandChannel.GetLandObject(pos.X, pos.Y);
             return parcel != null && parcel.IsExperienceAllowed(experienceId);
         }
 
-        /// <summary>
-        /// Block-wins parcel check: true if <paramref name="experienceId"/> is BLOCKED on the
-        /// parcel where this script's object currently sits (m_host position). A parcel BLOCK
-        /// overrides region/grid ALLOW. This slice uses the OBJECT's parcel; an agent's-parcel
-        /// refinement for agent-affecting calls is a documented fast-follow.
-        /// </summary>
+        // Block-wins parcel check at the object's parcel (object-context callers, e.g.
+        // llRequestExperiencePermissions — grant is scoped to where the script's object sits).
         private bool IsExperienceBlockedOnObjectParcel(UUID experienceId)
+            => IsExperienceBlockedOnParcelAt(experienceId,
+                   m_host != null ? m_host.AbsolutePosition : Vector3.Zero);
+
+        // Block-wins parcel check at a specific position (OTH-1): true if the experience is
+        // BLOCKED on the parcel at `pos`. A parcel BLOCK overrides region/grid ALLOW.
+        private bool IsExperienceBlockedOnParcelAt(UUID experienceId, Vector3 pos)
         {
             if (experienceId == UUID.Zero || m_host == null || World == null)
                 return false;
-            var pos = m_host.AbsolutePosition;
             ILandObject parcel = World.LandChannel.GetLandObject(pos.X, pos.Y);
             return parcel != null && parcel.IsExperienceBlocked(experienceId);
         }
