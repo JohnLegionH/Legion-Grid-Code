@@ -456,6 +456,33 @@ namespace OpenSim.Services.ExperienceService
             return results;
         }
 
+        public List<ExperienceInfo> GetExperiencesByGroup(UUID groupId)
+        {
+            // Experiences owned by a group (experiences.group_id). Mirrors GetExperiencesByOwner.
+            // Backs GroupExperiences (the group profile tab) and the group union in
+            // GetCreatorExperiences / GetAdminExperiences.
+            var results = new List<ExperienceInfo>();
+            if (groupId.IsZero()) return results;
+            try
+            {
+                using (var conn = GetConnection())
+                using (var cmd = new MySqlCommand("SELECT * FROM experiences WHERE group_id=@gid", conn))
+                {
+                    cmd.Parameters.AddWithValue("@gid", groupId.ToString());
+                    using (var reader = cmd.ExecuteReader())
+                    {
+                        while (reader.Read())
+                            results.Add(ReadExperience(reader));
+                    }
+                }
+            }
+            catch (Exception e)
+            {
+                m_log.ErrorFormat("[ExperienceService]: GetExperiencesByGroup error: {0}", e.Message);
+            }
+            return results;
+        }
+
         public List<ExperienceInfo> FindExperiences(string query)
         {
             // Legacy unpaged form — first 50 matches, as before.

@@ -295,6 +295,20 @@ namespace OpenSim.Region.CoreModules.Experience
                 caps.RegisterSimpleHandler("UpdateExperience",
                     new SimpleStreamHandler("/" + UUID.Random(),
                         (req, resp) => HandleUpdateExperience(req, resp, agentID)));
+
+                // GetAdminExperiences (Slice 4): the agent's ADMIN tab = owner ∪ experiences whose
+                // group the agent holds GP_EXPERIENCE_ADMIN in. GET bare URL -> {experience_ids}
+                // (llfloaterexperiences.cpp updateInfo("GetAdminExperiences","Admin_Experiences_Tab")).
+                caps.RegisterSimpleHandler("GetAdminExperiences",
+                    new SimpleStreamHandler("/" + UUID.Random(),
+                        (req, resp) => HandleGetAdminExperiences(req, resp, agentID)));
+
+                // GroupExperiences (Slice 4): experiences owned by a specific group. GET
+                // ?<group_id> -> {experience_ids} (llpanelgroupexperiences.cpp:76,
+                // llexperiencecache getGroupExperiences url += "?" + groupId).
+                caps.RegisterSimpleHandler("GroupExperiences",
+                    new SimpleStreamHandler("/" + UUID.Random(),
+                        (req, resp) => HandleGroupExperiences(req, resp)));
             }
             catch (Exception e)
             {
@@ -583,20 +597,70 @@ namespace OpenSim.Region.CoreModules.Experience
                    "&query=" + Uri.EscapeDataString(query ?? string.Empty);
         }
 
-        // GetCreatorExperiences (Slice 1). GET, bare URL — no request params; the agent is the
-        // one this cap was seeded for. The viewer reads the response's "experience_ids" array
-        // (llpreviewscript.cpp:2057 setExperienceIds(result["experience_ids"]);
-        // llfloaterexperiences.cpp:251 content["experience_ids"]). SL's full semantic is
-        // owner ∪ groups where the agent holds ExperienceCreator power; Legion serves the
-        // owner-only core here (GetExperiencesByOwner). The group union arrives with the
-        // GetExperiencesByGroup service query in Slice 4 — noted, not stubbed.
+        // GetCreatorExperiences (Slice 1, broadened Slice 4). GET bare URL — agent from the cap
+        // context. Response "experience_ids" (llpreviewscript.cpp:2057 script-editor dropdown;
+        // llfloaterexperiences.cpp:251 Contributor tab). SL semantic = owner ∪ experiences whose
+        // group the agent can contribute to (GP_EXPERIENCE_CREATOR). Consistent with the
+        // association gate (IsAgentExperienceContributor): the dropdown lists exactly what the
+        // gate will accept.
         private void HandleGetCreatorExperiences(IOSHttpRequest req, IOSHttpResponse resp, UUID agentID)
         {
-            OSDArray ids = new OSDArray();
+            var set = new Dictionary<UUID, byte>();
             foreach (ExperienceInfo info in m_Service.GetExperiencesByOwner(agentID))
-                ids.Add(OSD.FromUUID(info.ExperienceId));
+                set[info.ExperienceId] = 1;
+            AddGroupExperiences(agentID, GroupPowers.ExperienceCreator, set);
+            WriteExperienceIds(resp, set.Keys);
+        }
+
+        // GetAdminExperiences (Slice 4). GET bare URL -> the agent's ADMIN tab = owner ∪
+        // experiences whose group the agent holds GP_EXPERIENCE_ADMIN in. Consistent with
+        // IsAgentExperienceAdmin (the profile Edit-button gate).
+        private void HandleGetAdminExperiences(IOSHttpRequest req, IOSHttpResponse resp, UUID agentID)
+        {
+            var set = new Dictionary<UUID, byte>();
+            foreach (ExperienceInfo info in m_Service.GetExperiencesByOwner(agentID))
+                set[info.ExperienceId] = 1;
+            AddGroupExperiences(agentID, GroupPowers.ExperienceAdmin, set);
+            WriteExperienceIds(resp, set.Keys);
+        }
+
+        // GroupExperiences (Slice 4). GET ?<group_id> -> experiences owned by that group.
+        private void HandleGroupExperiences(IOSHttpRequest req, IOSHttpResponse resp)
+        {
+            UUID groupId = ParseQueryUuid(req);
+            OSDArray ids = new OSDArray();
+            if (groupId != UUID.Zero)
+                foreach (ExperienceInfo info in m_Service.GetExperiencesByGroup(groupId))
+                    ids.Add(OSD.FromUUID(info.ExperienceId));
             OSDMap result = new OSDMap();
             result["experience_ids"] = ids;
+            WriteLLSD(resp, result);
+        }
+
+        // Add to `into` (used as a set) every experience the agent can act on via GROUP power:
+        // for each group the agent belongs to holding `power`, all experiences owned by that
+        // group. GetMembershipData(agent) enumerates ALL the agent's groups (not just active).
+        private void AddGroupExperiences(UUID agentId, GroupPowers power, Dictionary<UUID, byte> into)
+        {
+            var groups = m_Scene?.RequestModuleInterface<IGroupsModule>();
+            if (groups == null) return;
+            GroupMembershipData[] memberships = groups.GetMembershipData(agentId);
+            if (memberships == null) return;
+            foreach (GroupMembershipData m in memberships)
+            {
+                if (m == null || m.GroupID == UUID.Zero) continue;
+                if ((m.GroupPowers & (ulong)power) == 0) continue;
+                foreach (ExperienceInfo info in m_Service.GetExperiencesByGroup(m.GroupID))
+                    into[info.ExperienceId] = 1;
+            }
+        }
+
+        private void WriteExperienceIds(IOSHttpResponse resp, IEnumerable<UUID> ids)
+        {
+            OSDArray arr = new OSDArray();
+            foreach (UUID id in ids) arr.Add(OSD.FromUUID(id));
+            OSDMap result = new OSDMap();
+            result["experience_ids"] = arr;
             WriteLLSD(resp, result);
         }
 
@@ -748,6 +812,20 @@ namespace OpenSim.Region.CoreModules.Experience
             if (info.GroupId != UUID.Zero &&
                 AgentHasGroupPower(agentId, info.GroupId, GroupPowers.ExperienceAdmin))
                 return true;                          // group Experience Admin (bit 49)
+            return false;
+        }
+
+        // Full SL contributor check: experience OWNER, OR a member of the experience's group
+        // holding GP_EXPERIENCE_CREATOR (bit 50, "can sign scripts for group experiences").
+        // Parallels IsAgentExperienceAdmin; the group half needs the groups module. The
+        // association gate uses this, so it accepts exactly what GetCreatorExperiences lists.
+        private bool IsAgentExperienceContributor(UUID agentId, ExperienceInfo info)
+        {
+            if (info == null || agentId == UUID.Zero) return false;
+            if (info.OwnerId == agentId) return true; // owner
+            if (info.GroupId != UUID.Zero &&
+                AgentHasGroupPower(agentId, info.GroupId, GroupPowers.ExperienceCreator))
+                return true;                          // group Experience Contributor (bit 50)
             return false;
         }
 
@@ -1010,7 +1088,8 @@ namespace OpenSim.Region.CoreModules.Experience
             }
 
             if (m_Service == null) return false;
-            if (!m_Service.IsExperienceContributor(experienceId, agentId))
+            ExperienceInfo info = m_Service.GetExperience(experienceId);
+            if (!IsAgentExperienceContributor(agentId, info))
             {
                 m_log.WarnFormat(
                     "[ExperienceModule]: agent {0} is not a contributor to experience {1} — cannot associate script {2}",

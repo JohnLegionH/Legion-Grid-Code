@@ -20,6 +20,9 @@ namespace OpenSim.Services.Interfaces
         bool UpdateExperience(ExperienceInfo info);
         bool DeleteExperience(UUID experienceId);
         List<ExperienceInfo> GetExperiencesByOwner(UUID ownerId);
+        /// <summary>Experiences owned by a group (experiences.group_id). Backs GroupExperiences
+        /// and the group union in GetCreatorExperiences / GetAdminExperiences.</summary>
+        List<ExperienceInfo> GetExperiencesByGroup(UUID groupId);
         /// <summary>True if the agent may contribute scripts to this experience. Owner-only at
         /// the data layer (an agent contributes to experiences they own); the group-
         /// ExperienceCreator union lands with GetCreatorExperiences' group union in Slice 4.</summary>
