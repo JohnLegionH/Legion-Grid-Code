@@ -43,6 +43,10 @@ namespace OpenSim.Region.CoreModules.Experience
 
         private bool m_Enabled = false;
         private string m_ConnectionString = string.Empty;
+        // Acquire policy (DEC-3): who may create/acquire an experience via the viewer's
+        // "Acquire an Experience" button. SL gates on Premium; Legion's deliberate deviation is
+        // grid-configurable. Values: EstateManagersAndRegionOwners (default) | Anyone | AdminsOnly.
+        private string m_AcquirePolicy = "EstateManagersAndRegionOwners";
         private Scene m_Scene;
         private IExperienceService m_Service;
 
@@ -89,6 +93,9 @@ namespace OpenSim.Region.CoreModules.Experience
                 m_Enabled = false;
                 return;
             }
+
+            // DEC-3 acquire policy (default estate-managers + region-owners).
+            m_AcquirePolicy = experienceConfig.GetString("ExperienceCreators", "EstateManagersAndRegionOwners");
 
             m_log.Info("[ExperienceModule]: Initialized, will activate on region add");
         }
@@ -309,6 +316,24 @@ namespace OpenSim.Region.CoreModules.Experience
                 caps.RegisterSimpleHandler("GroupExperiences",
                     new SimpleStreamHandler("/" + UUID.Random(),
                         (req, resp) => HandleGroupExperiences(req, resp)));
+
+                // IsExperienceContributor (Slice 6): parity cap. GET ?experience_id=<uuid> ->
+                // {status:bool} = owner ∪ GP_EXPERIENCE_CREATOR. The current Firestorm never calls
+                // it (contributor inferred from GetCreatorExperiences), served for surface
+                // completeness; shape mirrors IsExperienceAdmin (Tranquillity ref; UNV-9).
+                caps.RegisterSimpleHandler("IsExperienceContributor",
+                    new SimpleStreamHandler("/" + UUID.Random(),
+                        (req, resp) => HandleIsExperienceContributor(req, resp, agentID)));
+
+                // ExperienceQuery (Slice 6, D-EEP no-op): SL polices experience-driven agent-
+                // ENVIRONMENT injection on parcel change. Legion's per-agent EEP injection is
+                // stubbed (llSetAgentEnvironment/llReplaceAgentEnvironment do nothing), so there is
+                // nothing to police — this serves a valid all-permitted response that clears no
+                // injections. GET ?parcelid=&experiences=<csv> -> {experiences:{id:bool}}
+                // (llenvironment.cpp:2182,2705).
+                caps.RegisterSimpleHandler("ExperienceQuery",
+                    new SimpleStreamHandler("/" + UUID.Random(),
+                        (req, resp) => HandleExperienceQuery(req, resp)));
             }
             catch (Exception e)
             {
@@ -694,19 +719,64 @@ namespace OpenSim.Region.CoreModules.Experience
             WriteLLSD(resp, result);
         }
 
-        // AgentExperiences (Slice 2). GET -> the agent's OWNED experiences as experience_ids
-        // (viewer Owned tab). SL's Owned list is what the agent created/acquired; Legion serves
-        // GetExperiencesByOwner. POST is the "Acquire an Experience" path — DEFERRED (Slice 5/
-        // DEC-3): we never auto-create; a POST just returns the current owned list (the viewer's
-        // Acquire button stays disabled because we omit the "purchase" key), so nothing breaks.
+        // AgentExperiences (Slice 2 GET, Slice 6 POST/acquire). GET -> the agent's OWNED
+        // experiences (viewer Owned tab). POST -> "Acquire an Experience" (DEC-3 deviation: SL
+        // gates on Premium; Legion uses the grid-config policy, default estate-managers +
+        // region-owners). On an acquire the viewer snapshots its owned ids, POSTs, then diffs the
+        // returned experience_ids and opens the profile (edit mode) for the one NEW id
+        // (llfloaterexperiences.cpp:246-264). The "purchase" key's PRESENCE enables the Acquire
+        // button (:240 enableButton(content.has("purchase"))), so we emit it iff the agent may
+        // acquire.
         private void HandleAgentExperiences(IOSHttpRequest req, IOSHttpResponse resp, UUID agentID)
         {
+            bool canAcquire = CanAcquireExperience(agentID);
+
+            if (req.HttpMethod == "POST")
+            {
+                if (canAcquire)
+                {
+                    // Empty name -> CreateExperience skips its uniqueness guard and always makes a
+                    // fresh experience with a random UUID (two acquirers never collide). The user
+                    // names it via the profile edit the viewer opens on success. Grid-wide + enabled,
+                    // matching the console 'experience create' defaults; owner = the acquiring agent.
+                    var created = m_Service.CreateExperience(new ExperienceInfo
+                    {
+                        OwnerId = agentID,
+                        Name = string.Empty,
+                        Properties = ExperienceInfo.PROP_ENABLED | ExperienceInfo.PROP_GRIDWIDE
+                    });
+                    if (created != null)
+                        m_log.InfoFormat("[ExperienceModule]: agent {0} acquired experience {1} (policy={2})",
+                            agentID, created.ExperienceId, m_AcquirePolicy);
+                }
+                else
+                {
+                    m_log.WarnFormat("[ExperienceModule]: agent {0} not permitted to acquire an experience (policy={1}) — no create",
+                        agentID, m_AcquirePolicy);
+                }
+            }
+
             OSDArray ids = new OSDArray();
             foreach (ExperienceInfo info in m_Service.GetExperiencesByOwner(agentID))
                 ids.Add(OSD.FromUUID(info.ExperienceId));
             OSDMap result = new OSDMap();
             result["experience_ids"] = ids;
+            if (canAcquire) result["purchase"] = OSD.FromInteger(0); // presence-only; 0 = no cost
             WriteLLSD(resp, result);
+        }
+
+        // DEC-3 acquire policy check. Default EstateManagersAndRegionOwners uses the same gate as
+        // the estate-command machinery (estate owner/manager OR god). Grid-configurable via
+        // [Experience] ExperienceCreators.
+        private bool CanAcquireExperience(UUID agentId)
+        {
+            switch (m_AcquirePolicy)
+            {
+                case "Anyone": return true;
+                case "AdminsOnly": return m_Scene.Permissions.IsAdministrator(agentId);
+                case "EstateManagersAndRegionOwners":
+                default: return m_Scene.Permissions.CanIssueEstateCommand(agentId, false);
+            }
         }
 
         // GetExperiences (Slice 2). GET -> the agent's per-agent Allowed(granted)/Blocked lists
@@ -827,6 +897,39 @@ namespace OpenSim.Region.CoreModules.Experience
                 AgentHasGroupPower(agentId, info.GroupId, GroupPowers.ExperienceCreator))
                 return true;                          // group Experience Contributor (bit 50)
             return false;
+        }
+
+        // IsExperienceContributor cap (Slice 6): GET ?experience_id=<uuid> -> {status:bool}.
+        // Reuses the same owner∪GP_CREATOR predicate the association gate uses. Parity-only —
+        // current Firestorm never calls this cap.
+        private void HandleIsExperienceContributor(IOSHttpRequest req, IOSHttpResponse resp, UUID agentID)
+        {
+            UUID expId = UUID.Zero;
+            var qs = req.QueryString;
+            if (qs != null) UUID.TryParse(qs["experience_id"], out expId);
+            ExperienceInfo info = expId != UUID.Zero ? m_Service.GetExperience(expId) : null;
+            OSDMap result = new OSDMap();
+            result["status"] = OSD.FromBoolean(IsAgentExperienceContributor(agentID, info));
+            WriteLLSD(resp, result);
+        }
+
+        // ExperienceQuery cap (Slice 6, D-EEP resolved as documented NO-OP). SL uses this to clear
+        // experience-driven agent-ENVIRONMENT injections that are no longer permitted on the
+        // agent's new parcel (llenvironment.cpp testExperiencesOnParcelCoro; false -> clearInjections).
+        // Legion's per-agent EEP injection is stubbed (llSetAgentEnvironment/llReplaceAgentEnvironment
+        // do nothing), so no injection ever exists to police. We answer every queried experience as
+        // permitted (true) -> the viewer clears nothing. Revisit if per-agent EEP injection ships.
+        private void HandleExperienceQuery(IOSHttpRequest req, IOSHttpResponse resp)
+        {
+            OSDMap experiences = new OSDMap();
+            string csv = req.QueryString != null ? req.QueryString["experiences"] : null;
+            if (!string.IsNullOrEmpty(csv))
+                foreach (string part in csv.Split(','))
+                    if (UUID.TryParse(part.Trim(), out UUID id))
+                        experiences[id.ToString()] = OSD.FromBoolean(true);
+            OSDMap result = new OSDMap();
+            result["experiences"] = experiences;
+            WriteLLSD(resp, result);
         }
 
         // True if the agent holds the given power in the group. Uses GetMembershipData(group,
