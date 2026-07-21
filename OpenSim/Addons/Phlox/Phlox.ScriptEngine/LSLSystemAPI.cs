@@ -11438,7 +11438,12 @@ public int llSetLinkGLTFOverrides(int link, int face, LSLList overrides)
                     UUID expId = GetScriptExperienceId();
                     if (expId == UUID.Zero) expId = m_host.OwnerID;
                     string val = expService?.ReadKeyValue(expId, key);
-                    payload = !string.IsNullOrEmpty(val) ? "1," + val : "0," + ExperienceInfo.XP_ERROR_KEY_NOT_FOUND;
+                    // UNV-1 (SL behavior undocumented, D-SLTEST): distinguish a key that EXISTS with
+                    // an empty-string value from an ABSENT key. ReadKeyValue returns null only when
+                    // the row is absent and "" when it exists empty (same basis llDeleteKeyValue
+                    // relies on). Chosen behavior: existing-empty -> "1," (success, empty value), the
+                    // data-preserving choice (an existing key is not "not found"); absent -> 0,14.
+                    payload = val != null ? "1," + val : "0," + ExperienceInfo.XP_ERROR_KEY_NOT_FOUND;
                 }
                 catch (Exception ex)
                 {
@@ -11462,12 +11467,13 @@ public int llSetLinkGLTFOverrides(int link, int face, LSLList overrides)
                     UUID expId = GetScriptExperienceId();
                     if (expId == UUID.Zero) expId = m_host.OwnerID;
                     // SL CAS: checkedFlag != 0 → only update if current value == original_value.
-                    // Mapped onto ExperienceService.UpdateKeyValue's `check` arg.
-                    // LIMITATION (flagged): the service treats an EMPTY check as "unconditional",
-                    // so a CAS against an empty original_value (checked=TRUE, original="") cannot be
-                    // distinguished from unconditional and behaves as unconditional. Not hit by the
-                    // current test scripts; would need a service-layer flag to fix exactly.
-                    string checkArg = (checkedFlag != 0) ? (originalValue ?? string.Empty) : string.Empty;
+                    // UNV-2/3 (SL behavior undocumented, D-SLTEST): `checkedFlag` is now passed to the
+                    // service as an explicit `conditional` flag SEPARATE from the check string, so a
+                    // CAS against an EMPTY original ("", checked=TRUE) is a REAL comparand (update only
+                    // if the stored value is currently empty) — not degraded to unconditional. Chosen
+                    // behavior: empty original is a valid comparand, never a wildcard.
+                    bool conditional = (checkedFlag != 0);
+                    string checkArg = originalValue ?? string.Empty;
                     if (string.IsNullOrEmpty(key) || key.Length > ExperienceInfo.MAX_KEY_LENGTH || expService == null)
                         payload = "0," + ExperienceInfo.XP_ERROR_STORAGE_EXCEPTION;
                     else if (ExceedsQuota(expService, expId, key, value))
@@ -11476,10 +11482,9 @@ public int llSetLinkGLTFOverrides(int link, int face, LSLList overrides)
                         // returns 11 rather than 15 — a benign imprecision at the quota boundary.)
                         payload = "0," + ExperienceInfo.XP_ERROR_QUOTA_EXCEEDED;
                     else
-                        // LIMITATION: the service returns bare false for CAS-fail, key-not-found,
-                        // and error alike — cannot distinguish; emits RETRY_UPDATE (15) for all.
-                        // SL-valid (15 is the documented CAS-fail code) but imprecise.
-                        payload = expService.UpdateKeyValue(expId, key, value, checkArg)
+                        // Service returns bare false for CAS-fail, key-not-found, and error alike —
+                        // cannot distinguish; emits RETRY_UPDATE (15) for all (SL-valid CAS-fail code).
+                        payload = expService.UpdateKeyValue(expId, key, value, checkArg, conditional)
                             ? "1," + (value ?? string.Empty)
                             : "0," + ExperienceInfo.XP_ERROR_RETRY_UPDATE;
                 }
@@ -11559,6 +11564,9 @@ public int llSetLinkGLTFOverrides(int link, int face, LSLList overrides)
                 string payload;
                 try
                 {
+                    // UNV-4 (SL's exact clamp values undocumented, D-SLTEST): chosen defaults —
+                    // count<=0 -> 100 (sane default page), count capped at 1000 (matches the service
+                    // KeysKeyValue clamp), start floored at 0. Conservative and internally consistent.
                     if (count <= 0) count = 100;
                     if (count > 1000) count = 1000;
                     if (start < 0) start = 0;
@@ -12716,6 +12724,11 @@ public int llSetLinkGLTFOverrides(int link, int face, LSLList overrides)
                 return;
             }
 
+            // UNV-7 (SL's fine-grain tie-break order undocumented, D-SLTEST): the permission ladder
+            // is applied MOST-RESTRICTIVE-WINS and in a fixed order — block (parcel/region) BEFORE
+            // admission BEFORE agent-block BEFORE grant. This is the safe/conservative choice: a deny
+            // at any tier wins, so no combination can over-grant. Matches SL's documented block-wins
+            // land model; the exact ordering among ties is Legion's decision.
             // Block-wins: a parcel OR REGION block on this experience overrides every allow.
             // Deny instead of auto-granting when blocked (see IsExperienceBlockedInRegion for
             // why region block is absolute).
@@ -12739,7 +12752,10 @@ public int llSetLinkGLTFOverrides(int link, int face, LSLList overrides)
                 return;
             }
 
-            // Check if agent is present
+            // UNV-6 (SL's exact root-presence requirement undocumented, D-SLTEST): the target agent
+            // must have a ROOT presence in this region to be granted. Chosen conservative behavior —
+            // deny (code 4) if the agent is absent or only a child agent; this can never over-grant
+            // (a grant to a not-truly-present agent) and matches the agent-affecting model.
             ScenePresence sp = World.GetScenePresence(agentId);
             if (sp == null || sp.IsChildAgent)
             {

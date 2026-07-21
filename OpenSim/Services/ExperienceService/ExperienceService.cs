@@ -794,6 +794,14 @@ namespace OpenSim.Services.ExperienceService
 
         public bool UpdateKeyValue(UUID experienceId, string key, string value, string check)
         {
+            // Legacy 4-arg: CAS iff `check` is non-empty (an empty check meant "unconditional").
+            // Preserved for existing callers; the 5-arg form below makes the CAS/unconditional
+            // decision explicit so an empty original can be a real comparand (UNV-2/3).
+            return UpdateKeyValue(experienceId, key, value, check, conditional: !string.IsNullOrEmpty(check));
+        }
+
+        public bool UpdateKeyValue(UUID experienceId, string key, string value, string check, bool conditional)
+        {
             if (string.IsNullOrEmpty(key) || key.Length > ExperienceInfo.MAX_KEY_LENGTH)
                 return false;
             if (value != null && value.Length > ExperienceInfo.MAX_VALUE_LENGTH)
@@ -804,15 +812,17 @@ namespace OpenSim.Services.ExperienceService
                 using (var conn = GetConnection())
                 {
                     string sql;
-                    if (!string.IsNullOrEmpty(check))
+                    if (conditional)
                     {
-                        // Conditional update — only if current value matches check
+                        // Compare-and-swap: update ONLY if the current value equals `check` — which
+                        // may legitimately be the empty string (CAS against an empty original). A
+                        // non-existent key matches nothing -> 0 rows -> CAS fail (RETRY_UPDATE).
                         sql = @"UPDATE experience_keyvalue SET kv_value=@val
                                 WHERE experience_id=@eid AND kv_key=@key AND kv_value=@check";
                     }
                     else
                     {
-                        // Unconditional update (or insert)
+                        // Unconditional update (or insert).
                         sql = @"INSERT INTO experience_keyvalue (experience_id, kv_key, kv_value)
                                 VALUES (@eid, @key, @val)
                                 ON DUPLICATE KEY UPDATE kv_value=@val";
@@ -823,8 +833,8 @@ namespace OpenSim.Services.ExperienceService
                         cmd.Parameters.AddWithValue("@eid", experienceId.ToString());
                         cmd.Parameters.AddWithValue("@key", key);
                         cmd.Parameters.AddWithValue("@val", value ?? string.Empty);
-                        if (!string.IsNullOrEmpty(check))
-                            cmd.Parameters.AddWithValue("@check", check);
+                        if (conditional)
+                            cmd.Parameters.AddWithValue("@check", check ?? string.Empty);
                         return cmd.ExecuteNonQuery() > 0;
                     }
                 }

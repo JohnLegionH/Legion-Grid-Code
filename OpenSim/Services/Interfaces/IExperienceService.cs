@@ -61,6 +61,9 @@ namespace OpenSim.Services.Interfaces
         bool CreateKeyValue(UUID experienceId, string key, string value);
         /// <summary>Update existing key. If check is non-empty, only update if current value matches check.</summary>
         bool UpdateKeyValue(UUID experienceId, string key, string value, string check);
+        /// <summary>Update with an EXPLICIT conditional flag: when conditional, CAS against `check`
+        /// even if `check` is the empty string (a real comparand, not "unconditional"). UNV-2/3.</summary>
+        bool UpdateKeyValue(UUID experienceId, string key, string value, string check, bool conditional);
         /// <summary>Delete a key. Returns false if not found.</summary>
         bool DeleteKeyValue(UUID experienceId, string key);
         int KeyCountKeyValue(UUID experienceId);
