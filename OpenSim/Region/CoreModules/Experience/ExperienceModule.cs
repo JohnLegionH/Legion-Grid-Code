@@ -37,7 +37,7 @@ using Caps = OpenSim.Framework.Capabilities.Caps;
 namespace OpenSim.Region.CoreModules.Experience
 {
     [Extension(Path = "/OpenSim/RegionModules", NodeName = "RegionModule", Id = "LegionExperienceModule")]
-    public class ExperienceModule : INonSharedRegionModule
+    public class ExperienceModule : INonSharedRegionModule, IExperienceModule
     {
         private static readonly ILog m_log = LogManager.GetLogger(MethodBase.GetCurrentMethod().DeclaringType);
 
@@ -107,6 +107,10 @@ namespace OpenSim.Region.CoreModules.Experience
 
             // Register the module itself for script-experience association lookups
             scene.RegisterModuleInterface<ExperienceModule>(this);
+
+            // Also expose the IExperienceModule interface so the caps layer (LindenCaps) can
+            // persist the UpdateScriptTask "experience" field without referencing CoreModules.
+            scene.RegisterModuleInterface<IExperienceModule>(this);
 
             // Register console commands
             RegisterConsoleCommands();
@@ -820,6 +824,38 @@ namespace OpenSim.Region.CoreModules.Experience
             }
 
             m_log.DebugFormat("[ExperienceModule]: Script {0} → experience {1}", scriptItemId, experienceId);
+        }
+
+        // IExperienceModule — the caps layer calls this to honor the UpdateScriptTask
+        // "experience" field. Zero clears the association; a real id associates only if the
+        // agent OWNS the experience. Owner-only mirrors the owner-only GetCreatorExperiences
+        // list the viewer populated the "Use Experience" dropdown from (so an agent can only
+        // pick — and thus only associate — experiences they were offered); the group-
+        // ExperienceCreator union is deferred to Slice 4 alongside CAP-GCE's group union.
+        public bool TryAssociateScriptExperience(UUID scriptItemId, UUID experienceId, UUID agentId)
+        {
+            if (scriptItemId == UUID.Zero) return false;
+
+            if (experienceId == UUID.Zero)
+            {
+                // "Use Experience" unchecked -> clear (cache + persistent) via the single
+                // write path, keeping the in-memory cache coherent.
+                SetScriptExperience(scriptItemId, UUID.Zero);
+                return true;
+            }
+
+            if (m_Service == null) return false;
+            ExperienceInfo info = m_Service.GetExperience(experienceId);
+            if (info == null || info.OwnerId != agentId)
+            {
+                m_log.WarnFormat(
+                    "[ExperienceModule]: agent {0} may not associate script {1} with experience {2} (not owner) — association unchanged",
+                    agentId, scriptItemId, experienceId);
+                return false;
+            }
+
+            SetScriptExperience(scriptItemId, experienceId);
+            return true;
         }
 
         /// <summary>Get the underlying service for direct access from script engine</summary>

@@ -12,6 +12,7 @@ using OpenMetaverse.StructuredData;
 using OpenSim.Framework;
 using OpenSim.Framework.Capabilities;
 using OpenSim.Region.Framework.Scenes;
+using OpenSim.Region.Framework.Interfaces;
 using OpenSim.Framework.Servers.HttpServer;
 using OSDMap = OpenMetaverse.StructuredData.OSDMap;
 
@@ -100,6 +101,14 @@ namespace OpenSim.Region.ClientStack.Linden
                     return;
                 }
             }
+
+            // Agent-inventory script save: honor an "experience" field if one is present. The
+            // current Firestorm only sends it on the task path (generatePostBody's task branch),
+            // so this is defensive — guarded on the script asset type AND on the field's presence
+            // (ApplyScriptExperience no-ops when absent), so notecard/other agent saves are
+            // untouched and an association is never wiped just because the field wasn't sent.
+            if (atype == (byte)AssetType.LSLText)
+                ApplyScriptExperience(map, itemID);
 
             string uploaderPath = GetNewCapPath();
 
@@ -208,6 +217,10 @@ namespace OpenSim.Region.ClientStack.Linden
                     return;
                 }
 
+                // Honor the viewer's "experience" field (Firestorm llviewerassetupload.cpp:873):
+                // associate this script item with the picked experience, or clear it when zero.
+                ApplyScriptExperience(map, itemID);
+
                 string uploaderPath = GetNewCapPath();
                 string protocol = m_HostCapsObj.SSLCaps ? "https://" : "http://";
                 string uploaderURL = protocol + m_HostCapsObj.HostName + ":" + m_HostCapsObj.Port.ToString() + uploaderPath;
@@ -236,6 +249,32 @@ namespace OpenSim.Region.ClientStack.Linden
                 m_log.Error("[UpdateScriptTaskInventory]: " + e.ToString());
             }
         }
+
+        // Persist (or clear) the script↔experience association the viewer sends in the script-
+        // update body. Field name "experience" (Firestorm llviewerassetupload.cpp:873), a UUID;
+        // present-and-zero when "Use Experience" is unchecked (→ clear), non-zero to associate.
+        // The write goes through IExperienceModule (not the raw service) so the module's
+        // in-memory association cache is updated too — otherwise a cached Zero from the script's
+        // load-time GetMetadata would mask the new association and llRequestExperiencePermissions
+        // would keep returning code 5. Absent field → no-op (association left as-is). The module
+        // owner-checks before writing; a denied association is logged, and the script save itself
+        // still succeeds (the edit was authorized; only the experience association wasn't).
+        private void ApplyScriptExperience(OSDMap map, UUID itemID)
+        {
+            if (map == null || itemID.IsZero() || !map.TryGetValue("experience", out OSD expOsd))
+                return;
+
+            IExperienceModule expMod = m_Scene.RequestModuleInterface<IExperienceModule>();
+            if (expMod == null)
+                return;
+
+            UUID experienceId = expOsd.AsUUID();
+            if (!expMod.TryAssociateScriptExperience(itemID, experienceId, m_AgentID))
+                m_log.WarnFormat(
+                    "[CAPS]: script {0} not associated with experience {1} for agent {2} (not permitted)",
+                    itemID, experienceId, m_AgentID);
+        }
+
         /// <summary>
         /// Called when new asset data for an agent inventory item update has been uploaded.
         /// </summary>

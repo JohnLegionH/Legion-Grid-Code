@@ -129,6 +129,9 @@
     <Compile Include="Interfaces\IAvatarFactoryModule.cs">
       <SubType>Code</SubType>
     </Compile>
+    <Compile Include="Interfaces\IExperienceModule.cs">
+      <SubType>Code</SubType>
+    </Compile>
     <Compile Include="Interfaces\IBakedTextureModule.cs">
       <SubType>Code</SubType>
     </Compile>
