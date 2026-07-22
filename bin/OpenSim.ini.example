@@ -1092,20 +1092,19 @@
     ConnectionString = "Data Source=localhost;Database=opensim;User ID=root;Password=CHANGEME;Old Guids=true;SslMode=None;"
 
     ;; ── Connector topology (grid-service rebuild) ──
-    ;; By DEFAULT the region uses the in-process LOCAL connector: it reaches MySQL directly with
-    ;; the ConnectionString above. Correct for single-host grids; needs no extra config.
+    ;; Experience service connector selection. DEFAULT (ExperienceServices unset) = the in-process
+    ;; LOCAL connector: the region reaches MySQL directly with the ConnectionString above. Correct
+    ;; for single-host grids; needs no extra config.
     ;;
-    ;; To route Experience through the CENTRAL Robust ExperienceService over HTTP instead
-    ;; (multi-host / hypergrid — the grid-service path), select the REMOTE connector and give it
-    ;; the service URL. The region then does NOT use the ConnectionString above (the Robust
-    ;; [ExperienceService] owns the DB); keep Enabled = true. The Robust side must serve the
-    ;; ExperienceServiceServerConnector (see Robust.ini). Uncomment:
-    ;;
-    ;;   [Modules]
-    ;;       ExperienceServices = "RemoteExperienceServicesConnector"
-    ;;
-    ;;   [ExperienceService]
-    ;;       ExperienceServerURI = "${Const|BaseURL}:${Const|PrivatePort}"   ; e.g. http://grid.example.com:8003
+    ;; For MULTI-HOST / hypergrid grids, route Experience through the CENTRAL Robust Experience
+    ;; service over HTTP instead. In remote mode the region does NOT use the ConnectionString above
+    ;; (the Robust [ExperienceService] owns the DB); keep Enabled = true, and the Robust side must
+    ;; serve the ExperienceServiceServerConnector (see Robust.ini). To enable, uncomment the
+    ;; selector in the [Modules] section:
+    ;   ExperienceServices = "RemoteExperienceServicesConnector"
+    ;; and set the Experience service URL (the Robust private port) in its own section:
+    ; [ExperienceService]
+    ;     ExperienceServerURI = "${Const|BaseURL}:${Const|PrivatePort}"   ; e.g. http://<robust-host>:8003
 
 [YEngine]
     ;; implements non preemptive microthreading, so fixing problems like llSleep or long events handlers
