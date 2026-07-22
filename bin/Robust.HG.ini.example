@@ -509,7 +509,7 @@
     ;; registered in [ServiceList]; enables regions to reach one shared Experience service over
     ;; HTTP (grid-service / multi-host topology) instead of each region talking to MySQL directly.
     ; for the server connector
-    LocalServiceModule = "OpenSim.Services.ExperienceService.dll:OpenSim.Services.ExperienceService.ExperienceService"
+    LocalServiceModule = "OpenSim.Services.ExperienceService.dll:ExperienceService"
     ;; MUST point at the SAME grid database as [DatabaseService] above (and the regions'
     ;; [Experience] ConnectionString in OpenSim.ini) -- the 8 Experience tables live there.
     ;; The schema self-creates on first run (CREATE TABLE IF NOT EXISTS). Replace the password
