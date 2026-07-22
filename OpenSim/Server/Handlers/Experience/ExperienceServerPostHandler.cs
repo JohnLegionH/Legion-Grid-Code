@@ -384,7 +384,13 @@ namespace OpenSim.Server.Handlers.Experience
             return Resp(r);
         }
 
+        // Error signal — a DISTINCT top-level element (<error>), never the RESULT key. This keeps
+        // the KV-read contract three-state and unambiguous: a stored value lives in <RESULT> (any
+        // string, including "Failure" or ""), a missing key is <NULL>, and a handler error is
+        // <error>. Overloading RESULT for errors made a stored value of "Failure" indistinguishable
+        // from an error over the wire (local vs remote divergence); this removes that collision.
+        // The client detects the error structurally (RESULT absent) and never sniffs value content.
         private static byte[] FailureResult()
-            => Resp(new Dictionary<string, object> { ["RESULT"] = "Failure" });
+            => Resp(new Dictionary<string, object> { ["error"] = "Failure" });
     }
 }

@@ -296,15 +296,20 @@ namespace OpenSim.Services.Connectors
             return 0;
         }
 
-        // ReadKeyValue: NULL => key missing (null); otherwise the stored value string.
+        // ReadKeyValue — three states resolved STRUCTURALLY, never by sniffing value content:
+        //   <RESULT>..</RESULT> => the stored value, returned VERBATIM (any string, incl. "Failure"
+        //                          or "" — an empty element parses back as the present empty string);
+        //   <NULL>True</NULL>   => key absent -> null;
+        //   <error>..</error> / empty reply => handler/transport error (RESULT absent) -> null.
+        // So a stored value of "Failure" round-trips as "Failure" and is never confused with an error.
         private static string ParseString(string reply)
         {
             Dictionary<string, object> d = Parse(reply);
             if (d == null || d.ContainsKey("NULL"))
                 return null;
             if (d.TryGetValue("RESULT", out object v) && v != null)
-                return v.ToString();
-            return null;
+                return v.ToString();      // verbatim payload — no sentinel interpretation
+            return null;                  // no RESULT (error element) => not a value
         }
 
         private static UUID ParseUUID(string reply)
