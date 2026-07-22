@@ -117,6 +117,12 @@
     UserAccountServiceConnector = "${Const|PrivatePort}/OpenSim.Server.Handlers.dll:UserAccountServiceConnector"
     GridUserServiceConnector = "${Const|PrivatePort}/OpenSim.Server.Handlers.dll:GridUserServiceConnector"
     AgentPreferencesServiceConnector = "${Const|PrivatePort}/OpenSim.Server.Handlers.dll:AgentPreferencesServiceConnector"
+    ;; Legion Experience grid-service host: serves POST /experience on PrivatePort so regions
+    ;; running the REMOTE experience connector reach a central ExperienceService. Single-host
+    ;; grids using the default in-process (Local) connector don't require this; enabling it is
+    ;; harmless (schema self-creates) and makes the grid multi-host / hypergrid ready. See
+    ;; the [ExperienceService] section below.
+    ExperienceServiceServerConnector = "${Const|PrivatePort}/OpenSim.Server.Handlers.dll:ExperienceServiceServerConnector"
     FriendsServiceConnector = "${Const|PrivatePort}/OpenSim.Server.Handlers.dll:FriendsServiceConnector"
     MapAddServiceConnector = "${Const|PrivatePort}/OpenSim.Server.Handlers.dll:MapAddServiceConnector"
     MapGetServiceConnector = "${Const|PublicPort}/OpenSim.Server.Handlers.dll:MapGetServiceConnector"
@@ -436,6 +442,20 @@
 [AgentPreferencesService]
     ; for the server connector
     LocalServiceModule = "OpenSim.Services.UserAccountService.dll:AgentPreferencesService"
+
+
+[ExperienceService]
+    ;; Legion Experience system — central grid-service host (experiences, KV store,
+    ;; permissions, region allow/block/trust lists). Backs the ExperienceServiceServerConnector
+    ;; registered in [ServiceList]; enables regions to reach one shared Experience service over
+    ;; HTTP (grid-service / multi-host topology) instead of each region talking to MySQL directly.
+    ; for the server connector
+    LocalServiceModule = "OpenSim.Services.ExperienceService.dll:OpenSim.Services.ExperienceService.ExperienceService"
+    ;; MUST point at the SAME grid database as [DatabaseService] above (and the regions'
+    ;; [Experience] ConnectionString in OpenSim.ini) -- the 8 Experience tables live there.
+    ;; The schema self-creates on first run (CREATE TABLE IF NOT EXISTS). Replace the password
+    ;; placeholder; this file is committed, so never put a real password here.
+    ConnectionString = "Data Source=localhost;Database=opensim;User ID=opensim;Password=*****;Old Guids=true;SslMode=None;"
 
 
 [PresenceService]
