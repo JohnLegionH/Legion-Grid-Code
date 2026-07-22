@@ -30,7 +30,6 @@ using OpenSim.Framework.Servers.HttpServer;
 using OpenSim.Region.Framework.Interfaces;
 using OpenSim.Region.Framework.Scenes;
 using OpenSim.Services.Interfaces;
-using OpenSim.Services.ExperienceService;
 using Caps = OpenSim.Framework.Capabilities.Caps;
 
 
@@ -106,11 +105,11 @@ namespace OpenSim.Region.CoreModules.Experience
 
             m_Scene = scene;
 
-            // Create the service instance
-            m_Service = new ExperienceService(m_ConnectionString);
-
-            // Register as a scene module so scripts can find it
-            scene.RegisterModuleInterface<IExperienceService>(m_Service);
+            // G1 seam: the IExperienceService instance is now owned by the Experience service
+            // connector (LocalExperienceServicesConnector in-process today; the Remote connector
+            // in a grid at G3), not new'd here. We acquire it in RegionLoaded — after all shared
+            // modules' AddRegion has registered it. Behavior is identical: the Local connector
+            // wraps the same ExperienceService(ConnectionString) that was constructed here before.
 
             // Register the module itself for script-experience association lookups
             scene.RegisterModuleInterface<ExperienceModule>(this);
@@ -203,7 +202,15 @@ namespace OpenSim.Region.CoreModules.Experience
         public void RegionLoaded(Scene scene)
         {
             if (!m_Enabled) return;
-            // Could preload allowed/blocked experience lists here if needed
+
+            // G1 seam: acquire the Experience service through the connector. By RegionLoaded the
+            // shared Experience connector has registered IExperienceService on the scene. In Local
+            // mode this is the in-process pass-through connector wrapping the same ExperienceService
+            // as before — identical behavior. If null, no connector is enabled (misconfig); log it —
+            // the caps handlers and estate-delta path all null-check m_Service and stay inert.
+            m_Service = scene.RequestModuleInterface<IExperienceService>();
+            if (m_Service == null)
+                m_log.Error("[ExperienceModule]: IExperienceService not available — is an Experience service connector enabled? Experience features will be inert.");
         }
 
         public void RemoveRegion(Scene scene)
@@ -211,7 +218,7 @@ namespace OpenSim.Region.CoreModules.Experience
             if (!m_Enabled) return;
             scene.EventManager.OnNewClient -= OnNewClient;
             scene.EventManager.OnRegisterCaps -= OnRegisterCaps;
-            scene.UnregisterModuleInterface<IExperienceService>(m_Service);
+            // IExperienceService is owned and unregistered by the Experience service connector now.
             scene.UnregisterModuleInterface<ExperienceModule>(this);
         }
 
