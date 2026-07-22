@@ -1091,6 +1091,22 @@
     ;; password placeholder. This file is committed, so never put a real password here.
     ConnectionString = "Data Source=localhost;Database=opensim;User ID=root;Password=CHANGEME;Old Guids=true;SslMode=None;"
 
+    ;; ── Connector topology (grid-service rebuild) ──
+    ;; By DEFAULT the region uses the in-process LOCAL connector: it reaches MySQL directly with
+    ;; the ConnectionString above. Correct for single-host grids; needs no extra config.
+    ;;
+    ;; To route Experience through the CENTRAL Robust ExperienceService over HTTP instead
+    ;; (multi-host / hypergrid — the grid-service path), select the REMOTE connector and give it
+    ;; the service URL. The region then does NOT use the ConnectionString above (the Robust
+    ;; [ExperienceService] owns the DB); keep Enabled = true. The Robust side must serve the
+    ;; ExperienceServiceServerConnector (see Robust.ini). Uncomment:
+    ;;
+    ;;   [Modules]
+    ;;       ExperienceServices = "RemoteExperienceServicesConnector"
+    ;;
+    ;;   [ExperienceService]
+    ;;       ExperienceServerURI = "${Const|BaseURL}:${Const|PrivatePort}"   ; e.g. http://grid.example.com:8003
+
 [YEngine]
     ;; implements non preemptive microthreading, so fixing problems like llSleep or long events handlers
     ;; but those will suffer from timeslicing, so will be slower.
