@@ -7,6 +7,7 @@
  */
 
 using System;
+using System.Collections.Generic;
 using OpenMetaverse;
 
 namespace OpenSim.Services.Interfaces
@@ -66,6 +67,55 @@ namespace OpenSim.Services.Interfaces
         public const int MAX_KEY_LENGTH = 1011;
         public const int MAX_VALUE_LENGTH = 4095;
         public const long MAX_DATA_QUOTA = 128L * 1024 * 1024; // 128 MiB
+
+        // ══════════════════════════════════════════════════════════════════
+        // Robust inter-service wire serialization (G2). LOSSLESS raw-field round-trip
+        // for the ServerUtils Dictionary/XML envelope — deliberately NOT the viewer-shaped
+        // caps OSD (which remaps maturity 0/1/2→13/21/42 and drops fields). Service↔service
+        // carries raw ExperienceInfo; the region caps layer does the viewer transform.
+        // Shared by the ServerPostHandler (G2) and the ServicesConnector client (G3).
+        // ══════════════════════════════════════════════════════════════════
+
+        public Dictionary<string, object> ToDictionary()
+        {
+            return new Dictionary<string, object>
+            {
+                ["ExperienceId"] = ExperienceId.ToString(),
+                ["OwnerId"]      = OwnerId.ToString(),
+                ["GroupId"]      = GroupId.ToString(),
+                ["Name"]         = Name ?? string.Empty,
+                ["Description"]  = Description ?? string.Empty,
+                ["Maturity"]     = Maturity.ToString(),
+                ["Properties"]   = Properties.ToString(),
+                ["Logo"]         = Logo.ToString(),
+                ["Marketplace"]  = Marketplace ?? string.Empty,
+                ["Slurl"]        = Slurl ?? string.Empty,
+                ["Created"]      = Created.Ticks.ToString(),
+                ["Updated"]      = Updated.Ticks.ToString(),
+            };
+        }
+
+        public static ExperienceInfo FromDictionary(Dictionary<string, object> d)
+        {
+            var info = new ExperienceInfo();
+            if (d == null)
+                return info;
+
+            object v;
+            if (d.TryGetValue("ExperienceId", out v)) UUID.TryParse(v.ToString(), out info.ExperienceId);
+            if (d.TryGetValue("OwnerId", out v))      UUID.TryParse(v.ToString(), out info.OwnerId);
+            if (d.TryGetValue("GroupId", out v))      UUID.TryParse(v.ToString(), out info.GroupId);
+            if (d.TryGetValue("Name", out v))         info.Name = v.ToString();
+            if (d.TryGetValue("Description", out v))  info.Description = v.ToString();
+            if (d.TryGetValue("Maturity", out v))     int.TryParse(v.ToString(), out info.Maturity);
+            if (d.TryGetValue("Properties", out v))   int.TryParse(v.ToString(), out info.Properties);
+            if (d.TryGetValue("Logo", out v))         UUID.TryParse(v.ToString(), out info.Logo);
+            if (d.TryGetValue("Marketplace", out v))  info.Marketplace = v.ToString();
+            if (d.TryGetValue("Slurl", out v))        info.Slurl = v.ToString();
+            if (d.TryGetValue("Created", out v) && long.TryParse(v.ToString(), out long ct)) info.Created = new DateTime(ct, DateTimeKind.Utc);
+            if (d.TryGetValue("Updated", out v) && long.TryParse(v.ToString(), out long ut)) info.Updated = new DateTime(ut, DateTimeKind.Utc);
+            return info;
+        }
 
         public static string GetErrorMessage(int error)
         {

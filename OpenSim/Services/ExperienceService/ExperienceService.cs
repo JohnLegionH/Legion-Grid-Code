@@ -15,6 +15,7 @@ using System;
 using System.Collections.Generic;
 using System.Reflection;
 using log4net;
+using Nini.Config;
 using MySql.Data.MySqlClient;
 using OpenMetaverse;
 using OpenSim.Services.Interfaces;
@@ -37,6 +38,27 @@ namespace OpenSim.Services.ExperienceService
             m_connectionString = connectionString;
             EnsureSchema();
             m_log.Info("[ExperienceService]: Initialized with MySQL backend");
+        }
+
+        /// <summary>
+        /// Robust plugin constructor (G2). Loaded by the ExperienceServiceServerConnector via
+        /// ServerUtils.LoadPlugin({config}); reads the connection string from the canonical
+        /// [ExperienceService] section. Behavior is identical to the string ctor — same schema
+        /// bootstrap, same backend. This ADDS the grid-service host path; it does not change the
+        /// region-local (Local connector) path, which still uses the string ctor.
+        /// </summary>
+        public ExperienceService(IConfigSource config)
+        {
+            IConfig expConfig = config.Configs["ExperienceService"];
+            if (expConfig == null)
+                throw new Exception("[ExperienceService]: Missing [ExperienceService] section in config");
+
+            m_connectionString = expConfig.GetString("ConnectionString", string.Empty);
+            if (string.IsNullOrEmpty(m_connectionString))
+                throw new Exception("[ExperienceService]: No ConnectionString configured in [ExperienceService]");
+
+            EnsureSchema();
+            m_log.Info("[ExperienceService]: Initialized with MySQL backend (Robust grid-service host)");
         }
 
         private MySqlConnection GetConnection()
