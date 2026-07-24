@@ -1,0 +1,40 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    Legion.Physics - the engine-agnostic physics backend seam (ILegionPhysicsBackend).
+
+    MILESTONE 1: self-contained. This library links NEITHER OpenSim NOR BulletSim and is
+    NOT a selectable [Startup] physics module yet. It builds to its OWN local bin\, kept
+    deliberately out of the shared ..\..\..\..\bin\ so it cannot touch the running grid's
+    physics selection. Output target changes only when it becomes `physics = Jolt` (M6).
+
+    Csproj is hand-maintained (Legion convention): EnableDefaultItems is OFF, every .cs
+    needs an explicit <Compile Include>. Do NOT run runprebuild against this tree.
+  -->
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <OutputType>Library</OutputType>
+    <AssemblyName>Legion.Physics</AssemblyName>
+    <RootNamespace>Legion.Physics</RootNamespace>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <EnableDefaultItems>false</EnableDefaultItems>
+    <Deterministic>true</Deterministic>
+    <GenerateDocumentationFile>false</GenerateDocumentationFile>
+    <!-- Local bin only. Default SDK output (bin\<Config>\net8.0\) is already project-local;
+         we intentionally do NOT redirect to the shared OpenSim bin this milestone. -->
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Include="ILegionPhysicsBackend.cs" />
+  </ItemGroup>
+
+  <!-- M1 Task 2: Jolt binding. 2.18.6 is the newest release still shipping lib/net8.0/
+       (net8 dropped at 2.19.0). Native binaries ship inside this package under
+       runtimes/<rid>/native/; single precision (joltc.dll) is the default load,
+       double (joltc_double.dll) is opt-in - decision #2 is closed on single. -->
+  <ItemGroup>
+    <PackageReference Include="JoltPhysicsSharp" Version="2.18.6" />
+  </ItemGroup>
+
+</Project>

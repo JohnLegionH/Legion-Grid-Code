@@ -1,0 +1,37 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    Legion.Physics.TestHarness - console harness for the physics backend.
+
+    M1 Task 2: currently holds the Jolt binding SMOKE TEST (native load + PhysicsSystem
+    init/step/dispose). At Task 5 this Program.cs is replaced by the real milestone-1
+    harness (heightfield + static box + raycast).
+
+    Project-references Legion.Physics, which carries the JoltPhysicsSharp PackageReference,
+    so the binding + native runtime assets flow here transitively. Local bin only; this
+    harness links neither OpenSim nor BulletSim. Hand-maintained csproj: EnableDefaultItems
+    off, explicit <Compile Include>. Do NOT run runprebuild.
+  -->
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <OutputType>Exe</OutputType>
+    <AssemblyName>Legion.Physics.TestHarness</AssemblyName>
+    <RootNamespace>Legion.Physics.TestHarness</RootNamespace>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <EnableDefaultItems>false</EnableDefaultItems>
+    <Deterministic>true</Deterministic>
+    <!-- win-x64 host for the M1 native-load proof (decision #2: single precision). -->
+    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
+    <SelfContained>false</SelfContained>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Include="Program.cs" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\Legion.Physics\Legion.Physics.csproj" />
+  </ItemGroup>
+
+</Project>
