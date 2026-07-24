@@ -27,6 +27,7 @@
 
   <ItemGroup>
     <Compile Include="ILegionPhysicsBackend.cs" />
+    <Compile Include="JoltPhysicsBackend.cs" />
   </ItemGroup>
 
   <!-- M1 Task 2: Jolt binding. 2.18.6 is the newest release still shipping lib/net8.0/
