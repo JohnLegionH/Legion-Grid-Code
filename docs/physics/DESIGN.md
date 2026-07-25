@@ -219,6 +219,23 @@ are not silently "corrected" later — they are deliberate, not incidental.
   so any collision **sound-volume or damage magnitude** model must treat avatar hits as force-less
   (fall back to a fixed/typed value, do not read `ContactReport.Impulse` for them).
 
+- **M7 LINKSET CONTRACT: `ContactReport` carries no child/link identity (delta #32).** Compound (linkset)
+  child UserData is recoverable from a **raycast** (`RayHit.ChildUserData`, decoded from the hit
+  SubShapeID's low bits) but NOT from a **contact** — `ContactReport` has only body-level `UserDataA/B`,
+  no per-child field. Consequence: at M7, `llDetectedLinkNumber` will work for **cast/detection** on a
+  linkset but NOT for **collision events** (a struck child prim's collision event cannot yet report its
+  link number). Closing it means extending the contact path to carry the struck child — the manifold
+  already exposes `SubShapeID1/2`, so the data is available; it needs a `ChildUserData` field on
+  `ContactReport` (or A/B variants) plus decode in the contact handlers. Build M7 knowing this gap.
+
+- **M6 PHYSICAL-MESH CONTRACT: a `MeshShape` has Volume 0 (delta #31).** Jolt does not integrate
+  triangle-soup volume, so mass-from-density on a mesh yields **0** (the backend clamps to a tiny
+  positive so it can't produce an infinite-acceleration body, but that is a fallback, not a mass). A
+  prim must NEVER rez physical with mass 0. M6 must, for a physical mesh prim, supply mass another way:
+  explicit `BodyDesc.Mass`, an AABB-volume × density fallback, OR — the natural answer, and what SL does
+  anyway — **use the prim's CONVEX HULL as the physical shape** (mesh stays the visual/static-collision
+  shape). Default to the convex hull for physical mesh unless a reason not to surfaces.
+
 - **ACCEPTED characteristics (documented, not open items):**
   - *Characters are not lock-free like bodies (M3 #2).* `CharacterVirtual` create/remove/set/step are
     serialised to the step thread via a gate. The taint-free "call from any thread" property is
