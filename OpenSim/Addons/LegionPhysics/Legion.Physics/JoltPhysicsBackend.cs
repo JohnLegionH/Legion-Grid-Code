@@ -86,6 +86,11 @@ namespace Legion.Physics.Jolt
         // Current terrain body (SetTerrain replaces it). BodyId.Invalid = none.
         private BodyId _terrainBody = BodyId.Invalid;
 
+        // ObjectLayerFilter objects (native callbacks) keyed by QueryFilter value, built lazily so each
+        // distinct filter allocates its callback once. Disposed in Dispose.
+        private readonly ConcurrentDictionary<QueryFilter, LayerQueryFilter> _queryFilters =
+            new ConcurrentDictionary<QueryFilter, LayerQueryFilter>();
+
         // Characters (CharacterVirtual) are NOT lock-free like BodyInterface, and they are stepped on
         // the Step thread OUTSIDE _system.Update. So all character create/remove/set/step operations are
         // serialised through this gate and the step-thread-owned list. (Abstraction friction vs the
@@ -332,6 +337,11 @@ namespace Legion.Physics.Jolt
                 _charVsChar?.Dispose();
                 _charVsChar = null;
             }
+
+            // Query-filter callback objects.
+            foreach (LayerQueryFilter f in _queryFilters.Values)
+                f.Dispose();
+            _queryFilters.Clear();
 
             // Legion-side handle tables first (pure managed bookkeeping).
             _constraints.Clear();
@@ -1458,27 +1468,11 @@ namespace Legion.Physics.Jolt
             Vector3 rayDir = direction / len * maxDistance;
             var ray = new Ray(origin, rayDir);
 
-            // NOTE: QueryFilter (the object-layer bitmask) is NOT yet applied - M1 raycast hits
-            // every layer. Honouring it needs a custom ObjectLayerFilter callback; deferred (the
-            // M1 harness - terrain + one box - does not need it). Passing null = no filtering.
-            if (!_system.NarrowPhaseQuery.CastRay(ray, out RayCastResult result, null, null, null))
+            // QueryFilter is now honoured via a per-layer ObjectLayerFilter (cached per filter value).
+            if (!_system.NarrowPhaseQuery.CastRay(ray, out RayCastResult result, null, FilterFor(filter), null))
                 return false;
 
             Vector3 point = origin + rayDir * result.Fraction;
-
-            // Surface normal needs a read-lock on the hit body (RayCastResult carries only body id,
-            // fraction, and sub-shape id).
-            Vector3 normal = default;
-            BodyLockInterface bli = _system.BodyLockInterface;
-            bli.LockRead(result.BodyID, out BodyLockRead lockRead);
-            try
-            {
-                Body? hitBody = lockRead.Succeeded ? lockRead.Body : null;
-                if (hitBody != null)
-                    normal = hitBody.GetWorldSpaceSurfaceNormal(new SubShapeID(result.subShapeID2), point);
-            }
-            finally { bli.UnlockRead(lockRead); }
-
             _joltToRecord.TryGetValue(result.BodyID.ID, out JoltBodyRecord? rec);
             hit = new RayHit
             {
@@ -1486,15 +1480,178 @@ namespace Legion.Physics.Jolt
                 UserData = rec != null ? rec.UserData : 0u,
                 ChildUserData = ResolveChildUserData(rec, result.subShapeID2),
                 Point = point,
-                Normal = normal,
+                Normal = SurfaceNormalOf(result.BodyID, result.subShapeID2, point),
                 Distance = maxDistance * result.Fraction,
             };
             return true;
         }
-        public int RayCastAll(Vector3 origin, Vector3 direction, float maxDistance, QueryFilter filter, Span<RayHit> hits) => throw new NotImplementedException();
-        public int OverlapSphere(Vector3 center, float radius, QueryFilter filter, Span<BodyId> results) => throw new NotImplementedException();
-        public int OverlapBox(Vector3 center, Vector3 halfExtents, Quaternion orientation, QueryFilter filter, Span<BodyId> results) => throw new NotImplementedException();
-        public bool ShapeCast(ShapeId shape, Vector3 origin, Quaternion orientation, Vector3 direction, float maxDistance, QueryFilter filter, out RayHit hit) => throw new NotImplementedException();
+
+        public int RayCastAll(Vector3 origin, Vector3 direction, float maxDistance, QueryFilter filter, Span<RayHit> hits)
+        {
+            if (_system == null)
+                return 0;
+            float len = direction.Length();
+            if (len < 1e-12f || maxDistance <= 0f)
+                return 0;
+
+            Vector3 rayDir = direction / len * maxDistance;
+            var ray = new Ray(origin, rayDir);
+            // AllHitSorted = every hit along the ray, sorted by distance, no duplicates. The collector
+            // needs an ICollection; this List is the one query-path allocation (queries run at script
+            // rate, not per frame - a thread-local pool is a later optimisation, noted).
+            var results = new List<RayCastResult>();
+            _system.NarrowPhaseQuery.CastRay(
+                ray, new RayCastSettings(), CollisionCollectorType.AllHitSorted, results, null, FilterFor(filter), null, null);
+
+            int n = Math.Min(results.Count, hits.Length);
+            for (int i = 0; i < n; i++)
+            {
+                RayCastResult r = results[i];
+                Vector3 point = origin + rayDir * r.Fraction;
+                _joltToRecord.TryGetValue(r.BodyID.ID, out JoltBodyRecord? rec);
+                hits[i] = new RayHit
+                {
+                    Body = rec != null ? new BodyId(rec.Handle) : BodyId.Invalid,
+                    UserData = rec != null ? rec.UserData : 0u,
+                    ChildUserData = ResolveChildUserData(rec, r.subShapeID2),
+                    Point = point,
+                    Normal = SurfaceNormalOf(r.BodyID, r.subShapeID2, point),
+                    Distance = maxDistance * r.Fraction,
+                };
+            }
+            return n;
+        }
+
+        public int OverlapSphere(Vector3 center, float radius, QueryFilter filter, Span<BodyId> results)
+        {
+            if (_system == null)
+                return 0;
+            using var sphere = new SphereShape(MathF.Max(0.001f, radius));
+            var found = new List<CollideShapeResult>();
+            _system.NarrowPhaseQuery.CollideShape(
+                sphere, Vector3.One, Matrix4x4.CreateTranslation(center), Vector3.Zero,
+                CollisionCollectorType.AllHit, found, null, FilterFor(filter), null, null);
+            return CollectUniqueBodies(found, results);
+        }
+
+        public int OverlapBox(Vector3 center, Vector3 halfExtents, Quaternion orientation, QueryFilter filter, Span<BodyId> results)
+        {
+            if (_system == null)
+                return 0;
+            float minHalf = MathF.Min(halfExtents.X, MathF.Min(halfExtents.Y, halfExtents.Z));
+            float cr = MathF.Max(0f, MathF.Min(DefaultConvexRadius, minHalf * 0.1f));
+            using var box = new BoxShape(halfExtents, cr);
+            // A box's centre of mass IS its centre, so the COM transform is just rotate-then-translate.
+            Matrix4x4 com = Matrix4x4.CreateFromQuaternion(orientation);
+            com.Translation = center;
+            var found = new List<CollideShapeResult>();
+            _system.NarrowPhaseQuery.CollideShape(
+                box, Vector3.One, com, Vector3.Zero,
+                CollisionCollectorType.AllHit, found, null, FilterFor(filter), null, null);
+            return CollectUniqueBodies(found, results);
+        }
+
+        public bool ShapeCast(ShapeId shape, Vector3 origin, Quaternion orientation, Vector3 direction, float maxDistance, QueryFilter filter, out RayHit hit)
+        {
+            hit = default;
+            if (_system == null)
+                return false;
+            if (!_shapes.TryGet(shape.Value, out JoltShapeRecord shapeRec) || shapeRec.NativeShape == null)
+                return false;
+            float len = direction.Length();
+            if (len < 1e-12f || maxDistance <= 0f)
+                return false;
+
+            Vector3 castVec = direction / len * maxDistance; // Jolt encodes cast length in the vector magnitude.
+            Matrix4x4 com = Matrix4x4.CreateFromQuaternion(orientation);
+            com.Translation = origin;
+            var results = new List<ShapeCastResult>();
+            _system.NarrowPhaseQuery.CastShape(
+                shapeRec.NativeShape, com, castVec, Vector3.Zero,
+                CollisionCollectorType.ClosestHit, results, null, FilterFor(filter), null, null);
+            if (results.Count == 0)
+                return false;
+
+            ShapeCastResult r = results[0];
+            _joltToRecord.TryGetValue(r.BodyID2.ID, out JoltBodyRecord? rec);
+            // PenetrationAxis points from the cast shape into the hit body; the surface normal the caller
+            // wants (pointing back out of the struck surface) is its negation, normalised.
+            Vector3 axis = r.PenetrationAxis;
+            float axisLen = axis.Length();
+            Vector3 normal = axisLen > 1e-12f ? -axis / axisLen : default;
+            hit = new RayHit
+            {
+                Body = rec != null ? new BodyId(rec.Handle) : BodyId.Invalid,
+                UserData = rec != null ? rec.UserData : 0u,
+                ChildUserData = ResolveChildUserData(rec, r.SubShapeID2.Value),
+                Point = r.ContactPointOn2,           // first-contact point on the struck body
+                Normal = normal,
+                Distance = maxDistance * r.Fraction,
+            };
+            return true;
+        }
+
+        // Surface normal at a hit needs a read-lock on the body (results carry only id/fraction/subshape).
+        private Vector3 SurfaceNormalOf(BodyID bodyId, uint subShapeId, Vector3 worldPoint)
+        {
+            Vector3 normal = default;
+            BodyLockInterface bli = _system!.BodyLockInterface;
+            bli.LockRead(bodyId, out BodyLockRead lockRead);
+            try
+            {
+                Body? body = lockRead.Succeeded ? lockRead.Body : null;
+                if (body != null)
+                    normal = body.GetWorldSpaceSurfaceNormal(new SubShapeID(subShapeId), worldPoint);
+            }
+            finally { bli.UnlockRead(lockRead); }
+            return normal;
+        }
+
+        // Flatten CollideShape results (one per touching sub-shape/face - a compound yields several) into
+        // a de-duplicated list of Legion BodyIds, stopping at the caller's buffer capacity.
+        private int CollectUniqueBodies(List<CollideShapeResult> found, Span<BodyId> results)
+        {
+            int n = 0;
+            for (int i = 0; i < found.Count && n < results.Length; i++)
+            {
+                if (!_joltToRecord.TryGetValue(found[i].BodyID2.ID, out JoltBodyRecord? rec))
+                    continue;
+                var id = new BodyId(rec.Handle);
+                bool dup = false;
+                for (int j = 0; j < n; j++)
+                    if (results[j].Equals(id)) { dup = true; break; }
+                if (!dup)
+                    results[n++] = id;
+            }
+            return n;
+        }
+
+        // ObjectLayerFilter that honours a QueryFilter bitmask. Cached per filter value (below) so we do
+        // not allocate a native callback object per query.
+        private sealed class LayerQueryFilter : ObjectLayerFilter
+        {
+            private readonly QueryFilter _filter;
+            public LayerQueryFilter(QueryFilter filter) { _filter = filter; }
+            protected override bool ShouldCollide(ObjectLayer layer) => QueryFilterAllows(_filter, (PhysicsLayer)layer.Value);
+        }
+
+        private static bool QueryFilterAllows(QueryFilter filter, PhysicsLayer layer) => layer switch
+        {
+            PhysicsLayer.Terrain => (filter & QueryFilter.Terrain) != 0,
+            PhysicsLayer.Static => (filter & QueryFilter.Static) != 0,
+            PhysicsLayer.Dynamic => (filter & QueryFilter.Dynamic) != 0,
+            PhysicsLayer.Avatar => (filter & QueryFilter.Avatar) != 0,
+            PhysicsLayer.Sensor => (filter & QueryFilter.Sensor) != 0,
+            // Debris has no QueryFilter bit - detection queries (llCastRay/llSensor) never return particle
+            // debris, so it is excluded from every filter, INCLUDING All.
+            PhysicsLayer.Debris => false,
+            _ => false,
+        };
+
+        // Resolve (and cache) the ObjectLayerFilter for a QueryFilter value. We always use a filter (never
+        // null) so Debris is consistently excluded even for QueryFilter.All.
+        private ObjectLayerFilter FilterFor(QueryFilter filter)
+            => _queryFilters.GetOrAdd(filter, f => new LayerQueryFilter(f));
 
         // =====================================================================
         // Step

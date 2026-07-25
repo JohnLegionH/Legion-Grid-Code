@@ -609,7 +609,86 @@ internal static class Program
 
             backend.RemoveBody(scBody); backend.RemoveBody(ssBody);
             backend.ReleaseShape(scaledBox); backend.ReleaseShape(scaledSphere); backend.ReleaseShape(baseBox); backend.ReleaseShape(baseSphere);
-            backend.ReleaseShape(sphere); backend.ReleaseShape(capsule); backend.ReleaseShape(cylinder); backend.ReleaseShape(hull); backend.ReleaseShape(mesh); backend.ReleaseShape(childBox);
+            backend.ReleaseShape(capsule); backend.ReleaseShape(cylinder); backend.ReleaseShape(hull); backend.ReleaseShape(mesh); backend.ReleaseShape(childBox);
+
+            // ================= MILESTONE 4 TASK 2 - QUERIES =================
+            backend.SetTerrain(flat, Vector3.Zero);
+            ShapeId qbox = backend.CreateBoxShape(new Vector3(0.5f, 0.5f, 0.5f));
+
+            // ---- 34. RAYCASTALL: all hits, distance order, no dupes. ----
+            Console.WriteLine("\n[34] RayCastAll: all hits in distance order, no dupes");
+            BodyId qb1 = MakeStaticAt(backend, qbox, new Vector3(70f, 70f, 10f), 7101u, PhysicsLayer.Static, BodyMotionType.Static);
+            BodyId qb2 = MakeStaticAt(backend, qbox, new Vector3(70f, 70f, 6f), 7102u, PhysicsLayer.Static, BodyMotionType.Static);
+            BodyId qb3 = MakeStaticAt(backend, qbox, new Vector3(70f, 70f, 2f), 7103u, PhysicsLayer.Static, BodyMotionType.Static);
+            var rhits = new RayHit[8];
+            int nAll = backend.RayCastAll(new Vector3(70f, 70f, 20f), new Vector3(0, 0, -1), 19f, QueryFilter.All, rhits); // 19 m stops above terrain
+            string order = ""; for (int i = 0; i < nAll; i++) order += $"[d{rhits[i].Distance:0.0} ud{rhits[i].UserData}]";
+            Console.WriteLine($"      hits={nAll}: {order}");
+            Check(nAll == 3, $"RayCastAll returns all 3 boxes, terrain excluded by range (got {nAll})");
+            Check(nAll == 3 && rhits[0].Distance < rhits[1].Distance && rhits[1].Distance < rhits[2].Distance, "hits sorted by distance");
+            Check(nAll == 3 && rhits[0].UserData == 7101u && rhits[1].UserData == 7102u && rhits[2].UserData == 7103u, "top->bottom order, no dupes (7101,7102,7103)");
+            backend.RemoveBody(qb1); backend.RemoveBody(qb2); backend.RemoveBody(qb3);
+
+            // ---- 35. QUERYFILTER RESTRICTION per layer (the exclusion tests). ----
+            Console.WriteLine("\n[35] QueryFilter restriction: exclude by layer");
+            BodyId sBox = MakeStaticAt(backend, qbox, new Vector3(74f, 74f, 10f), 7201u, PhysicsLayer.Static, BodyMotionType.Static);
+            BodyId dBox = MakeStaticAt(backend, qbox, new Vector3(74f, 74f, 6f), 7202u, PhysicsLayer.Dynamic, BodyMotionType.Dynamic);
+            bool hS = backend.RayCast(new Vector3(74f, 74f, 20f), new Vector3(0, 0, -1), 25f, QueryFilter.Static, out RayHit rS);
+            bool hD = backend.RayCast(new Vector3(74f, 74f, 20f), new Vector3(0, 0, -1), 25f, QueryFilter.Dynamic, out RayHit rD);
+            bool hAv = backend.RayCast(new Vector3(74f, 74f, 20f), new Vector3(0, 0, -1), 25f, QueryFilter.Avatar, out _);
+            Check(hS && rS.UserData == 7201u, $"filter=Static hits the static box, EXCLUDES dynamic (ud {(hS ? rS.UserData : 0)})");
+            Check(hD && rD.UserData == 7202u, $"filter=Dynamic hits the dynamic box, EXCLUDES static (ud {(hD ? rD.UserData : 0)})");
+            Check(!hAv, "filter=Avatar EXCLUDES both boxes (no avatar bodies present)");
+            bool tT = backend.RayCast(new Vector3(78f, 78f, 20f), new Vector3(0, 0, -1), 25f, QueryFilter.Terrain, out _);
+            bool tD = backend.RayCast(new Vector3(78f, 78f, 20f), new Vector3(0, 0, -1), 25f, QueryFilter.Dynamic, out _);
+            Check(tT, "filter=Terrain hits the terrain");
+            Check(!tD, "filter=Dynamic EXCLUDES the terrain (empty ground -> miss)");
+            backend.RemoveBody(sBox); backend.RemoveBody(dBox);
+
+            // ---- 36. OVERLAP sphere/box + filter. ----
+            Console.WriteLine("\n[36] OverlapSphere / OverlapBox + filter");
+            BodyId oS = MakeStaticAt(backend, qbox, new Vector3(82f, 82f, 5f), 7301u, PhysicsLayer.Static, BodyMotionType.Static);
+            BodyId oD = MakeStaticAt(backend, qbox, new Vector3(82.6f, 82f, 5f), 7302u, PhysicsLayer.Dynamic, BodyMotionType.Dynamic);
+            var obuf = new BodyId[8];
+            int nSph = backend.OverlapSphere(new Vector3(82.3f, 82f, 5f), 1.0f, QueryFilter.All, obuf);
+            Check(nSph >= 2, $"OverlapSphere finds both nearby boxes (got {nSph})");
+            int nSphS = backend.OverlapSphere(new Vector3(82.3f, 82f, 5f), 1.0f, QueryFilter.Static, obuf);
+            Check(nSphS == 1 && obuf[0].Equals(oS), $"OverlapSphere filter=Static returns ONLY the static box (got {nSphS})");
+            int nBox = backend.OverlapBox(new Vector3(82.3f, 82f, 5f), new Vector3(1.0f, 1.0f, 1.0f), System.Numerics.Quaternion.Identity, QueryFilter.All, obuf);
+            Check(nBox >= 2, $"OverlapBox finds both boxes (got {nBox})");
+            backend.RemoveBody(oS); backend.RemoveBody(oD);
+
+            // ---- 37. SHAPECAST against a known obstacle: first-contact point + normal. ----
+            Console.WriteLine("\n[37] ShapeCast against a known obstacle");
+            BodyId scT = MakeStaticAt(backend, qbox, new Vector3(86f, 86f, 3f), 7401u, PhysicsLayer.Static, BodyMotionType.Static);
+            ShapeId castSphere = backend.CreateSphereShape(0.3f);
+            bool scHit = backend.ShapeCast(castSphere, new Vector3(86f, 86f, 20f), System.Numerics.Quaternion.Identity, new Vector3(0, 0, -1), 25f, QueryFilter.All, out RayHit scH);
+            Console.WriteLine($"      shapecast hit={scHit} ud={(scHit ? scH.UserData : 0)} point={scH.Point} normal={scH.Normal} dist={scH.Distance:0.00}");
+            Check(scHit && scH.UserData == 7401u, "shapecast hits the target box");
+            Check(scHit && MathF.Abs(scH.Point.Z - 3.5f) < 0.2f, $"first-contact point on box top ~3.5 (got {scH.Point.Z:0.00})");
+            Check(scHit && scH.Normal.Z > 0.8f, $"contact normal points up +Z (n.z={scH.Normal.Z:0.00})");
+            backend.RemoveBody(scT); backend.ReleaseShape(castSphere);
+
+            // ---- 38. AVATAR VISIBILITY to the query family (#30 answer). ----
+            Console.WriteLine("\n[38] Avatar visibility to queries [#30]");
+            var avq = CharacterDesc.Default; avq.Position = new Vector3(90f, 90f, 0.75f); avq.UserData = 7500u;
+            CharacterId avatarQ = backend.CreateCharacter(avq);
+            for (int i = 0; i < 10; i++) { backend.SetCharacterMovement(avatarQ, Vector3.Zero, false, false); backend.Step(1f / 60f, abuf, cbuf, acont); }
+            bool avRay = backend.RayCast(new Vector3(90f, 90f, 20f), new Vector3(0, 0, -1), 25f, QueryFilter.All, out RayHit avR);
+            var avAll = new RayHit[8];
+            int avN = backend.RayCastAll(new Vector3(90f, 90f, 20f), new Vector3(0, 0, -1), 25f, QueryFilter.All, avAll);
+            int avOv = backend.OverlapSphere(new Vector3(90f, 90f, 0.9f), 2f, QueryFilter.All, obuf);
+            bool rayIsAvatar = avRay && avR.UserData == 7500u;
+            bool allHasAvatar = false; for (int i = 0; i < avN; i++) if (avAll[i].UserData == 7500u) allHasAvatar = true;
+            bool ovHasAvatar = false; for (int i = 0; i < avOv; i++) { backend.TryGetBodyState(obuf[i], out BodyState bst); if (bst.UserData == 7500u) ovHasAvatar = true; }
+            Console.WriteLine($"      RayCast hit ud={(avRay ? avR.UserData : 0)} (terrain, not avatar); RayCastAll includes avatar={allHasAvatar}; OverlapSphere count={avOv} includes avatar={ovHasAvatar}");
+            Check(!rayIsAvatar, "RayCast does NOT return the avatar (CharacterVirtual is not a body)");
+            Check(!allHasAvatar, "RayCastAll does NOT include the avatar");
+            Check(!ovHasAvatar, "OverlapSphere does NOT find the avatar");
+            Console.WriteLine("      => FINDING: avatars are INVISIBLE to the query family. llSensor / sit-target search need a query-visible marker (see report).");
+            backend.RemoveCharacter(avatarQ);
+
+            backend.ReleaseShape(sphere); backend.ReleaseShape(qbox);
 
             // cleanup
             backend.RemoveBody(boxBody);
@@ -641,8 +720,8 @@ internal static class Program
 
         Console.WriteLine();
         Console.WriteLine(_fails == 0
-            ? "=== M1..M4T1 HARNESS: PASS ==="
-            : $"=== M1..M4T1 HARNESS: FAIL ({_fails} failed check(s)) ===");
+            ? "=== M1..M4 HARNESS: PASS ==="
+            : $"=== M1..M4 HARNESS: FAIL ({_fails} failed check(s)) ===");
         return _fails == 0 ? 0 : 1;
     }
 
@@ -786,6 +865,15 @@ internal static class Program
         b.RemoveBody(box);
         b.ReleaseShape(boxShape);
         return (boxDx, noTunnel);
+    }
+
+    // Creates a body of the given shape/layer/motion at pos (not stepped, so it stays put for queries).
+    private static BodyId MakeStaticAt(ILegionPhysicsBackend b, ShapeId shape, Vector3 pos, uint ud, PhysicsLayer layer, BodyMotionType motion)
+    {
+        var d = BodyDesc.Default;
+        d.Shape = shape; d.Position = pos; d.Layer = layer; d.MotionType = motion; d.UserData = ud;
+        d.StartActive = false; // never activated/stepped in the query sections, so it holds position
+        return b.CreateBody(d);
     }
 
     // Places a static body with `shape` at `pos` and raycasts straight down onto it from above,
