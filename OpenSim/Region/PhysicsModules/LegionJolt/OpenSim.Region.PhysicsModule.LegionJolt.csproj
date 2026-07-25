@@ -1,0 +1,101 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    Legion Grid Jolt physics region module (M6.1 skeleton). Mirrors the BulletSim module: SDK-style,
+    net8.0, EnableDefaultItems OFF (explicit Compile includes), outputs to the shared ..\..\..\..\bin\
+    so Mono.Addins can discover it. Self-selects on [Startup] physics = Jolt. Do NOT run runprebuild
+    against this tree - the csproj is hand-maintained (Legion convention).
+  -->
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <PreserveCompilationContext>false</PreserveCompilationContext>
+    <OutputType>Library</OutputType>
+    <GenerateAssemblyInfo>false</GenerateAssemblyInfo>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <AssemblyName>OpenSim.Region.PhysicsModule.LegionJolt</AssemblyName>
+    <Deterministic>true</Deterministic>
+    <ProduceReferenceAssembly>false</ProduceReferenceAssembly>
+    <GenerateDependencyFile>false</GenerateDependencyFile>
+    <EnableDefaultItems>false</EnableDefaultItems>
+    <AppendTargetFrameworkToOutputPath>False</AppendTargetFrameworkToOutputPath>
+    <AppendRuntimeIdentifierToOutputPath>False</AppendRuntimeIdentifierToOutputPath>
+    <UseCommonOutputDirectory>True</UseCommonOutputDirectory>
+    <OutputPath>..\..\..\..\bin\</OutputPath>
+    <PlatformTarget>AnyCPU</PlatformTarget>
+    <NoWarn>CA1416,SYSLIB0011,SYSLIB0014,SYSLIB0039</NoWarn>
+  </PropertyGroup>
+
+  <PropertyGroup Condition=" '$(Configuration)' == 'Debug' ">
+    <DefineConstants>TRACE</DefineConstants>
+    <DebugSymbols>True</DebugSymbols>
+    <Optimize>False</Optimize>
+  </PropertyGroup>
+  <PropertyGroup Condition=" '$(Configuration)' == 'Release' ">
+    <DebugSymbols>False</DebugSymbols>
+    <Optimize>True</Optimize>
+  </PropertyGroup>
+
+  <!-- OpenSim shared assemblies resolved from the built bin\ (not copied locally). -->
+  <ItemGroup>
+    <Reference Include="log4net">
+      <HintPath>..\..\..\..\bin\log4net.dll</HintPath>
+      <Private>False</Private>
+    </Reference>
+    <Reference Include="Mono.Addins">
+      <HintPath>..\..\..\..\bin\Mono.Addins.dll</HintPath>
+      <Private>False</Private>
+    </Reference>
+    <Reference Include="Nini">
+      <HintPath>..\..\..\..\bin\Nini.dll</HintPath>
+      <Private>False</Private>
+    </Reference>
+    <Reference Include="OpenMetaverse">
+      <HintPath>..\..\..\..\bin\OpenMetaverse.dll</HintPath>
+      <Private>False</Private>
+    </Reference>
+    <Reference Include="OpenMetaverseTypes">
+      <HintPath>..\..\..\..\bin\OpenMetaverseTypes.dll</HintPath>
+      <Private>False</Private>
+    </Reference>
+  </ItemGroup>
+
+  <!-- The OpenSim contract projects + our engine-agnostic backend. -->
+  <ItemGroup>
+    <ProjectReference Include="..\..\..\Framework\OpenSim.Framework.csproj" />
+    <ProjectReference Include="..\..\Framework\OpenSim.Region.Framework.csproj" />
+    <ProjectReference Include="..\SharedBase\OpenSim.Region.PhysicsModules.SharedBase.csproj" />
+    <ProjectReference Include="..\..\..\Addons\LegionPhysics\Legion.Physics\Legion.Physics.csproj" />
+  </ItemGroup>
+
+  <!-- Jolt binding + native. The backend (Legion.Physics) references JoltPhysicsSharp transitively,
+       but a ProjectReference does NOT reliably flow the managed binding into an AnyCPU module output,
+       and RID-specific natives (runtimes/<rid>/native) are never auto-copied without a RID. Because
+       this module is loaded INTO OpenSim.exe (whose own deps.json won't know our transitive native),
+       joltc.dll must land at the OUTPUT ROOT where the process DllImport resolver looks. So we take a
+       DIRECT PackageReference (managed DLL copies) and copy the single-precision native explicitly. -->
+  <!-- The MODULE code uses only Legion.Physics types, not JoltPhysicsSharp directly - so these are
+       runtime-only: Legion.Physics.dll (via ProjectReference) P/Invokes JoltPhysicsSharp.dll which
+       P/Invokes joltc.dll. A Library does not copy package assemblies to output, and RID natives are
+       never auto-copied without a RID, so we resolve both package paths and copy EXACTLY those two
+       files (nothing else) to the output root, where the OpenSim.exe process resolver finds them. -->
+  <ItemGroup>
+    <PackageReference Include="JoltPhysicsSharp" Version="2.18.6" GeneratePathProperty="true" PrivateAssets="all" />
+    <PackageReference Include="JoltPhysics.Native" Version="1.0.3" GeneratePathProperty="true" PrivateAssets="all" />
+  </ItemGroup>
+  <ItemGroup>
+    <None Include="$(PkgJoltPhysicsSharp)\lib\net8.0\JoltPhysicsSharp.dll" Link="JoltPhysicsSharp.dll">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
+    <!-- Single precision only (Foundation.Init(false) -> joltc.dll), per decision #2. win-x64 for the
+         Windows boot; the linux-x64 native is the parallel item to add for the grid deploy. -->
+    <None Include="$(PkgJoltPhysics_Native)\runtimes\win-x64\native\joltc.dll" Link="joltc.dll">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
+  </ItemGroup>
+
+  <ItemGroup>
+    <Compile Include="LegionJoltScene.cs" />
+    <Compile Include="Properties\AssemblyInfo.cs" />
+  </ItemGroup>
+
+</Project>
