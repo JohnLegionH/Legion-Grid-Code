@@ -246,6 +246,17 @@ namespace Legion.Physics.Jolt
             _system.Gravity = settings.Gravity;
             _bodyInterface = _system.BodyInterface;
 
+            // Determinism (A/B parity harness, DESIGN.md): single-threaded ALONE is not enough - Jolt
+            // also needs its DeterministicSimulation flag on to guarantee bit-identical re-runs. It
+            // defaults true in 2.18.6, but we set it EXPLICITLY when asked rather than lean on a default
+            // that a future lib bump could flip. (Left untouched otherwise, to keep the fast path fast.)
+            if (settings.DeterministicMode)
+            {
+                PhysicsSettings physicsSettings = _system.Settings;
+                physicsSettings.DeterministicSimulation = true;
+                _system.Settings = physicsSettings;
+            }
+
             // Contacts + body activation arrive as C# EVENTS in 2.18.6 (delta #7), not a
             // listener object. The handlers ONLY enqueue / push into the ring - they never touch
             // scene state, never allocate, and never mutate the active set (see the field notes).
@@ -530,26 +541,56 @@ namespace Legion.Physics.Jolt
 
         public BodyId CreateBody(in BodyDesc desc)
         {
-            // M1 scope: STATIC bodies only. Dynamics/kinematics (mass from density, CCD,
-            // damping, gravity factor) are deferred, so reject them loudly rather than create a
-            // half-configured body.
             if (_system == null)
                 throw new InvalidOperationException("CreateBody before Initialize.");
-            if (desc.MotionType != BodyMotionType.Static)
-                throw new NotImplementedException(
-                    $"M1 supports Static bodies only; {desc.MotionType} is deferred past this milestone.");
             if (!_shapes.TryGet(desc.Shape.Value, out JoltShapeRecord shapeRec) || shapeRec.NativeShape == null)
                 throw new ArgumentException($"CreateBody: {desc.Shape} is not a live shape handle.");
 
+            MotionType joltMotion = ToJoltMotion(desc.MotionType);
+            bool movable = desc.MotionType != BodyMotionType.Static;
+
             var objectLayer = new ObjectLayer((uint)desc.Layer);
             var bcs = new BodyCreationSettings(
-                shapeRec.NativeShape, desc.Position, desc.Orientation, MotionType.Static, objectLayer);
+                shapeRec.NativeShape, desc.Position, desc.Orientation, joltMotion, objectLayer);
+            float mass = 0f;
             try
             {
                 bcs.Friction = desc.Friction;
                 bcs.Restitution = desc.Restitution;
                 bcs.IsSensor = desc.IsSensor;
                 bcs.UserData = desc.UserData;
+
+                if (movable)
+                {
+                    // Velocities, damping, gravity factor and CCD only mean anything for a body that
+                    // actually moves; a Static body has no MotionProperties to hold them.
+                    bcs.LinearVelocity = desc.LinearVelocity;
+                    bcs.AngularVelocity = desc.AngularVelocity;
+                    bcs.LinearDamping = MathF.Max(0f, desc.LinearDamping);
+                    bcs.AngularDamping = MathF.Max(0f, desc.AngularDamping);
+                    bcs.GravityFactor = desc.GravityFactor;
+                    bcs.MotionQuality = desc.UseCcd ? MotionQuality.LinearCast : MotionQuality.Discrete;
+
+                    // Let this body flip Dynamic<->Kinematic<->Static later (SetBodyMotionType). A body
+                    // created Static deliberately does NOT get this: allocating MotionProperties for
+                    // every one of a region's tens of thousands of non-physical prims is exactly the
+                    // memory regression DESIGN.md's DontActivate note guards against. A prim that can
+                    // go physical must therefore be CREATED movable, not created static and promoted.
+                    bcs.AllowDynamicOrKinematic = true;
+                }
+
+                if (desc.MotionType == BodyMotionType.Dynamic)
+                {
+                    // Mass policy (DESIGN.md / BodyDesc): explicit Mass wins; else shape volume x
+                    // Density. We ALWAYS override rather than trust the shape's baked density, because
+                    // shapes are shared/refcounted across prims and carry Jolt's default 1000 kg/m^3 -
+                    // the per-body Density lives in BodyDesc, not the shape. CalculateInertia keeps the
+                    // inertia TENSOR derived from the real geometry, scaled to this mass (verified
+                    // exact: asked 42 -> body mass 42.0000).
+                    mass = ComputeMass(shapeRec, desc);
+                    bcs.OverrideMassProperties = OverrideMassProperties.CalculateInertia;
+                    bcs.MassPropertiesOverride = new MassProperties { Mass = mass };
+                }
 
                 // The load-bearing line (DESIGN.md): do NOT wake on insert unless asked. A region
                 // rezzing tens of thousands of prims with Activate is a pathological startup stall.
@@ -564,6 +605,8 @@ namespace Legion.Physics.Jolt
                     MotionType = desc.MotionType,
                     UserData = desc.UserData,
                     WantsContactEvents = false,
+                    Mass = mass,
+                    AllowMotionChange = movable,
                 };
                 uint handle = _bodies.Add(rec);
                 rec.Handle = handle;
@@ -575,6 +618,53 @@ namespace Legion.Physics.Jolt
                 // CreateAndAddBody copies the settings; the managed settings object is ours to free.
                 bcs.Dispose();
             }
+        }
+
+        private static MotionType ToJoltMotion(BodyMotionType t) => t switch
+        {
+            BodyMotionType.Static => MotionType.Static,
+            BodyMotionType.Kinematic => MotionType.Kinematic,
+            BodyMotionType.Dynamic => MotionType.Dynamic,
+            _ => MotionType.Static,
+        };
+
+        // Explicit mass wins; otherwise shape volume x density. Clamped to a small positive so a
+        // degenerate (zero-volume) shape can never yield a zero/negative-mass dynamic body, whose
+        // inverse mass would be infinite acceleration.
+        private static float ComputeMass(JoltShapeRecord shapeRec, in BodyDesc desc)
+        {
+            if (desc.Mass > 0f)
+                return desc.Mass;
+            float volume = shapeRec.NativeShape != null ? shapeRec.NativeShape.Volume : 0f;
+            float density = desc.Density > 0f ? desc.Density : 1000f;
+            return MathF.Max(volume * density, 1e-3f);
+        }
+
+        // Body-handle -> live Jolt id. Returns false (idempotent no-op for callers) on a stale/invalid
+        // handle, matching RemoveBody's contract.
+        private bool TryResolve(BodyId body, out JoltBodyRecord rec, out BodyID jid)
+        {
+            if (_bodies.TryGet(body.Value, out rec))
+            {
+                jid = new BodyID(rec.NativeBodyId);
+                return true;
+            }
+            jid = default;
+            return false;
+        }
+
+        // Force/impulse resolution: only DYNAMIC bodies respond. Static bodies have no MotionProperties
+        // (Add* would dereference null natively); kinematic bodies are script/animation-driven and
+        // ignore forces. This mirrors SL, where llApplyImpulse et al. only affect physical objects.
+        private bool TryResolveDynamic(BodyId body, out BodyID jid)
+        {
+            if (_bodies.TryGet(body.Value, out JoltBodyRecord rec) && rec.MotionType == BodyMotionType.Dynamic)
+            {
+                jid = new BodyID(rec.NativeBodyId);
+                return true;
+            }
+            jid = default;
+            return false;
         }
 
         public void RemoveBody(BodyId body)
@@ -593,18 +683,106 @@ namespace Legion.Physics.Jolt
         public bool IsBodyValid(BodyId body) => _bodies.IsValid(body.Value);
 
         public void SetBodyShape(BodyId body, ShapeId shape, bool recomputeMass) => throw new NotImplementedException();
-        public void SetBodyMotionType(BodyId body, BodyMotionType motionType, bool activate) => throw new NotImplementedException();
+
+        public void SetBodyMotionType(BodyId body, BodyMotionType motionType, bool activate)
+        {
+            if (!TryResolve(body, out JoltBodyRecord rec, out BodyID jid))
+                return;
+            if (motionType != BodyMotionType.Static && !rec.AllowMotionChange)
+                throw new InvalidOperationException(
+                    "SetBodyMotionType to a movable type needs a body created Dynamic or Kinematic " +
+                    "(a Static body has no MotionProperties to promote). Create it movable up front " +
+                    "if it can ever go physical.");
+            _bodyInterface.SetMotionType(jid, ToJoltMotion(motionType),
+                activate ? Activation.Activate : Activation.DontActivate);
+            rec.MotionType = motionType;
+        }
+
         public void SetBodyLayer(BodyId body, PhysicsLayer layer) => throw new NotImplementedException();
 
         public void SetBodyTransform(BodyId body, Vector3 position, Quaternion orientation, bool activate) => throw new NotImplementedException();
-        public void SetBodyLinearVelocity(BodyId body, Vector3 velocity) => throw new NotImplementedException();
-        public void SetBodyAngularVelocity(BodyId body, Vector3 velocity) => throw new NotImplementedException();
 
-        public void SetBodyMass(BodyId body, float mass) => throw new NotImplementedException();
-        public void SetBodyFriction(BodyId body, float friction) => throw new NotImplementedException();
-        public void SetBodyRestitution(BodyId body, float restitution) => throw new NotImplementedException();
-        public void SetBodyDamping(BodyId body, float linear, float angular) => throw new NotImplementedException();
-        public void SetBodyGravityFactor(BodyId body, float factor) => throw new NotImplementedException();
+        public void SetBodyLinearVelocity(BodyId body, Vector3 velocity)
+        {
+            // Thin seam: this does NOT wake a sleeping body (Jolt-native behaviour - only Apply*
+            // impulses activate). A velocity set on a sleeping body takes effect only once something
+            // else activates it; that activation policy belongs to the layer above, not here.
+            if (TryResolve(body, out _, out BodyID jid))
+                _bodyInterface.SetLinearVelocity(jid, velocity);
+        }
+
+        public void SetBodyAngularVelocity(BodyId body, Vector3 velocity)
+        {
+            if (TryResolve(body, out _, out BodyID jid))
+                _bodyInterface.SetAngularVelocity(jid, velocity);
+        }
+
+        public void SetBodyMass(BodyId body, float mass)
+        {
+            if (mass <= 0f || !TryResolve(body, out JoltBodyRecord rec, out BodyID jid))
+                return;
+            rec.Mass = mass;
+            if (rec.MotionType != BodyMotionType.Dynamic)
+                return; // mass is inert for static/kinematic motion; recorded for a later flip to Dynamic.
+
+            // No BodyInterface.SetMass in 2.18.6. Take the shape's geometry-correct mass properties,
+            // scale them to the target mass (keeps the inertia tensor's SHAPE, changes only its
+            // magnitude), and push them through a body write-lock.
+            BodyLockInterface bli = _system!.BodyLockInterface;
+            bli.LockWrite(jid, out BodyLockWrite lockWrite);
+            try
+            {
+                if (lockWrite.Succeeded)
+                {
+                    Body b = lockWrite.Body;
+                    MassProperties mp = b.Shape.MassProperties;
+                    mp.ScaleToMass(mass);
+                    MotionProperties motion = b.MotionProperties;
+                    motion.SetMassProperties(motion.AllowedDOFs, mp);
+                }
+            }
+            finally { bli.UnlockWrite(lockWrite); }
+        }
+
+        public void SetBodyFriction(BodyId body, float friction)
+        {
+            if (TryResolve(body, out _, out BodyID jid))
+                _bodyInterface.SetFriction(jid, friction);
+        }
+
+        public void SetBodyRestitution(BodyId body, float restitution)
+        {
+            if (TryResolve(body, out _, out BodyID jid))
+                _bodyInterface.SetRestitution(jid, restitution);
+        }
+
+        public void SetBodyDamping(BodyId body, float linear, float angular)
+        {
+            if (!TryResolve(body, out JoltBodyRecord rec, out BodyID jid) ||
+                rec.MotionType == BodyMotionType.Static)
+                return; // no MotionProperties on a static body.
+
+            BodyLockInterface bli = _system!.BodyLockInterface;
+            bli.LockWrite(jid, out BodyLockWrite lockWrite);
+            try
+            {
+                if (lockWrite.Succeeded)
+                {
+                    MotionProperties motion = lockWrite.Body.MotionProperties;
+                    motion.LinearDamping = MathF.Max(0f, linear);
+                    motion.AngularDamping = MathF.Max(0f, angular);
+                }
+            }
+            finally { bli.UnlockWrite(lockWrite); }
+        }
+
+        public void SetBodyGravityFactor(BodyId body, float factor)
+        {
+            if (!TryResolve(body, out JoltBodyRecord rec, out BodyID jid) ||
+                rec.MotionType == BodyMotionType.Static)
+                return; // static bodies never feel gravity; SetGravityFactor would touch null motion props.
+            _bodyInterface.SetGravityFactor(jid, factor);
+        }
 
         public void SetBodyAxisLocks(BodyId body, Vector3 allowedTranslation, Vector3 allowedRotation)
         {
@@ -614,11 +792,39 @@ namespace Legion.Physics.Jolt
             throw new NotImplementedException();
         }
 
-        public void ApplyForce(BodyId body, Vector3 force) => throw new NotImplementedException();
-        public void ApplyTorque(BodyId body, Vector3 torque) => throw new NotImplementedException();
-        public void ApplyImpulse(BodyId body, Vector3 impulse) => throw new NotImplementedException();
-        public void ApplyImpulseAtPoint(BodyId body, Vector3 impulse, Vector3 worldPoint) => throw new NotImplementedException();
-        public void ApplyAngularImpulse(BodyId body, Vector3 angularImpulse) => throw new NotImplementedException();
+        // Apply* only act on DYNAMIC bodies (see TryResolveDynamic). All of these auto-activate a
+        // sleeping body - AddForce and AddImpulse were both verified to wake it - which matches SL's
+        // wake-on-impulse behaviour. AddForce/AddTorque accumulate and are consumed by the next Step;
+        // AddImpulse/AddAngularImpulse change velocity instantly (delta v = impulse / mass).
+        public void ApplyForce(BodyId body, Vector3 force)
+        {
+            if (TryResolveDynamic(body, out BodyID jid))
+                _bodyInterface.AddForce(jid, force);
+        }
+
+        public void ApplyTorque(BodyId body, Vector3 torque)
+        {
+            if (TryResolveDynamic(body, out BodyID jid))
+                _bodyInterface.AddTorque(jid, torque);
+        }
+
+        public void ApplyImpulse(BodyId body, Vector3 impulse)
+        {
+            if (TryResolveDynamic(body, out BodyID jid))
+                _bodyInterface.AddImpulse(jid, impulse);
+        }
+
+        public void ApplyImpulseAtPoint(BodyId body, Vector3 impulse, Vector3 worldPoint)
+        {
+            if (TryResolveDynamic(body, out BodyID jid))
+                _bodyInterface.AddImpulse(jid, impulse, worldPoint);
+        }
+
+        public void ApplyAngularImpulse(BodyId body, Vector3 angularImpulse)
+        {
+            if (TryResolveDynamic(body, out BodyID jid))
+                _bodyInterface.AddAngularImpulse(jid, angularImpulse);
+        }
 
         public void ApplyBuoyancy(
             BodyId body, float waterHeight, float buoyancy, float linearDrag, float angularDrag)
@@ -632,8 +838,18 @@ namespace Legion.Physics.Jolt
             throw new NotImplementedException();
         }
 
-        public void ActivateBody(BodyId body) => throw new NotImplementedException();
-        public void DeactivateBody(BodyId body) => throw new NotImplementedException();
+        public void ActivateBody(BodyId body)
+        {
+            // Static bodies are never active; skip so we don't touch a body with no MotionProperties.
+            if (TryResolve(body, out JoltBodyRecord rec, out BodyID jid) && rec.MotionType != BodyMotionType.Static)
+                _bodyInterface.ActivateBody(jid);
+        }
+
+        public void DeactivateBody(BodyId body)
+        {
+            if (TryResolve(body, out _, out BodyID jid))
+                _bodyInterface.DeactivateBody(jid);
+        }
 
         public bool TryGetBodyState(BodyId body, out BodyState state)
         {
@@ -1074,6 +1290,8 @@ namespace Legion.Physics.Jolt
         public BodyMotionType MotionType;
         public uint UserData;
         public bool WantsContactEvents;   // gates Persist forwarding
+        public float Mass;                // explicit or Volume x Density; 0 where mass is unused (static)
+        public bool AllowMotionChange;    // created movable (AllowDynamicOrKinematic) -> may flip motion type
     }
 
     internal sealed class JoltShapeRecord

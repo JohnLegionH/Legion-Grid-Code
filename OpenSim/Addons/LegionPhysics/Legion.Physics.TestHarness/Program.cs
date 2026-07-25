@@ -180,6 +180,91 @@ internal static class Program
                 Check(h && MathF.Abs(z - exp) < 0.6f, $"{name} world({x,3},{y,3}): height ~{exp,2} (got {(h ? z.ToString("0.00") : "MISS")})");
             }
 
+            // ================= MILESTONE 2 - DYNAMICS =================
+
+            // ---- 8. DYNAMIC DROP: box falls under gravity, lands, comes to REST and sleeps. ----
+            Console.WriteLine("\n[8] Dynamic box: fall -> land -> sleep (active-set + JustDeactivated)");
+            DropMetrics dm = RunDropScenario(backend, null);
+            Console.WriteLine($"      steps-to-sleep={dm.StepsToSleep}  maxActive={dm.MaxActive}  finalActive={dm.FinalActive}  " +
+                              $"JustActivated={dm.JustActivatedCount}  JustDeactivated={dm.JustDeactivatedCount}");
+            Console.WriteLine($"      resting transform: pos={dm.RestPos}  orient={dm.RestOrient}");
+            Check(dm.MaxActive == 1, $"ActiveBodyCount rose to 1 while falling (max={dm.MaxActive})");
+            Check(dm.FinalActive == 0, $"ActiveBodyCount back to 0 after sleep (final={dm.FinalActive})");
+            Check(dm.JustActivatedCount == 1, $"JustActivated emitted exactly once on activation (got {dm.JustActivatedCount})");
+            // THE check that matters most: exactly one final update carrying the resting transform, or the
+            // viewer keeps interpolating and settled objects visibly drift.
+            Check(dm.JustDeactivatedCount == 1, $"JustDeactivated emitted EXACTLY once on sleep (got {dm.JustDeactivatedCount}, must be 1 not >=1)");
+            Check(dm.GotFinal && MathF.Abs(dm.RestPos.Z - 0.5f) < 0.1f,
+                $"box rests with bottom on terrain: centre Z ~0.5 (got {dm.RestPos.Z:0.000})");
+            Check(dm.GotFinal && MathF.Abs(dm.RestPos.X - 20f) < 0.05f && MathF.Abs(dm.RestPos.Y - 20f) < 0.05f,
+                $"box did not drift in XY while falling (got X={dm.RestPos.X:0.000} Y={dm.RestPos.Y:0.000})");
+
+            // ---- 9. GRAVITY FACTOR: 0 hovers, negative rises. ----
+            Console.WriteLine("\n[9] GravityFactor (0 = hover, -1 = rise)");
+            ShapeId dynBox = backend.CreateBoxShape(new Vector3(0.5f, 0.5f, 0.5f));
+            var buf9 = new BodyState[8];
+            var chars9 = new CharacterState[2];
+            var contacts9 = new ContactReport[16];
+
+            var hoverDesc = BodyDesc.Default;
+            hoverDesc.Shape = dynBox;
+            hoverDesc.Position = new Vector3(30f, 30f, 25f);
+            hoverDesc.MotionType = BodyMotionType.Dynamic;
+            hoverDesc.Layer = PhysicsLayer.Dynamic;
+            hoverDesc.GravityFactor = 0f;
+            hoverDesc.StartActive = true;
+            BodyId hover = backend.CreateBody(hoverDesc);
+
+            var riseDesc = BodyDesc.Default;
+            riseDesc.Shape = dynBox;
+            riseDesc.Position = new Vector3(35f, 35f, 25f);
+            riseDesc.MotionType = BodyMotionType.Dynamic;
+            riseDesc.Layer = PhysicsLayer.Dynamic;
+            riseDesc.GravityFactor = -1f;
+            riseDesc.StartActive = true;
+            BodyId riser = backend.CreateBody(riseDesc);
+
+            for (int i = 0; i < 90; i++)
+                backend.Step(1f / 60f, buf9, chars9, contacts9);
+
+            backend.TryGetBodyState(hover, out BodyState hoverState);
+            backend.TryGetBodyState(riser, out BodyState riseState);
+            Console.WriteLine($"      hover (gf=0)  Z: 25.0 -> {hoverState.Position.Z:0.000}    riser (gf=-1) Z: 25.0 -> {riseState.Position.Z:0.000}");
+            Check(MathF.Abs(hoverState.Position.Z - 25f) < 0.1f, $"gravityFactor 0 hovers in place (Z {hoverState.Position.Z:0.000} ~ 25.0)");
+            Check(riseState.Position.Z > 26f, $"gravityFactor -1 RISES against gravity (Z {riseState.Position.Z:0.000} > 26)");
+
+            // ---- 10. MASS + IMPULSE: verify computed mass via impulse, and Δv = impulse / mass. ----
+            Console.WriteLine("\n[10] Mass-from-density + ApplyImpulse (Δv = impulse / mass)");
+            // A unit box (half-extent 0.5 -> Volume 1.0 m^3) at default Density 1000 -> mass 1000 kg.
+            // Hand arithmetic: 8 * 0.5^3 * 1000 = 1000 kg. Mass is not exposed on the seam, so we
+            // verify it through the public interface: apply a known impulse and read Δv, then
+            // inferredMass = impulse / Δv. GravityFactor 0 isolates the measurement from gravity.
+            const float HandMass = 8f * 0.5f * 0.5f * 0.5f * 1000f; // = 1000
+            var impDesc = BodyDesc.Default;
+            impDesc.Shape = dynBox;
+            impDesc.Position = new Vector3(40f, 40f, 25f);
+            impDesc.MotionType = BodyMotionType.Dynamic;
+            impDesc.Layer = PhysicsLayer.Dynamic;
+            impDesc.GravityFactor = 0f;
+            impDesc.StartActive = true;
+            BodyId impBody = backend.CreateBody(impDesc);
+
+            backend.TryGetBodyState(impBody, out BodyState impBefore);
+            const float ImpulseZ = 2000f;
+            backend.ApplyImpulse(impBody, new Vector3(0f, 0f, ImpulseZ)); // AddImpulse changes velocity instantly
+            backend.TryGetBodyState(impBody, out BodyState impAfter);
+            float dv = impAfter.LinearVelocity.Z - impBefore.LinearVelocity.Z;
+            float inferredMass = dv != 0f ? ImpulseZ / dv : float.NaN;
+            Console.WriteLine($"      hand-arithmetic mass = {HandMass:0.0} kg (8 * 0.5^3 * 1000)");
+            Console.WriteLine($"      impulse {ImpulseZ:0} Ns -> Δv = {dv:0.000} m/s -> inferred mass = {inferredMass:0.00} kg");
+            Check(MathF.Abs(dv - ImpulseZ / HandMass) < 1e-3f, $"Δv == impulse/mass = {ImpulseZ / HandMass:0.000} (got {dv:0.000})");
+            Check(MathF.Abs(inferredMass - HandMass) < 1f, $"computed mass matches hand arithmetic {HandMass:0.0} kg (inferred {inferredMass:0.00})");
+
+            backend.RemoveBody(hover);
+            backend.RemoveBody(riser);
+            backend.RemoveBody(impBody);
+            backend.ReleaseShape(dynBox);
+
             // cleanup
             backend.RemoveBody(boxBody);
             backend.ReleaseShape(box);
@@ -198,10 +283,123 @@ internal static class Program
             backend.Dispose();
         }
 
+        // ---- 11. DETERMINISM: the same drop, twice, in DeterministicMode, must match bit-for-bit. ----
+        // Runs with FRESH backends AFTER the main one is disposed - Foundation.Init/Shutdown is global,
+        // so the two deterministic runs go strictly one-after-another. This is the seed of the A/B
+        // parity harness DESIGN.md calls for.
+        RunDeterminismCheck();
+
         Console.WriteLine();
         Console.WriteLine(_fails == 0
-            ? "=== M1 HARNESS: PASS ==="
-            : $"=== M1 HARNESS: FAIL ({_fails} failed check(s)) ===");
+            ? "=== M1+M2 HARNESS: PASS ==="
+            : $"=== M1+M2 HARNESS: FAIL ({_fails} failed check(s)) ===");
         return _fails == 0 ? 0 : 1;
+    }
+
+    // Metrics collected from one drop of a dynamic box onto flat terrain.
+    private struct DropMetrics
+    {
+        public int StepsToSleep;
+        public int JustActivatedCount;
+        public int JustDeactivatedCount;
+        public int MaxActive;
+        public int FinalActive;
+        public Vector3 RestPos;
+        public Quaternion RestOrient;
+        public bool GotFinal;
+    }
+
+    // Drops a Dynamic unit box from Z=10 onto flat terrain and steps until it sleeps (or a hard cap).
+    // Self-contained on the given backend: creates its own terrain + shape + body and cleans them up.
+    // If posLog != null, records the body's position on every step it appears in the active drain -
+    // the trajectory two deterministic runs are compared on.
+    private static DropMetrics RunDropScenario(ILegionPhysicsBackend b, System.Collections.Generic.List<Vector3> posLog)
+    {
+        ShapeId flat = b.CreateHeightFieldShape(new float[N * N], N, N, new Vector3(S, S, S));
+        b.SetTerrain(flat, Vector3.Zero);
+        ShapeId box = b.CreateBoxShape(new Vector3(0.5f, 0.5f, 0.5f));
+
+        var d = BodyDesc.Default;
+        d.Shape = box;
+        d.Position = new Vector3(20f, 20f, 10f);
+        d.MotionType = BodyMotionType.Dynamic;
+        d.Layer = PhysicsLayer.Dynamic;
+        d.StartActive = true;
+        d.UserData = 4242u;
+        BodyId body = b.CreateBody(d);
+
+        var m = new DropMetrics();
+        var buf = new BodyState[8];
+        var chars = new CharacterState[2];
+        var contacts = new ContactReport[64];
+        const int MaxSteps = 1200;
+        int sleptAt = -1;
+
+        for (int i = 0; i < MaxSteps; i++)
+        {
+            StepResult r = b.Step(1f / 60f, buf, chars, contacts);
+            if (r.ActiveBodyCount > m.MaxActive) m.MaxActive = r.ActiveBodyCount;
+            m.FinalActive = r.ActiveBodyCount;
+
+            for (int k = 0; k < r.BodyUpdateCount; k++)
+            {
+                if (!buf[k].Body.Equals(body)) continue;
+                if ((buf[k].Flags & BodyStateFlags.JustActivated) != 0) m.JustActivatedCount++;
+                if ((buf[k].Flags & BodyStateFlags.JustDeactivated) != 0)
+                {
+                    m.JustDeactivatedCount++;
+                    if (!m.GotFinal)
+                    {
+                        m.RestPos = buf[k].Position;
+                        m.RestOrient = buf[k].Orientation;
+                        m.StepsToSleep = i + 1;
+                        m.GotFinal = true;
+                        sleptAt = i;
+                    }
+                }
+                posLog?.Add(buf[k].Position);
+            }
+
+            // Settled: run a few more frames to prove it does NOT re-activate, then stop.
+            if (sleptAt >= 0 && i > sleptAt + 5)
+                break;
+        }
+
+        b.RemoveBody(body);
+        b.ReleaseShape(box);
+        b.ReleaseShape(flat);
+        return m;
+    }
+
+    private static void RunDeterminismCheck()
+    {
+        Console.WriteLine("\n[11] Determinism (two identical DeterministicMode runs, bit-for-bit)");
+        var settings = PhysicsBackendSettings.Default;
+        settings.DeterministicMode = true;
+
+        var logA = new System.Collections.Generic.List<Vector3>();
+        var logB = new System.Collections.Generic.List<Vector3>();
+
+        var a = new JoltPhysicsBackend();
+        a.Initialize(settings);
+        try { RunDropScenario(a, logA); }
+        finally { a.Dispose(); }
+
+        var b = new JoltPhysicsBackend();
+        b.Initialize(settings);
+        try { RunDropScenario(b, logB); }
+        finally { b.Dispose(); }
+
+        Check(logA.Count > 0, $"run A recorded a trajectory ({logA.Count} states)");
+        Check(logA.Count == logB.Count, $"both runs recorded the same number of states (A={logA.Count} B={logB.Count})");
+
+        bool identical = logA.Count == logB.Count;
+        int firstDiff = -1;
+        for (int i = 0; identical && i < logA.Count; i++)
+            if (logA[i] != logB[i]) { identical = false; firstDiff = i; }
+
+        Check(identical, identical
+            ? $"all {logA.Count} recorded transforms bit-identical across runs"
+            : $"DIVERGED at state {firstDiff}: {logA[firstDiff]} vs {logB[firstDiff]}");
     }
 }
