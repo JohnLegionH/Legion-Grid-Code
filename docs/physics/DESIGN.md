@@ -210,6 +210,26 @@ are not silently "corrected" later — they are deliberate, not incidental.
   and must be weighed against the push-behaviour change in (c) above. Tracked, not closed. (M3.5;
   deltas #27-#30.)
 
+- **Avatar QUERY-visibility is part of the avatar model too (M3 #35 RESOLVED via a marker body).** A
+  pure `CharacterVirtual` is not in the broadphase, so RayCast/RayCastAll/Overlap/ShapeCast could not
+  find an avatar at all — `llSensor`, sit-target search and `llCastRay`-at-avatar would silently miss.
+  Fixed with a **kinematic marker body** carried by each avatar on the dedicated `PhysicsLayer.AvatarQuery`
+  layer (UserData = avatar id), synced to the character's transform every step (after `ExtendedUpdate`,
+  before `_system.Update`). **THE COLLISION-vs-QUERY DISTINCTION — read before touching this:** the
+  contact inner body was rejected (#27) because `CollideKinematicVsNonDynamic` HANGS and a solid presence
+  CHANGES PUSH — both are *simulation-collision* failures. The marker sidesteps both by colliding with
+  **NOTHING**: `ShouldCollide(AvatarQuery, *) = false`, so it never enters the solve (no push, no
+  contacts — verified: movement [16]-[24] bit-identical incl. push 2.92 m; the #4 gate still 600→0).
+  A query still finds it because queries walk the broadphase and consult the *query* `ObjectLayerFilter`,
+  NOT the simulation collision matrix — so a body that is toxic-in-the-solve is inert-and-findable for
+  queries. **Do NOT** (a) re-attempt the contact inner body, nor (b) rip out the marker as "redundant
+  with CharacterVirtual" — CharacterVirtual gives contacts (M3.5), the marker gives queries; they are
+  different citizenships. The marker is backend-managed; `RemoveBody` on it is a no-op (owned by its
+  character). **Query-boundary identity contract:** a query hands back the marker's `BodyId`; it IS a
+  valid handle and `TryGetBodyState` returns the avatar's TRANSFORM (position/orientation) — but it is a
+  kinematic marker with no dynamics, so identity is `UserData` (the avatar id), never the `BodyId`, and
+  callers must not treat it as a physical prim. (M4.5; deltas #34-#37.)
+
 - **M5 SCRIPT-DISPATCH CONTRACT for avatar contacts (delta #30) — build M5 to this, do not patch later.**
   An avatar is not a solver body, so its contact reports carry **`BodyId.Invalid` on the avatar side**
   and the **avatar's identity in `UserData`**. Consequences the M5 collision-dispatch layer MUST honour:
