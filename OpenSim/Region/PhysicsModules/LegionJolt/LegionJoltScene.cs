@@ -84,6 +84,16 @@ namespace OpenSim.Region.PhysicsModules.LegionJolt
         private struct TestPrim { public uint LocalId; public UUID Sog; public string Kind; public Vector3 Pos; public Vector3 Size; }
         private readonly List<TestPrim> _testPrims = new List<TestPrim>();
 
+        // M6.3 Task 2: collision-mesh LOD (matches BulletSim's BSParam.MeshLOD default), and the
+        // characterization of the last RAW mesher output cooked (verts/tris/degenerate/duplicate/AABB).
+        private const float MeshLod = 32f;
+        private struct MeshStats
+        {
+            public int Verts, Tris, DegenerateTris, DuplicateVerts, OutOfRangeIndices;
+            public SVector3 Min, Max;
+        }
+        private MeshStats _lastMeshStats;
+
         // Caller-owned step buffers (M1 contract: nothing allocates per frame). Empty world drains
         // nothing; sized modestly for the skeleton and revisited when real actors arrive (M6.4).
         private BodyState[] _bodyBuf = new BodyState[1024];
@@ -185,7 +195,7 @@ namespace OpenSim.Region.PhysicsModules.LegionJolt
             {
                 _consoleRegistered = true;
                 MainConsole.Instance.Commands.AddCommand("Physics", false, "jolt",
-                    "jolt terraintest | terrainslope | terrainhill | hilltest | probe <x> <y> | rezprims | rayprims | clearprims",
+                    "jolt terraintest | terrainslope | terrainhill | hilltest | probe <x> <y> | rezprims | rayprims | rezmesh | rezmeshn <count> | raymesh | clearprims",
                     "Legion Jolt proofs (M6.2 terrain / M6.3 prims): raycast the cooked collision surfaces and report hits.",
                     HandleJoltConsole);
             }
@@ -324,6 +334,55 @@ namespace OpenSim.Region.PhysicsModules.LegionJolt
                 return;
             }
 
+            if (cmd.Length >= 2 && cmd[1] == "rezmesh")
+            {
+                if (_scene == null) { MainConsole.Instance.Output($"{LogHeader} no scene."); return; }
+                ClearTestPrims();
+
+                // A triangular PRISM forces the mesher (not a fast-path shape) and needs NO asset (unlike
+                // a sculpt, which can't mesh synchronously headless). size (4,4,3): a flat triangular top
+                // at z=101.5, inscribed in a 4x4 bbox - the bbox corners are EMPTY (the tetra-vs-bbox test).
+                var pos = new Vector3(120f, 128f, 100f);
+                var size = new Vector3(4f, 4f, 3f);
+                RezTestPrim("prism", pos, size);
+
+                uint id = _testPrims.Count > 0 ? _testPrims[0].LocalId : 0u;
+                string kind = "?";
+                lock (_prims)
+                    if (_prims.TryGetValue(id, out JoltPrim jp)) kind = jp.ShapeKind;
+                MainConsole.Instance.Output($"{LogHeader} rezzed prism id={id} via the real AddPrimShape path -> jolt shape: {kind}  (expect 'mesh(mesher)', NOT basic/bbox).");
+
+                MeshStats s = _lastMeshStats;
+                MainConsole.Instance.Output($"  REAL mesher geometry: verts={s.Verts} tris={s.Tris} degenerate={s.DegenerateTris} duplicateVerts={s.DuplicateVerts} outOfRangeIdx={s.OutOfRangeIndices}");
+                MainConsole.Instance.Output($"    local AABB min=({s.Min.X:0.00},{s.Min.Y:0.00},{s.Min.Z:0.00}) max=({s.Max.X:0.00},{s.Max.Y:0.00},{s.Max.Z:0.00})");
+
+                // Decision-point check (physical -> convex hull, delta #31): cook the SAME prism physical,
+                // inline, purely to confirm routing (cook+release, no body). Real physical dynamics is M6.4.
+                ShapeId hull = CookPrimShape(GetPrismPbs(), size, true, out _, out string hullKind);
+                MainConsole.Instance.Output($"  decision-point: physical prism cooks to '{hullKind}' (expect 'hull(mesher)' - a mesh's Volume=0 would rez a physical prim mass-0; hull avoids it).");
+                if (hull.IsValid) _backend.ReleaseShape(hull);
+
+                MainConsole.Instance.Output($"  now run: jolt raymesh  (grid cast - triangle top HITs ~101.5, empty bbox corners MISS; a box would hit all).");
+                return;
+            }
+
+            if (cmd.Length >= 2 && cmd[1] == "raymesh")
+            {
+                if (_scene == null) { MainConsole.Instance.Output($"{LogHeader} no scene."); return; }
+                RayMesh();
+                return;
+            }
+
+            if (cmd.Length >= 2 && cmd[1] == "rezmeshn")
+            {
+                if (_scene == null) { MainConsole.Instance.Output($"{LogHeader} no scene."); return; }
+                int count = 4;
+                if (cmd.Length >= 3 && int.TryParse(cmd[2], out int c)) count = c;
+                count = Math.Max(1, Math.Min(12, count));
+                RezMeshN(count);
+                return;
+            }
+
             if (cmd.Length >= 2 && cmd[1] == "clearprims")
             {
                 int n = ClearTestPrims();
@@ -331,7 +390,7 @@ namespace OpenSim.Region.PhysicsModules.LegionJolt
                 return;
             }
 
-            MainConsole.Instance.Output("Usage: jolt terraintest | terrainslope | terrainhill | hilltest | probe <x> <y> | rezprims | rayprims | clearprims");
+            MainConsole.Instance.Output("Usage: jolt terraintest | terrainslope | terrainhill | hilltest | probe <x> <y> | rezprims | rayprims | rezmesh | rezmeshn <count> | raymesh | clearprims");
         }
 
         // Build one basic prim with a CANONICAL PrimitiveBaseShape (a real viewer/OAR prim's values,
@@ -345,6 +404,8 @@ namespace OpenSim.Region.PhysicsModules.LegionJolt
                 case "sphere":   pbs = PrimitiveBaseShape.CreateSphere(); break;              // HalfCircle + Curve1
                 case "cylinder": pbs = PrimitiveBaseShape.CreateBox();                        // start from Square+Straight (no-cut, scale 100)
                                  pbs.ProfileShape = ProfileShape.Circle; break;               // -> canonical cylinder: Circle + Straight
+                case "prism":    pbs = PrimitiveBaseShape.CreateBox();                        // triangular section -> forces the mesher
+                                 pbs.ProfileShape = ProfileShape.EquilateralTriangle; break;  // EquilateralTriangle + Straight, no asset
                 default:         pbs = PrimitiveBaseShape.CreateBox(); break;                 // Square + Straight
             }
 
@@ -445,6 +506,113 @@ namespace OpenSim.Region.PhysicsModules.LegionJolt
             MainConsole.Instance.Output($"  ROUND row exp miss (offset 0.566 > radius 0.5; a bbox fallback would instead HIT ~102.000, proving the cross-section is circular).");
         }
 
+        // Closest hit of a single downward-ish cast through the real llCastRay pipeline. null = miss.
+        private ContactResult? CastOne(Vector3 origin, Vector3 dir, float length, RayFilterFlags filter)
+        {
+            var res = _scene.RayCastFiltered(origin, dir, length, 4, filter) as List<ContactResult>;
+            ContactResult? best = null;
+            if (res != null)
+                foreach (var h in res)
+                    if (best == null || h.Depth < best.Value.Depth) best = h;
+            return best;
+        }
+
+        // PERMANENT REGRESSION GUARD for the mesher cache-poisoning bug (delta #38). Rezzes N SEPARATE
+        // identical prisms back-to-back: same size/lod -> same Meshmerizer cache key -> the exact
+        // repeated-content path that a region with N copies of one mesh asset hits at M6.5. Pre-fix,
+        // prim 2..N would get the poisoned shared Mesh and cook to bbox(fallback) (the NotSupportedException
+        // now caught by the guard); post-fix, every prim cooks to mesh(mesher). Each is also cast-verified
+        // as a real triangle (centre HIT, corner MISS) - not a bbox.
+        private void RezMeshN(int count)
+        {
+            ClearTestPrims();
+            var size = new Vector3(4f, 4f, 3f);
+            for (int k = 0; k < count; k++)
+                RezTestPrim("prism", new Vector3(120f + k * 8f, 128f, 100f), size);
+
+            MainConsole.Instance.Output($"{LogHeader} rezzed {count} IDENTICAL prisms (size {size.X}x{size.Y}x{size.Z} -> same Meshmerizer cache key). Per-prim cook + cast:");
+            var filter = RayFilterFlags.land | RayFilterFlags.nonphysical;
+            var dir = new Vector3(0f, 0f, -1f);
+            int clean = 0, realMesh = 0;
+            for (int k = 0; k < _testPrims.Count; k++)
+            {
+                TestPrim tp = _testPrims[k];
+                string kind = "?";
+                lock (_prims)
+                    if (_prims.TryGetValue(tp.LocalId, out JoltPrim jp)) kind = jp.ShapeKind;
+                if (kind == "mesh(mesher)") clean++;
+
+                ContactResult? cHit = CastOne(new Vector3(tp.Pos.X, tp.Pos.Y, 106f), dir, 10f, filter);
+                ContactResult? kMiss = CastOne(new Vector3(tp.Pos.X + 1.8f, tp.Pos.Y + 1.8f, 106f), dir, 10f, filter);
+                bool triProven = cHit.HasValue && !kMiss.HasValue;   // centre hit + corner miss => real triangle
+                if (triProven) realMesh++;
+
+                string centre = cHit.HasValue ? $"HIT@{cHit.Value.Pos.Z:0.00}" : "miss";
+                string corner = kMiss.HasValue ? $"HIT@{kMiss.Value.Pos.Z:0.00}" : "miss";
+                MainConsole.Instance.Output($"  prim {k + 1,-2} id={tp.LocalId,-6} kind={kind,-13} centre={centre,-11} corner={corner,-11} {(triProven ? "real-triangle" : "NOT-triangle")}");
+            }
+
+            bool pass = clean == count && realMesh == count;
+            MainConsole.Instance.Output($"  {clean}/{count} cooked clean (mesh(mesher), cache NOT poisoned); {realMesh}/{count} cast-verified real triangle (centre hit + corner miss).");
+            MainConsole.Instance.Output(pass
+                ? $"  PASS: {count}/{count} repeated identical mesh cooks are clean - delta #38 (cache poisoning) stays fixed."
+                : $"  FAIL: a prim fell to bbox/failed - cache poisoning or cook regression. Investigate before shipping.");
+            MainConsole.Instance.Output($"  (jolt clearprims then jolt raymesh -> all miss.)");
+        }
+
+        // The canonical triangular-prism PrimitiveBaseShape (EquilateralTriangle + Straight) used by the
+        // mesh proof - shared by the real rez and the inline decision-point check.
+        private static PrimitiveBaseShape GetPrismPbs()
+        {
+            PrimitiveBaseShape pbs = PrimitiveBaseShape.CreateBox();
+            pbs.ProfileShape = ProfileShape.EquilateralTriangle;
+            return pbs;
+        }
+
+        // Grid-cast the meshed prism at (120,128,100) size (4,4,3): a triangular top face at z=101.5 that
+        // does NOT fill its 4x4 bbox. Centre is inside the triangle (HIT ~101.5); at least one bbox corner
+        // is empty (MISS). A bounding box (or basic fallback) would HIT all five - so a corner miss with a
+        // centre hit proves Jolt is colliding the ACTUAL triangle surface, not the bbox.
+        private void RayMesh()
+        {
+            const float cx = 120f, cy = 128f;
+            bool haveP = _testPrims.Count > 0;
+            var pts = new (string label, float x, float y)[]
+            {
+                ("centre",       cx,        cy       ),
+                ("corner +X+Y",  cx + 1.8f, cy + 1.8f),
+                ("corner -X+Y",  cx - 1.8f, cy + 1.8f),
+                ("corner +X-Y",  cx + 1.8f, cy - 1.8f),
+                ("corner -X-Y",  cx - 1.8f, cy - 1.8f),
+            };
+            MainConsole.Instance.Output($"{LogHeader} raymesh grid on the prism (via Scene.RayCastFiltered) - {_testPrims.Count} test prim(s) live{(haveP ? "" : " -> expect all MISS")}. bbox top would be z=101.5 everywhere:");
+            MainConsole.Instance.Output($"     point        |  act z   | hit id | note");
+            int hits = 0, misses = 0;
+            var dir = new Vector3(0f, 0f, -1f);
+            var filter = RayFilterFlags.land | RayFilterFlags.nonphysical;
+            foreach (var p in pts)
+            {
+                var origin = new Vector3(p.x, p.y, 106f);
+                var res = _scene.RayCastFiltered(origin, dir, 10f, 4, filter) as List<ContactResult>;
+                ContactResult? best = null;
+                if (res != null)
+                    foreach (var h in res)
+                        if (best == null || h.Depth < best.Value.Depth) best = h;
+                if (best == null)
+                {
+                    misses++;
+                    MainConsole.Instance.Output($"  {p.label,-12} |   miss   |   -    | empty here (bbox would HIT 101.5)");
+                }
+                else
+                {
+                    hits++;
+                    MainConsole.Instance.Output($"  {p.label,-12} | {best.Value.Pos.Z,8:0.000} | {best.Value.ConsumerID,6} | hit real surface");
+                }
+            }
+            MainConsole.Instance.Output($"  -> {hits} hit / {misses} miss. PASS = centre HITs ~101.5 AND corner(s) MISS. A triangle cannot cover all 4 bbox corners");
+            MainConsole.Instance.Output($"     (>=2 always empty, orientation-independent), so a box/bbox fallback would hit all 5 - corner misses prove the real triangle surface.");
+        }
+
         // Decision #3: MaxBodies ceiling tracks TOTAL prim count (every prim is a body), default
         // 65536 for a standard 256 m region, scaling with region AREA for varregions.
         private static int ComputeMaxBodies(uint sizeX, uint sizeY)
@@ -484,7 +652,19 @@ namespace OpenSim.Region.PhysicsModules.LegionJolt
             if (_backend == null || pbs == null)
                 return PhysicsActor.Null;
 
-            var prim = new JoltPrim(this, _backend, localid, primName, pbs, position, size, rotation, isPhysical);
+            // Defence in depth: the cook path is throw-free (CookPrimShape always returns a valid shape -
+            // fast-path, mesh/hull, or bbox fallback), but if body creation ever throws we accept-and-ignore
+            // so one bad prim can never abort a whole region load. Returns PhysicsActor.Null on failure.
+            JoltPrim prim;
+            try
+            {
+                prim = new JoltPrim(this, _backend, localid, primName, pbs, position, size, rotation, isPhysical);
+            }
+            catch (Exception e)
+            {
+                m_log.Warn($"{LogHeader} AddPrimShape failed for '{primName}' (localid {localid}): {e.GetType().Name}: {e.Message}; prim has no physics.");
+                return PhysicsActor.Null;
+            }
             lock (_prims)
                 _prims[localid] = prim;
             return prim;
@@ -497,7 +677,7 @@ namespace OpenSim.Region.PhysicsModules.LegionJolt
         // twisted, sculpt/mesh, non-uniform sphere/cylinder) falls back to a bounding box for now; the
         // real IMesher path is M6.3 Task 2. `axisCorrection` (System.Numerics) is folded into the body
         // orientation by JoltPrim; `kind` is for the proof read-out.
-        internal ShapeId CookPrimShape(PrimitiveBaseShape pbs, Vector3 size, out SQuaternion axisCorrection, out string kind)
+        internal ShapeId CookPrimShape(PrimitiveBaseShape pbs, Vector3 size, bool isPhysical, out SQuaternion axisCorrection, out string kind)
         {
             axisCorrection = SQuaternion.Identity;
             float hx = size.X * 0.5f, hy = size.Y * 0.5f, hz = size.Z * 0.5f;
@@ -535,10 +715,119 @@ namespace OpenSim.Region.PhysicsModules.LegionJolt
                 }
             }
 
-            // Fallback until the IMesher path lands (M6.3 Task 2): a conservative solid bounding box.
+            // Not a basic fast-path shape (cut/hollow/twisted, prism, torus, sculpt, mesh): go through
+            // the meshmerizer (M6.3 Task 2). The convex-vs-mesh decision lives HERE - our equivalent of
+            // BulletSim's BSShapeCollection.CreateGeomMeshOrHull (physical && ShouldUseHulls -> hull;
+            // else mesh). Contract (delta #31): a triangle MeshShape has Volume 0, so a PHYSICAL prim
+            // MUST use the convex hull or it would rez with mass 0 at M6.4 - hence physical -> hull here.
+            ShapeId cooked = CookMeshShape(pbs, size, isPhysical, out kind);
+            if (cooked.IsValid)
+                return cooked;
+
+            // Mesher unavailable / returned nothing usable / cook threw: conservative solid bounding box.
             kind = "bbox(fallback)";
-            m_log.Debug($"{LogHeader} prim shape is not a basic un-cut box/sphere/cylinder - bounding-box fallback until the mesher (M6.3 Task 2).");
             return _backend.CreateBoxShape(new SVector3(hx, hy, hz));
+        }
+
+        // The IMesher path: PrimitiveBaseShape -> IMesher.CreateMesh -> getVertexListAsFloat /
+        // getIndexListAsInt -> CreateMeshShape (non-physical triangle mesh) or CreateConvexHullShape
+        // (physical hull). Returns ShapeId.Invalid on any failure so the caller can fall back. Also
+        // stashes a characterization of the RAW mesher output (_lastMeshStats) for the proof read-out.
+        private ShapeId CookMeshShape(PrimitiveBaseShape pbs, Vector3 size, bool isPhysical, out string kind)
+        {
+            kind = "bbox(fallback)";
+            if (m_mesher == null)
+            {
+                m_log.Warn($"{LogHeader} no IMesher - cannot cook mesh; bounding-box fallback.");
+                return ShapeId.Invalid;
+            }
+
+            // ---- Extract geometry. CRITICAL: the Meshmerizer CACHES and SHARES the Mesh object,
+            // keyed on GetMeshKey(size, lod), and returns the SAME instance for every identical prim
+            // (key ignores isPhysical/convex). getIndexListAsInt()/getVertexListAsFloat() throw
+            // NotSupportedException once m_triangles/m_vertices are null, and releaseSourceMeshData()
+            // nulls exactly those - so calling it POISONS the cache and makes the NEXT identical prim's
+            // extraction throw. Both accessors already return FRESH COPIES, so we own the arrays and must
+            // NOT mutate/release the shared mesh (ReleaseMesh is a no-op anyway; the mesher owns eviction).
+            // Everything the mesher/extraction can throw is inside ONE guard -> a clean bbox fallback,
+            // never a propagating exception that could abort a prim rez or (at 6.5) a whole region load.
+            SVector3[] points;
+            int[] indices;
+            try
+            {
+                // isPhysical:false to the mesher = "do not substitute a bounding box for tiny prims" -
+                // we always want the real triangle soup (BulletSim passes false here for the same reason).
+                IMesh mesh = m_mesher.CreateMesh("legionjolt-prim", pbs, size, MeshLod, false, false, false);
+                if (mesh == null)
+                {
+                    // A sculpt whose asset (texture) has not been fetched meshes to null - it needs the
+                    // async asset path (M6 request-asset delegate) first. Bounding box for now.
+                    m_log.Debug($"{LogHeader} IMesher returned null (unfetched sculpt asset or empty geometry); bounding-box fallback.");
+                    return ShapeId.Invalid;
+                }
+
+                indices = mesh.getIndexListAsInt();          // fresh copy - do NOT release the shared mesh
+                float[] verts = mesh.getVertexListAsFloat(); // fresh copy (flattened x,y,z,...)
+                if (verts == null || indices == null || verts.Length < 12 || indices.Length < 3 || (indices.Length % 3) != 0)
+                {
+                    m_log.Warn($"{LogHeader} mesher geometry unusable (verts={verts?.Length ?? 0}, indices={indices?.Length ?? 0}); bounding-box fallback.");
+                    return ShapeId.Invalid;
+                }
+
+                points = new SVector3[verts.Length / 3];
+                for (int i = 0; i < points.Length; i++)
+                    points[i] = new SVector3(verts[3 * i], verts[3 * i + 1], verts[3 * i + 2]);
+            }
+            catch (Exception e)
+            {
+                m_log.Warn($"{LogHeader} mesher geometry extraction threw ({e.GetType().Name}: {e.Message}); bounding-box fallback.");
+                return ShapeId.Invalid;
+            }
+
+            _lastMeshStats = CharacterizeMesh(points, indices);   // honest read-out of REAL mesher output
+
+            // Cook the Jolt shape. No shape/body exists until one of these RETURNS a handle, so a throw
+            // here creates nothing to leak - caller falls back to a full bbox.
+            try
+            {
+                ShapeId shape = isPhysical
+                    ? _backend.CreateConvexHullShape(points)   // physical: hull (mesh Volume=0 -> mass 0; delta #31)
+                    : _backend.CreateMeshShape(points, indices); // non-physical: real triangle mesh
+                kind = isPhysical ? "hull(mesher)" : "mesh(mesher)";
+                return shape;
+            }
+            catch (Exception e)
+            {
+                m_log.Warn($"{LogHeader} backend cook of mesher output threw ({e.GetType().Name}: {e.Message}); bounding-box fallback.");
+                return ShapeId.Invalid;   // kind stays "bbox(fallback)"
+            }
+        }
+
+        // Characterize RAW mesher output: what real geometry looks like vs the clean-room synthetic
+        // tetra. Duplicate-vertex count uses mm-quantized coords (O(n)); degenerate = topological
+        // (shared index) or near-zero area.
+        private static MeshStats CharacterizeMesh(SVector3[] points, int[] indices)
+        {
+            var s = new MeshStats { Verts = points.Length, Tris = indices.Length / 3 };
+            var min = new SVector3(float.MaxValue); var max = new SVector3(float.MinValue);
+            foreach (var p in points) { min = SVector3.Min(min, p); max = SVector3.Max(max, p); }
+            s.Min = min; s.Max = max;
+
+            var seen = new HashSet<(int, int, int)>();
+            foreach (var p in points)
+                seen.Add(((int)MathF.Round(p.X * 1000f), (int)MathF.Round(p.Y * 1000f), (int)MathF.Round(p.Z * 1000f)));
+            s.DuplicateVerts = points.Length - seen.Count;
+
+            for (int t = 0; t < indices.Length; t += 3)
+            {
+                int a = indices[t], b = indices[t + 1], c = indices[t + 2];
+                if (a == b || b == c || a == c) { s.DegenerateTris++; continue; }
+                float area2 = SVector3.Cross(points[b] - points[a], points[c] - points[a]).Length();
+                if (area2 < 1e-9f) s.DegenerateTris++;
+                bool bad = a < 0 || b < 0 || c < 0 || a >= points.Length || b >= points.Length || c >= points.Length;
+                if (bad) s.OutOfRangeIndices++;
+            }
+            return s;
         }
 
         // BulletSim's cut test, verbatim: an un-cut basic shape has no profile/path cut, hollow, twist,

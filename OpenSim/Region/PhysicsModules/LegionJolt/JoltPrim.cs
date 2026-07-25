@@ -66,7 +66,7 @@ namespace OpenSim.Region.PhysicsModules.LegionJolt
 
         private void Build()
         {
-            _shape = _module.CookPrimShape(_pbs, _size, out _axisCorrection, out _shapeKind);
+            _shape = _module.CookPrimShape(_pbs, _size, _isPhysical, out _axisCorrection, out _shapeKind);
 
             BodyDesc desc = BodyDesc.Default;
             desc.Shape = _shape;
@@ -86,7 +86,7 @@ namespace OpenSim.Region.PhysicsModules.LegionJolt
         {
             if (!_body.IsValid) { Build(); return; }
             ShapeId old = _shape;
-            _shape = _module.CookPrimShape(_pbs, _size, out _axisCorrection, out _shapeKind);
+            _shape = _module.CookPrimShape(_pbs, _size, _isPhysical, out _axisCorrection, out _shapeKind);
             _backend.SetBodyShape(_body, _shape, recomputeMass: false);
             _backend.SetBodyTransform(_body, ToS(_position), BodyOrientation(), false);
             if (old.IsValid)
