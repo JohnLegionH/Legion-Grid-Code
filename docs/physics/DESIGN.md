@@ -100,9 +100,19 @@ These need answers before implementation, not during:
    far finer than prims, stacking, or vehicles need. Jolt's double mode targets
    unpartitioned mega-worlds; OpenSim partitions into regions, so it does not apply.
 
-3. **`MaxBodies` sizing.** Jolt preallocates. Too low and rez fails at a hard
+3. **`MaxBodies` sizing.** ~~Jolt preallocates. Too low and rez fails at a hard
    ceiling; too high and every region pays the memory. Probably wants to be a
-   region config value derived from prim limits rather than a constant.
+   region config value derived from prim limits rather than a constant.~~
+   **RESOLVED (config-driven, computed default):** a `[JoltPhysics] MaxBodies` ini
+   key, default **65536** for a standard 256 m region, scaling with region AREA for
+   varregions. Rationale: EVERY prim is a body, including non-physical ones (the
+   Static layer), so the ceiling tracks TOTAL prim count, not physical-body count —
+   a full region plus attachments and avatars needs headroom well past ~45k. Hard
+   requirements attached: (a) exhausting `MaxBodies` must FAIL the rez with a clear
+   log line and NEVER crash the sim (Jolt preallocates; the ceiling is real and
+   hard); (b) log PEAK body count at region shutdown so operators can tune on
+   evidence. The ini plumbing is M6 integration work — this records the decision
+   only. Varregion TILING (decision #1) stays OPEN.
 
 4. **Persist-contact filtering.** An avatar standing still generates a contact
    event every step forever. The `WantsContactEvents` flag on the body record
