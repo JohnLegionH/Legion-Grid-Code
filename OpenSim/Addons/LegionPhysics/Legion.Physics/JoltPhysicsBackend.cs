@@ -474,27 +474,85 @@ namespace Legion.Physics.Jolt
             return RegisterShape(shape);
         }
 
-        public ShapeId CreateSphereShape(float radius) => throw new NotImplementedException();
-        public ShapeId CreateCapsuleShape(float halfHeight, float radius) => throw new NotImplementedException();
-        public ShapeId CreateCylinderShape(float halfHeight, float radius) => throw new NotImplementedException();
-        public ShapeId CreateConvexHullShape(ReadOnlySpan<Vector3> points) => throw new NotImplementedException();
+        public ShapeId CreateSphereShape(float radius)
+            => RegisterShape(new SphereShape(MathF.Max(0.001f, radius)));
+
+        public ShapeId CreateCapsuleShape(float halfHeight, float radius)
+            => RegisterShape(new CapsuleShape(MathF.Max(0.001f, halfHeight), MathF.Max(0.001f, radius)));
+
+        public ShapeId CreateCylinderShape(float halfHeight, float radius)
+        {
+            float hh = MathF.Max(0.001f, halfHeight);
+            float r = MathF.Max(0.001f, radius);
+            // Jolt's CylinderShape axis is Y (like the capsule); prim orientation is the layer's job.
+            // Convex radius must be <= min(radius, halfHeight) or Jolt asserts - clamp like the box path.
+            float cr = MathF.Max(0f, MathF.Min(DefaultConvexRadius, MathF.Min(r, hh) * 0.1f));
+            using var settings = new CylinderShapeSettings(hh, r, cr);
+            return RegisterShape(settings.Create());
+        }
+
+        public ShapeId CreateConvexHullShape(ReadOnlySpan<Vector3> points)
+        {
+            if (points.Length < 4)
+                throw new ArgumentException($"convex hull needs >= 4 points; got {points.Length}.");
+            using var settings = new ConvexHullShapeSettings(points, DefaultConvexRadius);
+            return RegisterShape(settings.Create());
+        }
 
         public ShapeId CreateMeshShape(ReadOnlySpan<Vector3> vertices, ReadOnlySpan<int> indices)
         {
-            // Cook once per ASSET, never per prim. Key the cache on the mesh
-            // asset UUID plus LOD, and hand the same ShapeId to every prim that
-            // references it. Cooking is the single most expensive operation here
-            // and re-cooking per prim is how region startup gets slow.
-            throw new NotImplementedException();
+            // Cook once per ASSET, never per prim. Key the cache on the mesh asset UUID plus LOD, and
+            // hand the same ShapeId to every prim that references it. Cooking is the single most
+            // expensive operation here and re-cooking per prim is how region startup gets slow.
+            // NOTE: a MeshShape reports Volume 0 (Jolt does not integrate triangle-soup volume), so a
+            // DYNAMIC body on a mesh gets the clamped fallback mass - meshes are meant to be static.
+            if (indices.Length % 3 != 0)
+                throw new ArgumentException($"mesh index count {indices.Length} is not a multiple of 3.");
+            int triCount = indices.Length / 3;
+            var tris = new IndexedTriangle[triCount];
+            for (int t = 0; t < triCount; t++)
+                tris[t] = new IndexedTriangle(indices[t * 3], indices[t * 3 + 1], indices[t * 3 + 2], 0u, 0u);
+            var verts = vertices.ToArray();
+            using var settings = new MeshShapeSettings(verts.AsSpan(), tris.AsSpan());
+            return RegisterShape(settings.Create());
         }
 
         public ShapeId CreateCompoundShape(ReadOnlySpan<CompoundChild> children)
         {
-            // Linksets. Prefer StaticCompoundShape when the linkset is rigid -
-            // it builds a small internal tree and is markedly faster to query
-            // than MutableCompoundShape. Use the mutable variant only where
-            // link/unlink happens at runtime.
-            throw new NotImplementedException();
+            // Linksets. StaticCompoundShape (not mutable) builds a small internal tree and is markedly
+            // faster to query - the right choice for a rigid linkset. Each child's UserData is stored in
+            // order so a raycast/contact hit can name WHICH child prim was struck: Jolt encodes the
+            // child index in the LOW SubShapeIDBitsRecursive bits of the hit's SubShapeID (verified),
+            // which we decode in ResolveChildUserData.
+            if (children.Length == 0)
+                throw new ArgumentException("compound shape needs at least one child.");
+
+            var childUserData = new uint[children.Length];
+            using var settings = new StaticCompoundShapeSettings();
+            for (int i = 0; i < children.Length; i++)
+            {
+                CompoundChild c = children[i];
+                if (!_shapes.TryGet(c.Shape.Value, out JoltShapeRecord childRec) || childRec.NativeShape == null)
+                    throw new ArgumentException($"CreateCompoundShape: child {i} ({c.Shape}) is not a live shape.");
+                // Create() AddRefs each child, so the child native survives via the compound even after
+                // the caller releases the child's Legion handle.
+                settings.AddShape(c.Position, c.Orientation, childRec.NativeShape, c.UserData);
+                childUserData[i] = c.UserData;
+            }
+
+            // The compound's own index bits: smallest b with (1<<b) >= childCount (0 for a single child).
+            int bits = 0;
+            while ((1 << bits) < children.Length) bits++;
+
+            var rec = new JoltShapeRecord
+            {
+                NativeShape = settings.Create(),
+                RefCount = 1,
+                IsWrapper = true,
+                CompoundChildUserData = childUserData,
+                CompoundIndexBits = bits,
+            };
+            return new ShapeId(_shapes.Add(rec));
         }
 
         public ShapeId CreateHeightFieldShape(
@@ -580,12 +638,26 @@ namespace Legion.Physics.Jolt
 
         public ShapeId CreateScaledShape(ShapeId baseShape, Vector3 scale)
         {
-            // The whole reason this is on the interface. Prim resize wraps the
-            // cooked shape in a ScaledShape - cheap, shares the underlying
-            // geometry, no re-cook. Non-uniform scale is supported for convex
-            // and mesh shapes but NOT for spheres/capsules; the layer above must
-            // degrade those to something else or clamp to uniform.
-            throw new NotImplementedException();
+            // The whole reason this is on the interface: prim resize wraps the cooked shape in a
+            // ScaledShape - cheap, shares the underlying geometry, no re-cook. Verified per-type in
+            // 2.18.6: box/hull/mesh accept ANY scale (incl. mirror/tri-non-uniform); sphere/capsule
+            // reject non-uniform (MakeScaleValid uniform-ises to the mean); cylinder allows an axial
+            // scale with UNIFORM radial only. We MakeScaleValid so we never cook a distorted/invalid
+            // shape; the layer above can pre-check IsValidScale if it wants to degrade differently
+            // (e.g. swap a non-uniformly-scaled sphere for an ellipsoid hull) rather than accept the clamp.
+            if (!_shapes.TryGet(baseShape.Value, out JoltShapeRecord baseRec) || baseRec.NativeShape == null)
+                throw new ArgumentException($"CreateScaledShape: {baseShape} is not a live shape.");
+
+            Vector3 valid = baseRec.NativeShape.MakeScaleValid(scale);
+            using var settings = new ScaledShapeSettings(baseRec.NativeShape, valid);
+            var rec = new JoltShapeRecord
+            {
+                NativeShape = settings.Create(),  // AddRefs the base; base survives via its own Legion handle
+                RefCount = 1,
+                IsWrapper = true,
+                BaseShape = baseShape,
+            };
+            return new ShapeId(_shapes.Add(rec));
         }
 
         public void AddShapeRef(ShapeId shape)
@@ -767,7 +839,32 @@ namespace Legion.Physics.Jolt
 
         public bool IsBodyValid(BodyId body) => _bodies.IsValid(body.Value);
 
-        public void SetBodyShape(BodyId body, ShapeId shape, bool recomputeMass) => throw new NotImplementedException();
+        public void SetBodyShape(BodyId body, ShapeId shape, bool recomputeMass)
+        {
+            if (!TryResolve(body, out JoltBodyRecord rec, out BodyID jid))
+                return;
+            if (!_shapes.TryGet(shape.Value, out JoltShapeRecord shapeRec) || shapeRec.NativeShape == null)
+                throw new ArgumentException($"SetBodyShape: {shape} is not a live shape handle.");
+            // Do not wake the body just because its shape changed (activation stays the caller's call).
+            _bodyInterface.SetShape(jid, shapeRec.NativeShape, recomputeMass, Activation.DontActivate);
+            rec.Shape = shape;
+        }
+
+        // Map a hit's SubShapeID to the struck child's UserData for a compound (linkset) body. Jolt puts
+        // the child index in the LOW CompoundIndexBits of the SubShapeID (root shape peels first, from
+        // the low end - so even a mesh child's own sub-bits sit ABOVE these). Non-compound => 0.
+        private uint ResolveChildUserData(JoltBodyRecord? bodyRec, uint subShapeId)
+        {
+            if (bodyRec == null)
+                return 0u;
+            if (!_shapes.TryGet(bodyRec.Shape.Value, out JoltShapeRecord shapeRec) || shapeRec.CompoundChildUserData == null)
+                return 0u;
+            uint[] list = shapeRec.CompoundChildUserData;
+            int bits = shapeRec.CompoundIndexBits;
+            uint mask = bits >= 32 ? uint.MaxValue : (1u << bits) - 1u;
+            int idx = (int)(subShapeId & mask);
+            return (idx >= 0 && idx < list.Length) ? list[idx] : 0u;
+        }
 
         public void SetBodyMotionType(BodyId body, BodyMotionType motionType, bool activate)
         {
@@ -1387,7 +1484,7 @@ namespace Legion.Physics.Jolt
             {
                 Body = rec != null ? new BodyId(rec.Handle) : BodyId.Invalid,
                 UserData = rec != null ? rec.UserData : 0u,
-                ChildUserData = 0u,
+                ChildUserData = ResolveChildUserData(rec, result.subShapeID2),
                 Point = point,
                 Normal = normal,
                 Distance = maxDistance * result.Fraction,
@@ -1686,8 +1783,10 @@ namespace Legion.Physics.Jolt
         public Shape? InnerShape;         // private inner shape OWNED by this wrapper (e.g. the Y-up
                                           // heightfield under a Z-up RotatedTranslatedShape); disposed with it
         public int RefCount;
-        public bool IsWrapper;            // decorator wrapper (rotated/translated/scaled) over an inner shape
-        public ShapeId BaseShape;         // caller-visible wrapped shape (future CreateScaledShape); Invalid otherwise
+        public bool IsWrapper;            // decorator wrapper (rotated/translated/scaled) or compound over other shapes
+        public ShapeId BaseShape;         // caller-visible wrapped shape (CreateScaledShape); Invalid otherwise
+        public uint[]? CompoundChildUserData; // ordered child UserData for a StaticCompound; null otherwise
+        public int CompoundIndexBits;     // low bits of a hit SubShapeID that encode the compound child index
     }
 
     internal sealed class JoltCharacterRecord

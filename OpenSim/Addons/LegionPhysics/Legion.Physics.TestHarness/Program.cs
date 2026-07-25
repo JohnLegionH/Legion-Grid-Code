@@ -497,6 +497,120 @@ internal static class Program
             Console.WriteLine($"      NOTE avatar-avatar CONTACT REPORTS = {avAvContacts} (physical collision confirmed via push/block above)");
             backend.RemoveCharacter(a1); backend.RemoveCharacter(a2);
 
+            // ================= MILESTONE 4 TASK 1 - SHAPES =================
+
+            // ---- 29. SPHERE: cooks, rests on terrain, raycast hits real surface, mass spot-check. ----
+            Console.WriteLine("\n[29] Sphere: cook, raycast top, mass = (4/3)pi r^3 * density");
+            ShapeId sphere = backend.CreateSphereShape(0.5f);
+            Check(sphere.IsValid, $"sphere cooked -> {sphere}");
+            float sphereTop = RayTopOf(backend, sphere, new Vector3(10f, 10f, 5f), 5001u, out BodyId sphereBody);
+            Check(MathF.Abs(sphereTop - 5.5f) < 0.05f, $"raycast hits sphere top ~5.5 (got {sphereTop:0.000})");
+            // mass via impulse (gravityFactor 0 isolates): sphere volume 0.5236 m^3 * 1000 = 523.6 kg
+            const float SphereHandMass = (float)(4.0 / 3.0 * Math.PI * 0.125) * 1000f;
+            var sd = BodyDesc.Default; sd.Shape = sphere; sd.Position = new Vector3(12f, 12f, 20f);
+            sd.MotionType = BodyMotionType.Dynamic; sd.Layer = PhysicsLayer.Dynamic; sd.GravityFactor = 0f; sd.StartActive = true;
+            BodyId sphereDyn = backend.CreateBody(sd);
+            backend.TryGetBodyState(sphereDyn, out BodyState sb0);
+            backend.ApplyImpulse(sphereDyn, new Vector3(0f, 0f, SphereHandMass * 2f)); // Δv should be 2.0
+            backend.TryGetBodyState(sphereDyn, out BodyState sb1);
+            float sdv = sb1.LinearVelocity.Z - sb0.LinearVelocity.Z;
+            float sphereInferred = sdv != 0f ? (SphereHandMass * 2f) / sdv : float.NaN;
+            Console.WriteLine($"      sphere hand mass {SphereHandMass:0.0} kg; impulse -> Δv {sdv:0.000} -> inferred {sphereInferred:0.0} kg");
+            Check(MathF.Abs(sphereInferred - SphereHandMass) < 1f, $"computed sphere mass matches (4/3)pi r^3*1000 = {SphereHandMass:0.0} (got {sphereInferred:0.0})");
+            backend.RemoveBody(sphereBody); backend.RemoveBody(sphereDyn);
+
+            // ---- 30. CAPSULE / CYLINDER / CONVEX HULL: cook + raycast real surface. ----
+            Console.WriteLine("\n[30] Capsule / Cylinder / ConvexHull cook + raycast");
+            ShapeId capsule = backend.CreateCapsuleShape(0.5f, 0.3f);   // total half-height 0.5+0.3=0.8
+            ShapeId cylinder = backend.CreateCylinderShape(0.5f, 0.3f); // Y-axis cylinder, half-height 0.5
+            System.Numerics.Vector3[] tetraPts = { new(0, 0, 0), new(1, 0, 0), new(0, 1, 0), new(0, 0, 1) };
+            ShapeId hull = backend.CreateConvexHullShape(tetraPts);
+            Check(capsule.IsValid && cylinder.IsValid && hull.IsValid, "capsule, cylinder, hull all cooked");
+            // Jolt's capsule AND cylinder axes are Y, so their Z half-extent is the radius (0.3) - both
+            // rest with top at centre+0.3. Standing a capsule/cylinder prim up is the layer's orientation
+            // job (like the avatar capsule we rotate Y->Z). Noted for M6.
+            float capTop = RayTopOf(backend, capsule, new Vector3(14f, 14f, 5f), 5002u, out BodyId capB);
+            Check(MathF.Abs(capTop - 5.3f) < 0.06f, $"capsule (Y-axis) top ~5.3 (radius 0.3) (got {capTop:0.000})");
+            float cylTop = RayTopOf(backend, cylinder, new Vector3(16f, 16f, 5f), 5003u, out BodyId cylB);
+            Check(MathF.Abs(cylTop - 5.3f) < 0.06f, $"cylinder (Y-axis) top ~5.3 (radius 0.3) (got {cylTop:0.000})");
+            backend.RemoveBody(capB); backend.RemoveBody(cylB);
+
+            // ---- 31. MESH: a tetrahedron - raycast hits the REAL surface, MISSES inside the bbox. ----
+            Console.WriteLine("\n[31] Mesh (tetra): raycast hits real surface, misses the empty bbox corner");
+            var mv = new System.Numerics.Vector3[] { new(0, 0, 0), new(2, 0, 0), new(0, 2, 0), new(0, 0, 2) };
+            var mi = new int[] { 0, 2, 1, 0, 1, 3, 0, 3, 2, 1, 2, 3 };
+            ShapeId mesh = backend.CreateMeshShape(mv, mi);
+            Check(mesh.IsValid, $"mesh cooked -> {mesh}");
+            var meshDesc = BodyDesc.Default; meshDesc.Shape = mesh; meshDesc.Position = new Vector3(40f, 40f, 0f);
+            meshDesc.MotionType = BodyMotionType.Static; meshDesc.Layer = PhysicsLayer.Static; meshDesc.UserData = 5004u;
+            BodyId meshBody = backend.CreateBody(meshDesc);
+            bool inHit = backend.RayCast(new Vector3(40.2f, 40.2f, 20f), new Vector3(0, 0, -1), 40f, QueryFilter.All, out RayHit meshIn);
+            bool outHit = backend.RayCast(new Vector3(41.5f, 41.5f, 20f), new Vector3(0, 0, -1), 40f, QueryFilter.All, out RayHit meshOut);
+            bool outHitMesh = outHit && meshOut.Body.Equals(meshBody); // vs falling through to terrain below
+            Console.WriteLine($"      inside footprint (40.2,40.2): {(inHit ? $"HIT z={meshIn.Point.Z:0.00}" : "miss")}   bbox-corner (41.5,41.5): {(outHitMesh ? "HIT mesh" : outHit ? $"through to terrain z={meshOut.Point.Z:0.00}" : "miss")}");
+            Check(inHit && meshIn.Body.Equals(meshBody) && MathF.Abs(meshIn.Point.Z - 1.6f) < 0.1f, $"ray hits the tetra face (z~1.6, x+y+z=2 plane) (got {(inHit ? meshIn.Point.Z.ToString("0.00") : "miss")})");
+            Check(!outHitMesh, "ray through the EMPTY bbox corner does NOT hit the mesh (real surface, not bounding box)");
+            backend.RemoveBody(meshBody);
+
+            // ---- 32. COMPOUND: two boxes with distinct child UserData; raycast resolves ChildUserData. ----
+            Console.WriteLine("\n[32] Compound (linkset): raycast resolves the struck child's UserData");
+            ShapeId childBox = backend.CreateBoxShape(new Vector3(0.5f, 0.5f, 0.5f));
+            var kids = new CompoundChild[]
+            {
+                new CompoundChild { Shape = childBox, Position = new Vector3(-1f, 0f, 0f), Orientation = System.Numerics.Quaternion.Identity, UserData = 8001u },
+                new CompoundChild { Shape = childBox, Position = new Vector3( 1f, 0f, 0f), Orientation = System.Numerics.Quaternion.Identity, UserData = 8002u },
+            };
+            ShapeId compound = backend.CreateCompoundShape(kids);
+            Check(compound.IsValid, $"compound cooked -> {compound}");
+            var compDesc = BodyDesc.Default; compDesc.Shape = compound; compDesc.Position = new Vector3(50f, 50f, 5f);
+            compDesc.MotionType = BodyMotionType.Static; compDesc.Layer = PhysicsLayer.Static; compDesc.UserData = 8000u;
+            BodyId compBody = backend.CreateBody(compDesc);
+            backend.RayCast(new Vector3(49f, 50f, 20f), new Vector3(0, 0, -1), 40f, QueryFilter.All, out RayHit hitL); // child at -1 -> world 49
+            backend.RayCast(new Vector3(51f, 50f, 20f), new Vector3(0, 0, -1), 40f, QueryFilter.All, out RayHit hitR); // child at +1 -> world 51
+            Console.WriteLine($"      hit left child ChildUserData={hitL.ChildUserData} (want 8001); right ChildUserData={hitR.ChildUserData} (want 8002); body UserData={hitL.UserData}");
+            Check(hitL.Body.Equals(compBody) && hitL.ChildUserData == 8001u, $"left child resolves ChildUserData 8001 (got {hitL.ChildUserData})");
+            Check(hitR.Body.Equals(compBody) && hitR.ChildUserData == 8002u, $"right child resolves ChildUserData 8002 (got {hitR.ChildUserData})");
+            Check(hitL.UserData == 8000u, $"compound body UserData is the linkset root 8000 (got {hitL.UserData})");
+            backend.RemoveBody(compBody); backend.ReleaseShape(compound);
+
+            // ---- 33. SCALED SHAPE: box takes non-uniform scale; sphere non-uniform CLAMPS to uniform. ----
+            Console.WriteLine("\n[33] CreateScaledShape: box non-uniform applied; sphere non-uniform clamped; SetBodyShape swap");
+            ShapeId baseBox = backend.CreateBoxShape(new Vector3(0.5f, 0.5f, 0.5f));
+            ShapeId scaledBox = backend.CreateScaledShape(baseBox, new Vector3(2f, 1f, 3f)); // half -> (1.0, 0.5, 1.5)
+            var scDesc = BodyDesc.Default; scDesc.Shape = scaledBox; scDesc.Position = new Vector3(56f, 56f, 10f);
+            scDesc.MotionType = BodyMotionType.Static; scDesc.Layer = PhysicsLayer.Static; scDesc.UserData = 5005u;
+            BodyId scBody = backend.CreateBody(scDesc);
+            backend.RayCast(new Vector3(56f, 56f, 30f), new Vector3(0, 0, -1), 40f, QueryFilter.All, out RayHit scTop);
+            bool scIn = backend.RayCast(new Vector3(56.9f, 56f, 30f), new Vector3(0, 0, -1), 40f, QueryFilter.All, out RayHit scInH);
+            bool scOut = backend.RayCast(new Vector3(57.1f, 56f, 30f), new Vector3(0, 0, -1), 40f, QueryFilter.All, out RayHit scOutH);
+            bool scInBox = scIn && scInH.Body.Equals(scBody);
+            bool scOutBox = scOut && scOutH.Body.Equals(scBody); // false = fell through to terrain (X beyond 1.0)
+            Console.WriteLine($"      scaled box top z={scTop.Point.Z:0.00} (want 11.5); x=56.9 {(scInBox ? "hits box" : "misses box")}, x=57.1 {(scOutBox ? "hits box" : "misses box")}");
+            Check(MathF.Abs(scTop.Point.Z - 11.5f) < 0.06f, $"box scaled non-uniformly in Z (top 11.5) (got {scTop.Point.Z:0.00})");
+            Check(scInBox && !scOutBox, "box X half-extent doubled to 1.0 (56.9 hits box, 57.1 does not = non-uniform X applied)");
+
+            ShapeId baseSphere = backend.CreateSphereShape(0.5f);
+            ShapeId scaledSphere = backend.CreateScaledShape(baseSphere, new Vector3(2f, 1f, 1f)); // invalid -> clamps uniform ~1.333
+            var ssDesc = BodyDesc.Default; ssDesc.Shape = scaledSphere; ssDesc.Position = new Vector3(60f, 60f, 10f);
+            ssDesc.MotionType = BodyMotionType.Static; ssDesc.Layer = PhysicsLayer.Static; ssDesc.UserData = 5006u;
+            BodyId ssBody = backend.CreateBody(ssDesc);
+            backend.RayCast(new Vector3(60f, 60f, 30f), new Vector3(0, 0, -1), 40f, QueryFilter.All, out RayHit ssTop);
+            bool ss09 = backend.RayCast(new Vector3(60.9f, 60f, 30f), new Vector3(0, 0, -1), 40f, QueryFilter.All, out RayHit ss09H);
+            bool ss09Sphere = ss09 && ss09H.Body.Equals(ssBody); // would hit if X had stretched to half 1.0
+            Console.WriteLine($"      scaled-sphere top z={ssTop.Point.Z:0.00} (uniform clamp -> ~0.667 radius -> 10.667); x=60.9 {(ss09Sphere ? "hits sphere" : "misses sphere")}");
+            Check(MathF.Abs(ssTop.Point.Z - 10.667f) < 0.06f, $"sphere non-uniform scale CLAMPED to uniform (top ~10.667, radius 0.667) (got {ssTop.Point.Z:0.00})");
+            Check(!ss09Sphere, "sphere did NOT stretch to X half 1.0 (non-uniform clamped to uniform, not distorted)");
+
+            // SetBodyShape: swap the scaled box body to the plain sphere and confirm the new surface.
+            backend.SetBodyShape(scBody, sphere, recomputeMass: false);
+            backend.RayCast(new Vector3(56f, 56f, 30f), new Vector3(0, 0, -1), 40f, QueryFilter.All, out RayHit swapTop);
+            Console.WriteLine($"      after SetBodyShape(box->sphere r0.5): top z={swapTop.Point.Z:0.00} (want 10.5)");
+            Check(MathF.Abs(swapTop.Point.Z - 10.5f) < 0.06f, $"SetBodyShape swapped the shape (top now 10.5) (got {swapTop.Point.Z:0.00})");
+
+            backend.RemoveBody(scBody); backend.RemoveBody(ssBody);
+            backend.ReleaseShape(scaledBox); backend.ReleaseShape(scaledSphere); backend.ReleaseShape(baseBox); backend.ReleaseShape(baseSphere);
+            backend.ReleaseShape(sphere); backend.ReleaseShape(capsule); backend.ReleaseShape(cylinder); backend.ReleaseShape(hull); backend.ReleaseShape(mesh); backend.ReleaseShape(childBox);
+
             // cleanup
             backend.RemoveBody(boxBody);
 
@@ -527,8 +641,8 @@ internal static class Program
 
         Console.WriteLine();
         Console.WriteLine(_fails == 0
-            ? "=== M1+M2+M3+M3.5 HARNESS: PASS ==="
-            : $"=== M1+M2+M3+M3.5 HARNESS: FAIL ({_fails} failed check(s)) ===");
+            ? "=== M1..M4T1 HARNESS: PASS ==="
+            : $"=== M1..M4T1 HARNESS: FAIL ({_fails} failed check(s)) ===");
         return _fails == 0 ? 0 : 1;
     }
 
@@ -672,6 +786,17 @@ internal static class Program
         b.RemoveBody(box);
         b.ReleaseShape(boxShape);
         return (boxDx, noTunnel);
+    }
+
+    // Places a static body with `shape` at `pos` and raycasts straight down onto it from above,
+    // returning the surface Z (or NaN on miss). Leaves the body in place (caller removes it).
+    private static float RayTopOf(ILegionPhysicsBackend b, ShapeId shape, Vector3 pos, uint ud, out BodyId body)
+    {
+        var d = BodyDesc.Default;
+        d.Shape = shape; d.Position = pos; d.MotionType = BodyMotionType.Static; d.Layer = PhysicsLayer.Static; d.UserData = ud;
+        body = b.CreateBody(d);
+        bool hit = b.RayCast(new Vector3(pos.X, pos.Y, pos.Z + 50f), new Vector3(0, 0, -1), 100f, QueryFilter.All, out RayHit h);
+        return hit && h.Body.Equals(body) ? h.Point.Z : float.NaN;
     }
 
     // Steps an avatar with `vel` for `steps`, tallying its contact reports (side A == avatarUd) by
