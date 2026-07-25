@@ -83,6 +83,9 @@ namespace Legion.Physics.Jolt
         private readonly ConcurrentDictionary<uint, JoltBodyRecord> _joltToRecord =
             new ConcurrentDictionary<uint, JoltBodyRecord>();
 
+        // Current terrain body (SetTerrain replaces it). BodyId.Invalid = none.
+        private BodyId _terrainBody = BodyId.Invalid;
+
         // Box convex radius is clamped to min(this, 0.1 * smallest half-extent) so Jolt never
         // asserts "convex radius larger than shape".
         private const float DefaultConvexRadius = 0.05f;
@@ -402,9 +405,11 @@ namespace Legion.Physics.Jolt
             ReadOnlySpan<float> heights, int sampleCountX, int sampleCountY, Vector3 scale)
         {
             // Jolt HeightFieldShape is SQUARE (one sample count) and Y-UP: a sample at grid
-            // (x,y) sits at offset + scale * (x, height, y) - the height axis is Jolt's Y and the
-            // grid spans X and Z. A Z-up region therefore needs the terrain BODY rotated at
-            // placement (SetTerrain, later); the shape is cooked here in Jolt-local space.
+            // (col,row) sits at scale * (col, height, row) - the height axis is Jolt's Y and the
+            // grid spans X and Z. Legion's world is Z-up (gravity -Z), so we HIDE the Jolt quirk
+            // inside this method (nothing above ILegionPhysicsBackend knows Jolt exists): cook the
+            // Y-up field, then wrap it in a RotatedTranslatedShape and return the WRAPPER's handle,
+            // which is already Z-up-correct and self-consistent for any caller/query. See below.
             //
             // Sample-count constraint (verified empirically vs joltc 2.18.6 - see MILESTONE1
             // notes): the managed HeightFieldShapeSettings exposes NO block-size / bits-per-sample
@@ -425,18 +430,51 @@ namespace Legion.Physics.Jolt
             if (heights.Length < n * n)
                 throw new ArgumentException($"height buffer too small: need {n * n} samples, got {heights.Length}.");
 
-            // settings copies the samples into native storage during construction, so a
-            // cook-time temp array is fine (this path runs once per terrain asset, not per frame).
+            // The caller's `scale` is in Legion Z-up terms: (X spacing, Y spacing, height scale).
+            // Jolt wants (X spacing, HEIGHT scale, Z spacing), so swap Y<->Z going in.
+            Vector3 joltScale = new Vector3(scale.X, scale.Z, scale.Y);
+
+            // settings copies the samples into native storage during construction, so a cook-time
+            // temp array is fine (this path runs once per terrain asset, not per frame).
             float[] samples = heights.Slice(0, n * n).ToArray();
             Vector3 offset = Vector3.Zero;
-            Vector3 scl = scale;
-            var settings = new HeightFieldShapeSettings(samples, offset, scl, n);
+            Shape inner;
+            var hfSettings = new HeightFieldShapeSettings(samples, offset, joltScale, n);
+            try { inner = hfSettings.Create(); }
+            finally { hfSettings.Dispose(); }
+
             try
             {
-                Shape shape = settings.Create();
-                return RegisterShape(shape);
+                // R_x(+90) sends Jolt's +Y (height) to world +Z (up). A proper rotation can't also
+                // keep the row axis on +Y (that swap is a reflection), so it lands on -Y; the
+                // (N-1)*Yspacing translation lifts the field back into the +Y quadrant. Net: the
+                // shape, placed at the origin, occupies X in [0,(N-1)*sx], Y in [0,(N-1)*sy], with
+                // height along +Z. (In-plane the row index is mirrored - a sample-ordering detail
+                // that the terrain-feed / varregion decision will pin down; height-on-Z is the
+                // part that must be right, and is verified empirically by the Task 5 harness.)
+                Vector3 posW = new Vector3(0f, (n - 1) * scale.Y, 0f);
+                Quaternion rot = Quaternion.CreateFromAxisAngle(Vector3.UnitX, MathF.PI / 2f);
+
+                Shape wrapper;
+                using (var wrapSettings = new RotatedTranslatedShapeSettings(posW, rot, inner))
+                    wrapper = wrapSettings.Create();
+
+                // The wrapper OWNS the inner shape (private, not caller-visible): both are disposed
+                // together when this handle's RefCount hits 0.
+                var rec = new JoltShapeRecord
+                {
+                    NativeShape = wrapper,
+                    InnerShape = inner,
+                    RefCount = 1,
+                    IsWrapper = true,
+                };
+                return new ShapeId(_shapes.Add(rec));
             }
-            finally { settings.Dispose(); }
+            catch
+            {
+                inner.Dispose();
+                throw;
+            }
         }
 
         public ShapeId CreateScaledShape(ShapeId baseShape, Vector3 scale)
@@ -464,8 +502,12 @@ namespace Legion.Physics.Jolt
                 // Last Legion reference gone. Dispose our managed Shape wrapper (releases one
                 // native ref). Any Body still using the shape holds its OWN native ref, so the
                 // native RefTarget survives until that body is destroyed - no premature free.
+                // A wrapper also owns its private inner shape (heightfield under the Z-up wrapper),
+                // so dispose that too.
                 rec.NativeShape?.Dispose();
                 rec.NativeShape = null;
+                rec.InnerShape?.Dispose();
+                rec.InnerShape = null;
                 _shapes.Remove(shape.Value);
             }
         }
@@ -665,14 +707,100 @@ namespace Legion.Physics.Jolt
             _settings.Gravity = gravity;
         }
 
-        public void SetTerrain(ShapeId heightFieldShape, Vector3 position) => throw new NotImplementedException();
+        public void SetTerrain(ShapeId heightFieldShape, Vector3 position)
+        {
+            if (_system == null)
+                throw new InvalidOperationException("SetTerrain before Initialize.");
+            if (!_shapes.TryGet(heightFieldShape.Value, out JoltShapeRecord shapeRec) || shapeRec.NativeShape == null)
+                throw new ArgumentException($"SetTerrain: {heightFieldShape} is not a live shape handle.");
+
+            // Replace any existing terrain.
+            if (_terrainBody.IsValid)
+            {
+                RemoveBody(_terrainBody);
+                _terrainBody = BodyId.Invalid;
+            }
+
+            // Static body in the Terrain layer. The shape is already Z-up-correct (the
+            // RotatedTranslatedShape wrapper from CreateHeightFieldShape), so no rotation here.
+            var objectLayer = new ObjectLayer((uint)PhysicsLayer.Terrain);
+            var bcs = new BodyCreationSettings(
+                shapeRec.NativeShape, position, Quaternion.Identity, MotionType.Static, objectLayer);
+            try
+            {
+                bcs.Friction = 0.6f;
+                BodyID joltId = _bodyInterface.CreateAndAddBody(bcs, Activation.DontActivate);
+
+                var rec = new JoltBodyRecord
+                {
+                    NativeBodyId = joltId.ID,
+                    Shape = heightFieldShape,
+                    Layer = PhysicsLayer.Terrain,
+                    MotionType = BodyMotionType.Static,
+                    UserData = 0u,
+                    WantsContactEvents = false,
+                };
+                uint handle = _bodies.Add(rec);
+                rec.Handle = handle;
+                _joltToRecord[joltId.ID] = rec;
+                _terrainBody = new BodyId(handle);
+            }
+            finally { bcs.Dispose(); }
+        }
+
         public void SetWaterHeight(float height) => throw new NotImplementedException();
 
         // =====================================================================
         // Queries  (safe concurrent with Step - use the NarrowPhaseQuery)
         // =====================================================================
 
-        public bool RayCast(Vector3 origin, Vector3 direction, float maxDistance, QueryFilter filter, out RayHit hit) => throw new NotImplementedException();
+        public bool RayCast(Vector3 origin, Vector3 direction, float maxDistance, QueryFilter filter, out RayHit hit)
+        {
+            hit = default;
+            if (_system == null)
+                return false;
+
+            float len = direction.Length();
+            if (len < 1e-12f || maxDistance <= 0f)
+                return false;
+
+            // Jolt encodes the ray LENGTH in the direction vector's magnitude (not normalized).
+            Vector3 rayDir = direction / len * maxDistance;
+            var ray = new Ray(origin, rayDir);
+
+            // NOTE: QueryFilter (the object-layer bitmask) is NOT yet applied - M1 raycast hits
+            // every layer. Honouring it needs a custom ObjectLayerFilter callback; deferred (the
+            // M1 harness - terrain + one box - does not need it). Passing null = no filtering.
+            if (!_system.NarrowPhaseQuery.CastRay(ray, out RayCastResult result, null, null, null))
+                return false;
+
+            Vector3 point = origin + rayDir * result.Fraction;
+
+            // Surface normal needs a read-lock on the hit body (RayCastResult carries only body id,
+            // fraction, and sub-shape id).
+            Vector3 normal = default;
+            BodyLockInterface bli = _system.BodyLockInterface;
+            bli.LockRead(result.BodyID, out BodyLockRead lockRead);
+            try
+            {
+                Body? hitBody = lockRead.Succeeded ? lockRead.Body : null;
+                if (hitBody != null)
+                    normal = hitBody.GetWorldSpaceSurfaceNormal(new SubShapeID(result.subShapeID2), point);
+            }
+            finally { bli.UnlockRead(lockRead); }
+
+            _joltToRecord.TryGetValue(result.BodyID.ID, out JoltBodyRecord? rec);
+            hit = new RayHit
+            {
+                Body = rec != null ? new BodyId(rec.Handle) : BodyId.Invalid,
+                UserData = rec != null ? rec.UserData : 0u,
+                ChildUserData = 0u,
+                Point = point,
+                Normal = normal,
+                Distance = maxDistance * result.Fraction,
+            };
+            return true;
+        }
         public int RayCastAll(Vector3 origin, Vector3 direction, float maxDistance, QueryFilter filter, Span<RayHit> hits) => throw new NotImplementedException();
         public int OverlapSphere(Vector3 center, float radius, QueryFilter filter, Span<BodyId> results) => throw new NotImplementedException();
         public int OverlapBox(Vector3 center, Vector3 halfExtents, Quaternion orientation, QueryFilter filter, Span<BodyId> results) => throw new NotImplementedException();
@@ -945,10 +1073,12 @@ namespace Legion.Physics.Jolt
 
     internal sealed class JoltShapeRecord
     {
-        public Shape? NativeShape;        // managed Jolt shape wrapper; disposed at RefCount 0
+        public Shape? NativeShape;        // the shape this handle represents; disposed at RefCount 0
+        public Shape? InnerShape;         // private inner shape OWNED by this wrapper (e.g. the Y-up
+                                          // heightfield under a Z-up RotatedTranslatedShape); disposed with it
         public int RefCount;
-        public bool IsScaledWrapper;
-        public ShapeId BaseShape;
+        public bool IsWrapper;            // decorator wrapper (rotated/translated/scaled) over an inner shape
+        public ShapeId BaseShape;         // caller-visible wrapped shape (future CreateScaledShape); Invalid otherwise
     }
 
     internal sealed class JoltCharacterRecord
