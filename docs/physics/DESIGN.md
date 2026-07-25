@@ -85,10 +85,24 @@ want one. Do not route SL vehicles through it.
 
 These need answers before implementation, not during:
 
-1. **Varregion terrain.** Jolt's `HeightFieldShape` wants a power-of-two square
+1. **Varregion terrain.** ~~Jolt's `HeightFieldShape` wants a power-of-two square
    sample count. 256×256 lands exactly; anything else needs tiling into multiple
    height fields or padding. Tiling is more work but scales; padding is simpler
-   and wastes memory quadratically. Decide before writing the terrain path.
+   and wastes memory quadratically. Decide before writing the terrain path.~~
+   **RESOLVED (NO TILING — one heightfield per region):** one square
+   `HeightFieldShape` per region, **(N+1) samples** on a side where N is the region
+   size in metres — **257** for a standard 256 m region, **513** for a 512 m
+   varregion. (N+1) samples at 1 m spacing span exactly N metres with samples on
+   integer metres, aligned to the viewer's terrain mesh. The M1 Task 6 "257 result"
+   proved block divisibility is a non-constraint in joltc 2.18.6, so every size we
+   need cooks correctly — tiling would buy nothing but seams and bookkeeping.
+   Non-square varregions: pad the square field to `max(SizeX, SizeY)` with edge
+   replication (memory cost only; terrain outside the region is unreachable). The
+   +1 row/column currently DUPLICATES row N-1; fetching the neighbour region's row 0
+   is a later refinement (**note it, don't build it**) — the boundary error is then a
+   flat 1 m strip, not a hole, which is the whole point. **The cook guard must
+   eventually accept N+1 (odd) instead of power-of-two — do NOT change it yet; that
+   is the M6 terrain-feed work.** (The M1 guard stays square + PoT + ≥4 for now.)
 
 2. **Double precision.** ~~Jolt has an optional double-precision mode for large
    worlds. It changes the ABI, so it must be decided at build time and matched by
@@ -123,6 +137,32 @@ These need answers before implementation, not during:
 5. **JoltPhysicsSharp version pin.** Current releases target net9.0/net10.0.
    Either pin around 2.15.0 for net8.0 or bump Legion's target. Worth deciding
    early since it affects the whole build.
+
+## Backend behaviour contracts (established during M2)
+
+These are backend semantics discovered while implementing dynamics. Recorded so they
+are not silently "corrected" later — they are deliberate, not incidental.
+
+- **Forces/impulses wake a sleeping body; setting velocity does not.** `ApplyForce`,
+  `ApplyTorque`, `ApplyImpulse`, `ApplyImpulseAtPoint`, `ApplyAngularImpulse` all
+  auto-activate a sleeping dynamic body (this is Jolt-native for `AddForce`/`AddImpulse`,
+  verified). `SetBodyLinearVelocity`/`SetBodyAngularVelocity` deliberately do **not**
+  activate. Rationale: this matches SL wake-on-impulse, and "should setting a velocity
+  wake the object" is a policy that belongs ABOVE the seam (in `LegionPhysicsScene`),
+  not baked into the rigid-body layer. Keep the split. (M2 delta #14.)
+
+- **Body lifecycle: static-born bodies are not promotable to movable.** PROVISIONAL —
+  **needs John's final sign-off at M6; do not build the transition path before then.**
+  Promoting a body from Static to Dynamic/Kinematic requires `AllowDynamicOrKinematic`
+  set at *creation*, which allocates `MotionProperties` per body. Creating every prim
+  movable would pay that memory across a whole ~45k-prim region for a capability almost
+  nothing uses. So the backend only sets `AllowDynamicOrKinematic` on bodies **created**
+  Dynamic/Kinematic; `SetBodyMotionType` to a movable type on a static-born body throws.
+  **Recommended lifecycle model (confirm or override at M6):** non-physical prims are
+  created **Static** (cheap, `DontActivate`); the physical-checkbox transition
+  **recreates** the body as movable. The recreation cost is paid only for the rare prim
+  that actually goes physical; the ~99% that never do keep the cheap Static path. (M2
+  delta #15.)
 
 ## Build notes
 
