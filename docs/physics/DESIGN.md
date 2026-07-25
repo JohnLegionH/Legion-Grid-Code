@@ -256,6 +256,34 @@ are not silently "corrected" later — they are deliberate, not incidental.
   anyway — **use the prim's CONVEX HULL as the physical shape** (mesh stays the visual/static-collision
   shape). Default to the convex hull for physical mesh unless a reason not to surfaces.
 
+- **M6.3 CYLINDER AXIS CONVENTION (integration layer owns it).** SL cylinders are **Z-height** (the
+  circular section lies in local XY, the axis is local Z); Jolt's `CylinderShape` axis is **Y**. The
+  backend leaves this to the layer *by design* (`CreateCylinderShape` comment: "prim orientation is the
+  layer's job"). So `JoltPrim` folds a **+90°-about-X** correction (maps local Y→Z) into the body
+  orientation, composed in System.Numerics as **`axisCorrection * primOrientation`** (left operand
+  applied first) so the prim's own rotation still composes correctly. Box/sphere need no correction
+  (axis-agnostic / symmetric). Proven by the `AXIS` raycast row: top-cap at z=102 (correct) vs a curved
+  side at z=100.5 (a wrong Y-axis cylinder). *Only cylinders* carry a non-identity correction.
+
+- **M6.3 SHAPE DETECTION MUST USE CANONICAL Profile+Extrusion, NOT the factory (delta).**
+  `PrimitiveBaseShape.CreateCylinder()` emits **Square + Curve1** (an SL *tube*), NOT **Circle +
+  Straight** (a real viewer/OAR cylinder). Trusting the factory would mis-route real cylinders to the
+  mesher. `CookPrimShape` therefore keys the fast path on canonical values — box = `Square+Straight`,
+  sphere = `HalfCircle+Curve1` (uniform), cylinder = `Circle+Straight` (circular) — all gated by
+  BulletSim's `PrimHasNoCuts`. Anything else falls to a bounding box until the mesher (M6.3 T2). When
+  constructing a cylinder programmatically, build it canonically (start from `CreateBox()`, set
+  `ProfileShape.Circle`) rather than calling `CreateCylinder()`.
+
+- **M6.3 RAYCAST QUERY PULLED FORWARD FROM M6.7 (scope note, approved).** A script `llCastRay` only
+  reaches the physics engine when the module returns **`SupportsRaycastWorldFiltered()`→true** and
+  implements **`RaycastWorld(...)`**; otherwise `llCastRay` silently falls back to OpenSim's *own*
+  geometry/mesh intersection and bypasses Jolt entirely (so a "surface-not-bbox" test would prove
+  nothing about the engine). A thin slice landed in M6.3: `RaycastWorld` → `backend.RayCastAll`,
+  `RayFilterFlags`→`QueryFilter` (`land`→Terrain, `nonphysical`→Static, `physical`→Dynamic,
+  `agent`→Avatar, `phantom|volumedtc`→Sensor), `RayHit.UserData`→`ContactResult.ConsumerID` (the
+  `SceneObjectPart.LocalId`). The rest of the query family — `SphereProbe`/`BoxProbe` (llSensor),
+  `RaycastActor`, sit-avatar detection — remains **M6.7**.
+
 - **ACCEPTED characteristics (documented, not open items):**
   - *Characters are not lock-free like bodies (M3 #2).* `CharacterVirtual` create/remove/set/step are
     serialised to the step thread via a gate. The taint-free "call from any thread" property is
