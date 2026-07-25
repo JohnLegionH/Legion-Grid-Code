@@ -37,6 +37,30 @@ internal static class Program
         return f;
     }
 
+    // Convention: heights[y*N + x] = height at grid (x, y); the cooked shape must place it at world (x, y).
+    private static void SetH(float[] f, int x, int y, float h) => f[y * N + x] = h;
+
+    // A step in X: height jumps from lo to hi at column `stepCol`. (Feature is in X only, so the
+    // in-plane row axis does not affect it - a clean silent-mis-cook detector.)
+    private static float[] StepFieldX(float lo, float hi, int stepCol)
+    {
+        var f = new float[N * N];
+        for (int y = 0; y < N; y++)
+            for (int x = 0; x < N; x++)
+                f[y * N + x] = x >= stepCol ? hi : lo;
+        return f;
+    }
+
+    // Four DISTINCT quadrant heights - asymmetric in BOTH axes, so it detects an X- or Y-mirror.
+    private static float[] QuadrantField(float sw, float se, float nw, float ne)
+    {
+        var f = new float[N * N];
+        for (int y = 0; y < N; y++)
+            for (int x = 0; x < N; x++)
+                f[y * N + x] = x < N / 2 ? (y < N / 2 ? sw : nw) : (y < N / 2 ? se : ne);
+        return f;
+    }
+
     // Cast straight down from high Z; returns true on hit and reports the world-Z of the surface.
     private static bool RayDown(ILegionPhysicsBackend b, float x, float y, out float surfaceZ, out RayHit hit)
     {
@@ -134,11 +158,35 @@ internal static class Program
             Check(rc && MathF.Abs(bh.Point.Z - 1.0f) < 0.05f, $"hit point Z ~1.0 (box top) (got {bh.Point.Z:0.000})");
             Check(rc && bh.Normal.Z > 0.9f, $"hit normal points +Z up (n.z={bh.Normal.Z:0.000})");
 
+            // ---- 6. GEOMETRY FIDELITY: cooked surface must match input samples (silent mis-cook guard). ----
+            Console.WriteLine("\n[6] Geometry fidelity (step at col 200; surface must match input incl. far edge)");
+            ShapeId step = backend.CreateHeightFieldShape(StepFieldX(0f, 20f, 200), N, N, new Vector3(S, S, S));
+            backend.SetTerrain(step, Vector3.Zero);
+            foreach (var (x, exp) in new (float x, float exp)[] { (100, 0), (199, 0), (200, 20), (201, 20), (255, 20) })
+            {
+                bool h = RayDown(backend, x, 128f, out float z, out _);
+                Check(h && MathF.Abs(z - exp) < 0.6f, $"step x={x,3}: surface Z ~{exp,2} (got {(h ? z.ToString("0.00") : "MISS")})");
+            }
+
+            // ---- 7. ASYMMETRIC PLACEMENT: distinct per-quadrant heights must land where the INPUT put them. ----
+            //         Centre-symmetric fields (like [3]) cannot see an in-plane mirror; this can.
+            Console.WriteLine("\n[7] Asymmetric placement (input SW=5 SE=10 NW=15 NE=20 -> must read at those WORLD quadrants)");
+            ShapeId quad = backend.CreateHeightFieldShape(QuadrantField(5f, 10f, 15f, 20f), N, N, new Vector3(S, S, S));
+            backend.SetTerrain(quad, Vector3.Zero);
+            foreach (var (x, y, exp, name) in new (float x, float y, float exp, string name)[]
+                { (64, 64, 5, "SW"), (192, 64, 10, "SE"), (64, 192, 15, "NW"), (192, 192, 20, "NE") })
+            {
+                bool h = RayDown(backend, x, y, out float z, out _);
+                Check(h && MathF.Abs(z - exp) < 0.6f, $"{name} world({x,3},{y,3}): height ~{exp,2} (got {(h ? z.ToString("0.00") : "MISS")})");
+            }
+
             // cleanup
             backend.RemoveBody(boxBody);
             backend.ReleaseShape(box);
             backend.ReleaseShape(flat);
             backend.ReleaseShape(raised);
+            backend.ReleaseShape(step);
+            backend.ReleaseShape(quad);
         }
         catch (Exception ex)
         {

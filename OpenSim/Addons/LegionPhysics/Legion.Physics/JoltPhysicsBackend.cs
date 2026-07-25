@@ -434,9 +434,15 @@ namespace Legion.Physics.Jolt
             // Jolt wants (X spacing, HEIGHT scale, Z spacing), so swap Y<->Z going in.
             Vector3 joltScale = new Vector3(scale.X, scale.Z, scale.Y);
 
-            // settings copies the samples into native storage during construction, so a cook-time
-            // temp array is fine (this path runs once per terrain asset, not per frame).
-            float[] samples = heights.Slice(0, n * n).ToArray();
+            // Convention: heights[y*N + x] is the height at grid (x, y), and must land at world
+            // (x, y). The RotatedTranslatedShape wrapper (below) maps Jolt grid-row r to world
+            // Y = (N-1-r) - a north-south flip - so we ROW-REVERSE going in (input row y -> Jolt
+            // row N-1-y) to cancel it. X is untouched (no X mirror). Verified by the harness's
+            // asymmetric per-quadrant check. (settings copies into native storage, so this cook-time
+            // temp array is fine - once per terrain asset, not per frame.)
+            float[] samples = new float[n * n];
+            for (int jy = 0; jy < n; jy++)
+                heights.Slice((n - 1 - jy) * n, n).CopyTo(samples.AsSpan(jy * n, n));
             Vector3 offset = Vector3.Zero;
             Shape inner;
             var hfSettings = new HeightFieldShapeSettings(samples, offset, joltScale, n);
@@ -449,9 +455,8 @@ namespace Legion.Physics.Jolt
                 // keep the row axis on +Y (that swap is a reflection), so it lands on -Y; the
                 // (N-1)*Yspacing translation lifts the field back into the +Y quadrant. Net: the
                 // shape, placed at the origin, occupies X in [0,(N-1)*sx], Y in [0,(N-1)*sy], with
-                // height along +Z. (In-plane the row index is mirrored - a sample-ordering detail
-                // that the terrain-feed / varregion decision will pin down; height-on-Z is the
-                // part that must be right, and is verified empirically by the Task 5 harness.)
+                // height along +Z. The -Y row flip this introduces is cancelled by the row-reverse
+                // when building `samples` above, so input (x,y) lands at world (x,y) - no mirror.
                 Vector3 posW = new Vector3(0f, (n - 1) * scale.Y, 0f);
                 Quaternion rot = Quaternion.CreateFromAxisAngle(Vector3.UnitX, MathF.PI / 2f);
 
