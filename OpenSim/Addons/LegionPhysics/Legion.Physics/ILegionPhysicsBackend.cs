@@ -299,6 +299,14 @@ namespace Legion.Physics
         /// <summary>Initial upward speed (m/s) of a jump from solid ground. SL jump feel lives here.</summary>
         public float JumpSpeed;
 
+        /// <summary>
+        /// Whether this avatar wants per-step contact (Persist) events forwarded. Same gate as
+        /// <see cref="BodyDesc.WantsContactEvents"/>: Begin/End always report; Persist is gated so a
+        /// standing avatar (whose controller never sleeps) does not emit a floor contact every step
+        /// forever. Set from whether the avatar has a <c>collision</c> handler registered.
+        /// </summary>
+        public bool WantsContactEvents;
+
         public uint UserData;
 
         public static CharacterDesc Default => new CharacterDesc

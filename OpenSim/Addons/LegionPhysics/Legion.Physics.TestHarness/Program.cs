@@ -399,10 +399,106 @@ internal static class Program
                 StepResult r = backend.Step(1f / 60f, abuf, cbuf, acont);
                 for (int k = 0; k < r.ContactCount; k++) if (acont[k].Phase == ContactPhase.Persist) charPersist++;
             }
-            Console.WriteLine($"      Persist events over 100 rest steps = {charPersist} (a pure CharacterVirtual is not a solver body -> no body contacts)");
-            Check(charPersist == 0, $"resting character produces no Persist flood (got {charPersist})");
+            Console.WriteLine($"      Persist events over 100 rest steps = {charPersist} (avatar WantsContactEvents=false -> Persist GATED; Begin/End still fire)");
+            Check(charPersist == 0, $"resting character produces no Persist flood when gated (got {charPersist})");
 
             backend.RemoveCharacter(avatar);
+
+            // ============ MILESTONE 3.5 - AVATAR AS COLLISION CITIZEN ============
+            // Avatar contacts are reported via the CharacterVirtual's OWN contact events (not an inner
+            // body). Side A of every avatar report is the avatar (Invalid BodyId, UserData = avatar id).
+
+            // ---- 25. AVATAR generates contacts vs terrain, static, dynamic (UserData both sides). ----
+            Console.WriteLine("\n[25] Avatar contacts vs terrain / static / dynamic (UserData both sides)");
+            backend.SetTerrain(flat, Vector3.Zero);
+            var seen = new System.Collections.Generic.HashSet<uint>();
+            bool sideAok = true;
+            int avBegin = 0, avPersist = 0, avEnd = 0;
+
+            // Lane A (y=20): walk into a STATIC wall -> terrain + static.
+            ShapeId wallShape = backend.CreateBoxShape(new Vector3(0.5f, 3f, 1f));
+            var wallDesc = BodyDesc.Default; wallDesc.Shape = wallShape; wallDesc.Position = new Vector3(48f, 20f, 1f);
+            wallDesc.MotionType = BodyMotionType.Static; wallDesc.Layer = PhysicsLayer.Static; wallDesc.UserData = 6001u;
+            BodyId wall = backend.CreateBody(wallDesc);
+            var av25 = CharacterDesc.Default; av25.Position = new Vector3(43f, 20f, 0.75f); av25.UserData = 6000u; av25.WantsContactEvents = true;
+            CharacterId avatar25 = backend.CreateCharacter(av25);
+            var b25 = new BodyState[16]; var c25 = new CharacterState[2]; var ct25 = new ContactReport[48];
+            CollectAvatarContacts(backend, avatar25, 6000u, new Vector3(1.2f, 0f, 0f), 220, b25, c25, ct25, seen, ref avBegin, ref avPersist, ref avEnd, ref sideAok);
+
+            // Lane B (y=25): walk into a DYNAMIC box -> dynamic (no wall in this lane).
+            backend.SetCharacterTransform(avatar25, new Vector3(33f, 25f, 0.75f), System.Numerics.Quaternion.Identity);
+            ShapeId dboxShape = backend.CreateBoxShape(new Vector3(0.4f, 0.4f, 0.4f));
+            var dboxDesc = BodyDesc.Default; dboxDesc.Shape = dboxShape; dboxDesc.Position = new Vector3(36f, 25f, 0.4f);
+            dboxDesc.MotionType = BodyMotionType.Dynamic; dboxDesc.Layer = PhysicsLayer.Dynamic; dboxDesc.Mass = 10f; dboxDesc.StartActive = true; dboxDesc.UserData = 6002u;
+            BodyId dbox = backend.CreateBody(dboxDesc);
+            CollectAvatarContacts(backend, avatar25, 6000u, new Vector3(1.2f, 0f, 0f), 150, b25, c25, ct25, seen, ref avBegin, ref avPersist, ref avEnd, ref sideAok);
+
+            Console.WriteLine($"      avatar contacts Begin={avBegin} Persist={avPersist} End={avEnd}; other UserDatas seen: [{string.Join(",", seen)}]");
+            Check(avBegin >= 1 && avPersist >= 1, $"avatar generates Begin + Persist (B={avBegin} P={avPersist})");
+            Check(seen.Contains(0u), "saw TERRAIN contact (UserDataB=0)");
+            Check(seen.Contains(6001u), "saw STATIC wall contact (UserDataB=6001)");
+            Check(seen.Contains(6002u), "saw DYNAMIC box contact (UserDataB=6002)");
+            Check(sideAok, "avatar side reports Invalid BodyId + avatar UserData (side A) on every report");
+            backend.RemoveCharacter(avatar25); backend.RemoveBody(wall); backend.RemoveBody(dbox);
+            backend.ReleaseShape(wallShape); backend.ReleaseShape(dboxShape);
+
+            // ---- 26. THE REAL #4 GATE: stationary avatar, wants=false suppresses / wants=true floods. ----
+            Console.WriteLine("\n[26] REAL #4 gate: stationary avatar wants=false suppressed vs wants=true floods");
+            backend.SetTerrain(flat, Vector3.Zero);
+            int gateOff = AvatarRestPersist(backend, false);
+            int gateOn = AvatarRestPersist(backend, true);
+            Console.WriteLine($"      Persist over 100 rest steps: wants=false -> {gateOff}    wants=true -> {gateOn}");
+            Check(gateOff == 0, $"gate SUPPRESSES stationary-avatar Persist when wants=false (got {gateOff})");
+            Check(gateOn > 50, $"stationary avatar FLOODS Persist when wants=true (got {gateOn}) - the gate's whole reason to exist");
+
+            // ---- 27. SENSOR overlap: avatar walking through a sensor generates the overlap report. ----
+            Console.WriteLine("\n[27] Sensor overlap (avatar walks through a VolumeDetect/Sensor body)");
+            backend.SetTerrain(flat, Vector3.Zero);
+            ShapeId senShape = backend.CreateBoxShape(new Vector3(0.6f, 0.6f, 1.2f));
+            var senDesc = BodyDesc.Default; senDesc.Shape = senShape; senDesc.Position = new Vector3(63f, 20f, 1.0f);
+            senDesc.MotionType = BodyMotionType.Static; senDesc.Layer = PhysicsLayer.Sensor; senDesc.IsSensor = true; senDesc.UserData = 6003u;
+            BodyId sensor = backend.CreateBody(senDesc);
+            var av27 = CharacterDesc.Default; av27.Position = new Vector3(60f, 20f, 0.75f); av27.UserData = 6100u; av27.WantsContactEvents = true;
+            CharacterId avatar27 = backend.CreateCharacter(av27);
+            var seen27 = new System.Collections.Generic.HashSet<uint>(); bool s27 = true; int b27c = 0, p27c = 0, e27c = 0;
+            CollectAvatarContacts(backend, avatar27, 6100u, new Vector3(1.2f, 0f, 0f), 300, b25, c25, ct25, seen27, ref b27c, ref p27c, ref e27c, ref s27);
+            Console.WriteLine($"      other UserDatas seen while crossing the sensor: [{string.Join(",", seen27)}]");
+            Check(seen27.Contains(6003u), "avatar reported the SENSOR overlap (UserDataB=6003)");
+            backend.RemoveCharacter(avatar27); backend.RemoveBody(sensor); backend.ReleaseShape(senShape);
+
+            // ---- 28. AVATAR-AVATAR: collide (push/block) and report. ----
+            Console.WriteLine("\n[28] Avatar-avatar collision (push/block) + report");
+            backend.SetTerrain(flat, Vector3.Zero);
+            var avA = CharacterDesc.Default; avA.Position = new Vector3(70f, 20f, 0.75f); avA.UserData = 7001u; avA.WantsContactEvents = true;
+            var avB = CharacterDesc.Default; avB.Position = new Vector3(71.0f, 20f, 0.75f); avB.UserData = 7002u; avB.WantsContactEvents = true;
+            CharacterId a1 = backend.CreateCharacter(avA);
+            CharacterId a2 = backend.CreateCharacter(avB);
+            var b28 = new BodyState[8]; var c28 = new CharacterState[4]; var ct28 = new ContactReport[48];
+            int avAvContacts = 0;
+            backend.TryGetCharacterState(a2, out CharacterState a2Start);
+            for (int i = 0; i < 150; i++)
+            {
+                backend.SetCharacterMovement(a1, new Vector3(1.0f, 0f, 0f), false, false);
+                backend.SetCharacterMovement(a2, System.Numerics.Vector3.Zero, false, false);
+                StepResult r = backend.Step(1f / 60f, b28, c28, ct28);
+                for (int k = 0; k < r.ContactCount; k++)
+                {
+                    ContactReport rep = ct28[k];
+                    if ((rep.UserDataA == 7001u && rep.UserDataB == 7002u) || (rep.UserDataA == 7002u && rep.UserDataB == 7001u)) avAvContacts++;
+                }
+            }
+            backend.TryGetCharacterState(a1, out CharacterState a1End);
+            backend.TryGetCharacterState(a2, out CharacterState a2End);
+            float a2Moved = a2End.Position.X - a2Start.Position.X;
+            bool passedThrough = a1End.Position.X > a2End.Position.X + 0.1f;
+            Console.WriteLine($"      a1 X->{a1End.Position.X:0.00}  a2 X {a2Start.Position.X:0.00}->{a2End.Position.X:0.00} (moved {a2Moved:0.00})  avatar-avatar reports={avAvContacts}  passedThrough={passedThrough}");
+            Check(!passedThrough, "avatars do NOT pass through each other (blocked)");
+            Check(a2Moved > 0.1f, $"the standing avatar was PUSHED (moved {a2Moved:0.00}) - matches AvatarToAvatarCollisionsByDefault=true");
+            Console.WriteLine($"      NOTE avatar-avatar CONTACT REPORTS = {avAvContacts} (physical collision confirmed via push/block above)");
+            backend.RemoveCharacter(a1); backend.RemoveCharacter(a2);
+
+            // cleanup
+            backend.RemoveBody(boxBody);
 
             // cleanup
             backend.RemoveBody(boxBody);
@@ -431,8 +527,8 @@ internal static class Program
 
         Console.WriteLine();
         Console.WriteLine(_fails == 0
-            ? "=== M1+M2+M3 HARNESS: PASS ==="
-            : $"=== M1+M2+M3 HARNESS: FAIL ({_fails} failed check(s)) ===");
+            ? "=== M1+M2+M3+M3.5 HARNESS: PASS ==="
+            : $"=== M1+M2+M3+M3.5 HARNESS: FAIL ({_fails} failed check(s)) ===");
         return _fails == 0 ? 0 : 1;
     }
 
@@ -576,6 +672,58 @@ internal static class Program
         b.RemoveBody(box);
         b.ReleaseShape(boxShape);
         return (boxDx, noTunnel);
+    }
+
+    // Steps an avatar with `vel` for `steps`, tallying its contact reports (side A == avatarUd) by
+    // phase, collecting the set of other-side UserDatas, and confirming side A is always the avatar
+    // (Invalid BodyId). Accumulates into the ref params so it can be called across several walks.
+    private static void CollectAvatarContacts(
+        ILegionPhysicsBackend b, CharacterId c, uint avatarUd, Vector3 vel, int steps,
+        BodyState[] bb, CharacterState[] cc, ContactReport[] ct,
+        System.Collections.Generic.HashSet<uint> seen,
+        ref int begin, ref int persist, ref int end, ref bool sideAok)
+    {
+        for (int i = 0; i < steps; i++)
+        {
+            b.SetCharacterMovement(c, vel, false, false);
+            StepResult r = b.Step(1f / 60f, bb, cc, ct);
+            for (int k = 0; k < r.ContactCount; k++)
+            {
+                ContactReport rep = ct[k];
+                if (rep.UserDataA != avatarUd) continue; // avatar-side reports carry the avatar UserData on side A
+                if (rep.BodyA.IsValid) sideAok = false;   // the avatar is not a body -> BodyA must be Invalid
+                switch (rep.Phase)
+                {
+                    case ContactPhase.Begin: begin++; break;
+                    case ContactPhase.Persist: persist++; break;
+                    default: end++; break;
+                }
+                seen.Add(rep.UserDataB);
+            }
+        }
+    }
+
+    // Spawns a stationary avatar (WantsContactEvents = wants), lets it settle, and counts its terrain
+    // Persist reports over 100 steps. The real #4 gate test: gated -> 0, ungated -> floods.
+    private static int AvatarRestPersist(ILegionPhysicsBackend b, bool wants)
+    {
+        var cd = CharacterDesc.Default;
+        cd.Position = new Vector3(25f, 25f, 0.75f);
+        cd.UserData = wants ? 9101u : 9100u;
+        cd.WantsContactEvents = wants;
+        CharacterId c = b.CreateCharacter(cd);
+        var bb = new BodyState[8]; var cc = new CharacterState[2]; var ct = new ContactReport[32];
+        for (int i = 0; i < 40; i++) { b.SetCharacterMovement(c, Vector3.Zero, false, false); b.Step(1f / 60f, bb, cc, ct); }
+        int persist = 0;
+        for (int i = 0; i < 100; i++)
+        {
+            b.SetCharacterMovement(c, Vector3.Zero, false, false);
+            StepResult r = b.Step(1f / 60f, bb, cc, ct);
+            for (int k = 0; k < r.ContactCount; k++)
+                if (ct[k].UserDataA == cd.UserData && ct[k].Phase == ContactPhase.Persist) persist++;
+        }
+        b.RemoveCharacter(c);
+        return persist;
     }
 
     private static void RunCharacterWalk(ILegionPhysicsBackend b, System.Collections.Generic.List<Vector3> log)

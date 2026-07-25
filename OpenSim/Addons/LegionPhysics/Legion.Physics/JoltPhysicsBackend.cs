@@ -93,6 +93,11 @@ namespace Legion.Physics.Jolt
         private readonly object _characterGate = new object();
         private readonly List<JoltCharacterRecord> _characterList = new List<JoltCharacterRecord>();
 
+        // Shared avatar-vs-avatar collision. Every character is registered here so their capsules
+        // collide (push/block) - Jolt's default matches SL's [BulletSim]AvatarToAvatarCollisionsByDefault
+        // = true. Making it a config knob is M6 (see notes). Disposed after the characters.
+        private CharacterVsCharacterCollisionSimple? _charVsChar;
+
         // Jolt's CapsuleShape axis is Y; a Z-up avatar capsule must stand along world Z. Rotate +90 deg
         // about X (Y -> Z), the same Z-up trick the heightfield wrapper uses. Shared, immutable.
         private static readonly Quaternion CapsuleYToZ = Quaternion.CreateFromAxisAngle(Vector3.UnitX, MathF.PI / 2f);
@@ -297,6 +302,9 @@ namespace Legion.Physics.Jolt
             };
             _jobSystem = new JobSystemThreadPool(jobConfig);
 
+            // Avatar-vs-avatar collision registry (characters add themselves on create).
+            _charVsChar = new CharacterVsCharacterCollisionSimple();
+
             // Contact ring is allocated now; it is engine-agnostic. Wiring it to Jolt is
             // deferred: 2.18.6 exposes contacts as EVENTS on PhysicsSystem
             // (OnContactAdded/Persisted/Removed), NOT a SetContactListener object as the
@@ -321,6 +329,8 @@ namespace Legion.Physics.Jolt
                     rec.InnerCapsule = null;
                 }
                 _characterList.Clear();
+                _charVsChar?.Dispose();
+                _charVsChar = null;
             }
 
             // Legion-side handle tables first (pure managed bookkeeping).
@@ -987,6 +997,7 @@ namespace Legion.Physics.Jolt
                     StandingShape = wrapper,
                     InnerCapsule = inner,
                     UserData = desc.UserData,
+                    WantsContactEvents = desc.WantsContactEvents,
                     CapsuleHalfHeight = desc.CapsuleHalfHeight,
                     CapsuleRadius = desc.CapsuleRadius,
                     MaxSlopeAngle = desc.MaxSlopeAngle,
@@ -996,9 +1007,80 @@ namespace Legion.Physics.Jolt
                 };
                 uint handle = _characters.Add(rec);
                 rec.Handle = handle;
+
+                // Avatar as a COLLISION CITIZEN. Rather than an inner rigid body (which in 2.18.6
+                // cannot report kinematic-vs-static/terrain, whose CollideKinematicVsNonDynamic fix
+                // HANGS the solver, and which as a solid body perturbs the M3 push behaviour), we
+                // forward the CharacterVirtual's OWN contact events. They fire on THIS (step) thread
+                // during ExtendedUpdate, cover terrain/static/dynamic/sensor, and - crucially - a
+                // standing avatar re-reports its floor contact every step, which is the real thing the
+                // #4 gate exists to suppress. Movement is untouched (these are observational). See notes.
+                character.OnContactAdded += (CharacterVirtual cv, in BodyID b2, SubShapeID ss, in Double3 pos, in Vector3 normal, ref CharacterContactSettings s)
+                    => PushCharacterBodyContact(rec, b2.ID, ToVec(pos), normal, ContactPhase.Begin);
+                character.OnContactPersisted += (CharacterVirtual cv, in BodyID b2, SubShapeID ss, in Double3 pos, in Vector3 normal, ref CharacterContactSettings s)
+                    => PushCharacterBodyContact(rec, b2.ID, ToVec(pos), normal, ContactPhase.Persist);
+                character.OnContactRemoved += (CharacterVirtual cv, in BodyID b2, SubShapeID ss)
+                    => PushCharacterBodyContact(rec, b2.ID, default, default, ContactPhase.End);
+
+                // Avatar-avatar: register in the shared collision so capsules push/block, and report
+                // the contact. otherCharacter.UserData gives the other avatar's id directly.
+                if (_charVsChar != null)
+                {
+                    _charVsChar.Add(character);
+                    character.SetCharacterVsCharacterCollision(_charVsChar);
+                }
+                character.OnCharacterContactAdded += (CharacterVirtual cv, CharacterVirtual other, SubShapeID ss, in Double3 pos, in Vector3 normal, ref CharacterContactSettings s)
+                    => PushCharacterCharacterContact(rec, other, ToVec(pos), normal, ContactPhase.Begin);
+                character.OnCharacterContactPersisted += (CharacterVirtual cv, CharacterVirtual other, SubShapeID ss, in Double3 pos, in Vector3 normal, ref CharacterContactSettings s)
+                    => PushCharacterCharacterContact(rec, other, ToVec(pos), normal, ContactPhase.Persist);
+
                 _characterList.Add(rec);
                 return new CharacterId(handle);
             }
+        }
+
+        private static Vector3 ToVec(in Double3 d) => new Vector3((float)d.X, (float)d.Y, (float)d.Z);
+
+        // Push an avatar-vs-BODY contact into the ring. Fires on the step thread during ExtendedUpdate.
+        // Side A is the avatar (no BodyId - it is not a solver body; UserData carries the avatar id);
+        // side B is the touched body, resolved via the reverse map. Persist is gated exactly like body
+        // contacts: forwarded only if the avatar or the other body wants events.
+        private void PushCharacterBodyContact(JoltCharacterRecord ch, uint otherJoltId, Vector3 point, Vector3 normal, ContactPhase phase)
+        {
+            _joltToRecord.TryGetValue(otherJoltId, out JoltBodyRecord? other);
+            bool wants = ch.WantsContactEvents || (other?.WantsContactEvents ?? false);
+            if (phase == ContactPhase.Persist && !wants)
+                return;
+            _contactListener.Push(new ContactReport
+            {
+                BodyA = BodyId.Invalid,                 // the avatar is not a rigid body
+                BodyB = other != null ? new BodyId(other.Handle) : BodyId.Invalid,
+                UserDataA = ch.UserData,
+                UserDataB = other?.UserData ?? 0u,
+                Point = point,
+                Normal = normal,                        // character-contact normal (points toward the character)
+                Impulse = 0f,                           // controller-resolved contact; no solver impulse available
+                Phase = phase,
+            });
+        }
+
+        // Push an avatar-vs-AVATAR contact. Both sides are avatars (no BodyId); UserData on each.
+        private void PushCharacterCharacterContact(JoltCharacterRecord ch, CharacterVirtual other, Vector3 point, Vector3 normal, ContactPhase phase)
+        {
+            uint otherUserData = other != null ? (uint)other.UserData : 0u;
+            if (phase == ContactPhase.Persist && !ch.WantsContactEvents)
+                return; // gate on this avatar's flag (the other avatar reports its own side symmetrically)
+            _contactListener.Push(new ContactReport
+            {
+                BodyA = BodyId.Invalid,
+                BodyB = BodyId.Invalid,
+                UserDataA = ch.UserData,
+                UserDataB = otherUserData,
+                Point = point,
+                Normal = normal,
+                Impulse = 0f,
+                Phase = phase,
+            });
         }
 
         // Cook a Z-up standing capsule: Jolt's CapsuleShape axis is Y, so wrap it in a
@@ -1026,6 +1108,8 @@ namespace Legion.Physics.Jolt
                 if (!_characters.TryGet(character.Value, out JoltCharacterRecord rec))
                     return;
                 _characterList.Remove(rec);
+                if (_charVsChar != null && rec.Character != null)
+                    _charVsChar.Remove(rec.Character);
                 // Character first (it holds a ref to _system), then the shapes it referenced.
                 rec.Character?.Dispose();
                 rec.Character = null;
@@ -1613,6 +1697,7 @@ namespace Legion.Physics.Jolt
         public Shape? StandingShape;           // Z-up rotated-capsule wrapper we own (disposed on remove)
         public Shape? InnerCapsule;            // the Y-up capsule the wrapper references (disposed with it)
         public uint UserData;
+        public bool WantsContactEvents;        // gates Persist forwarding for this avatar's contacts
 
         // Tuning knobs captured from CharacterDesc.
         public float CapsuleHalfHeight;
