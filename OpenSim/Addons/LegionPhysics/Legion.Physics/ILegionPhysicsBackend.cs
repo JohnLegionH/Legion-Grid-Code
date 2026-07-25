@@ -290,8 +290,14 @@ namespace Legion.Physics
         /// <summary>Max step height auto-climbed without a jump. SL feel lives here.</summary>
         public float StepHeight;
 
-        /// <summary>Push force applied to dynamic bodies the character walks into.</summary>
+        /// <summary>
+        /// Relative push strength against dynamic bodies the character walks into. 1.0 = the backend's
+        /// default push force; scales linearly. (The backend maps this onto Jolt's MaxStrength in N.)
+        /// </summary>
         public float PushStrength;
+
+        /// <summary>Initial upward speed (m/s) of a jump from solid ground. SL jump feel lives here.</summary>
+        public float JumpSpeed;
 
         public uint UserData;
 
@@ -305,6 +311,7 @@ namespace Legion.Physics
             MaxSlopeAngle = 50f * (MathF.PI / 180f),
             StepHeight = 0.45f,
             PushStrength = 1.0f,
+            JumpSpeed = 4.0f,
         };
     }
 

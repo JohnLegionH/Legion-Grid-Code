@@ -86,6 +86,21 @@ namespace Legion.Physics.Jolt
         // Current terrain body (SetTerrain replaces it). BodyId.Invalid = none.
         private BodyId _terrainBody = BodyId.Invalid;
 
+        // Characters (CharacterVirtual) are NOT lock-free like BodyInterface, and they are stepped on
+        // the Step thread OUTSIDE _system.Update. So all character create/remove/set/step operations are
+        // serialised through this gate and the step-thread-owned list. (Abstraction friction vs the
+        // taint-free body path - see the M3 notes.)
+        private readonly object _characterGate = new object();
+        private readonly List<JoltCharacterRecord> _characterList = new List<JoltCharacterRecord>();
+
+        // Jolt's CapsuleShape axis is Y; a Z-up avatar capsule must stand along world Z. Rotate +90 deg
+        // about X (Y -> Z), the same Z-up trick the heightfield wrapper uses. Shared, immutable.
+        private static readonly Quaternion CapsuleYToZ = Quaternion.CreateFromAxisAngle(Vector3.UnitX, MathF.PI / 2f);
+
+        // CharacterDesc.PushStrength is a relative scale (1.0 = normal); this is the newton value it
+        // scales, chosen to equal Jolt's own MaxStrength default so PushStrength 1.0 = stock behaviour.
+        private const float PushStrengthBaseNewtons = 100f;
+
         // Box convex radius is clamped to min(this, 0.1 * smallest half-extent) so Jolt never
         // asserts "convex radius larger than shape".
         private const float DefaultConvexRadius = 0.05f;
@@ -292,6 +307,22 @@ namespace Legion.Physics.Jolt
 
         public void Dispose()
         {
+            // Characters own native CharacterVirtual objects + shapes and hold a ref to _system, so
+            // dispose them BEFORE the system teardown below.
+            lock (_characterGate)
+            {
+                foreach (JoltCharacterRecord rec in _characterList)
+                {
+                    rec.Character?.Dispose();
+                    rec.Character = null;
+                    rec.StandingShape?.Dispose();
+                    rec.StandingShape = null;
+                    rec.InnerCapsule?.Dispose();
+                    rec.InnerCapsule = null;
+                }
+                _characterList.Clear();
+            }
+
             // Legion-side handle tables first (pure managed bookkeeping).
             _constraints.Clear();
             _characters.Clear();
@@ -922,25 +953,238 @@ namespace Legion.Physics.Jolt
 
         public CharacterId CreateCharacter(in CharacterDesc desc)
         {
-            // Use CharacterVirtual, not Character.
+            // CharacterVirtual, not Character: no rigid body in the solve, stepped OUTSIDE _system.Update
+            // (see Step), so the movement layer stays in control and stair-stepping / slope handling /
+            // moving-platform support come from the controller rather than being rebuilt on a capsule.
             //
-            // CharacterVirtual has no rigid body in the simulation and is
-            // stepped OUTSIDE the physics update, which is exactly what an
-            // avatar wants: the movement layer stays in control, and stair
-            // stepping / slope handling / moving platform support come for free
-            // rather than being reimplemented on top of a capsule.
-            //
-            // Cost: interaction with dynamic bodies is approximate. For pushing
-            // physical prims around, pair it with an explicit push impulse in
-            // the contact callback rather than expecting momentum transfer.
-            throw new NotImplementedException();
+            // Z-up adaptation (Jolt's CharacterVirtual defaults are Y-up): Up = +Z, the capsule is
+            // rotated to stand along Z, and SupportingVolume is a plane one radius below the centre so
+            // the bottom hemisphere counts as ground. The Y-up ExtendedUpdateSettings are remapped in Step.
+            if (_system == null)
+                throw new InvalidOperationException("CreateCharacter before Initialize.");
+            PhysicsSystem system = _system;
+
+            (Shape wrapper, Shape inner) = BuildStandingCapsule(desc.CapsuleHalfHeight, desc.CapsuleRadius);
+            var settings = new CharacterVirtualSettings
+            {
+                Shape = wrapper,
+                Up = Vector3.UnitZ,
+                SupportingVolume = new Plane(Vector3.UnitZ, -MathF.Max(0.01f, desc.CapsuleRadius)),
+                MaxSlopeAngle = desc.MaxSlopeAngle,
+                Mass = desc.Mass,
+                MaxStrength = MathF.Max(0f, desc.PushStrength) * PushStrengthBaseNewtons,
+            };
+
+            lock (_characterGate)
+            {
+                var character = new CharacterVirtual(settings, desc.Position, desc.Orientation, desc.UserData, system);
+                character.MaxSlopeAngle = desc.MaxSlopeAngle;
+                character.UserData = desc.UserData;
+
+                var rec = new JoltCharacterRecord
+                {
+                    Character = character,
+                    StandingShape = wrapper,
+                    InnerCapsule = inner,
+                    UserData = desc.UserData,
+                    CapsuleHalfHeight = desc.CapsuleHalfHeight,
+                    CapsuleRadius = desc.CapsuleRadius,
+                    MaxSlopeAngle = desc.MaxSlopeAngle,
+                    StepHeight = desc.StepHeight,
+                    PushStrength = desc.PushStrength,
+                    JumpSpeed = desc.JumpSpeed,
+                };
+                uint handle = _characters.Add(rec);
+                rec.Handle = handle;
+                _characterList.Add(rec);
+                return new CharacterId(handle);
+            }
         }
 
-        public void RemoveCharacter(CharacterId character) => throw new NotImplementedException();
-        public void SetCharacterTransform(CharacterId character, Vector3 position, Quaternion orientation) => throw new NotImplementedException();
-        public void SetCharacterShape(CharacterId character, float capsuleHalfHeight, float capsuleRadius) => throw new NotImplementedException();
-        public void SetCharacterMovement(CharacterId character, Vector3 desiredVelocity, bool jump, bool flying) => throw new NotImplementedException();
-        public bool TryGetCharacterState(CharacterId character, out CharacterState state) => throw new NotImplementedException();
+        // Cook a Z-up standing capsule: Jolt's CapsuleShape axis is Y, so wrap it in a
+        // RotatedTranslatedShape rotated Y->Z. Returns (wrapper, inner); the wrapper holds a native ref
+        // to the inner, and BOTH are disposed together when the character is removed.
+        private static (Shape wrapper, Shape inner) BuildStandingCapsule(float halfHeight, float radius)
+        {
+            Shape capsule = new CapsuleShape(MathF.Max(0.01f, halfHeight), MathF.Max(0.01f, radius));
+            try
+            {
+                using var rt = new RotatedTranslatedShapeSettings(Vector3.Zero, CapsuleYToZ, capsule);
+                return (rt.Create(), capsule);
+            }
+            catch
+            {
+                capsule.Dispose();
+                throw;
+            }
+        }
+
+        public void RemoveCharacter(CharacterId character)
+        {
+            lock (_characterGate)
+            {
+                if (!_characters.TryGet(character.Value, out JoltCharacterRecord rec))
+                    return;
+                _characterList.Remove(rec);
+                // Character first (it holds a ref to _system), then the shapes it referenced.
+                rec.Character?.Dispose();
+                rec.Character = null;
+                rec.StandingShape?.Dispose();
+                rec.StandingShape = null;
+                rec.InnerCapsule?.Dispose();
+                rec.InnerCapsule = null;
+                _characters.Remove(character.Value);
+            }
+        }
+
+        public void SetCharacterTransform(CharacterId character, Vector3 position, Quaternion orientation)
+        {
+            lock (_characterGate)
+            {
+                if (_characters.TryGet(character.Value, out JoltCharacterRecord rec) && rec.Character != null)
+                {
+                    rec.Character.Position = position;
+                    rec.Character.Rotation = orientation;
+                }
+            }
+        }
+
+        public void SetCharacterShape(CharacterId character, float capsuleHalfHeight, float capsuleRadius)
+        {
+            lock (_characterGate)
+            {
+                if (_system == null || !_characters.TryGet(character.Value, out JoltCharacterRecord rec) || rec.Character == null)
+                    return;
+
+                (Shape wrapper, Shape inner) = BuildStandingCapsule(capsuleHalfHeight, capsuleRadius);
+                // Force the swap (maxPenetrationDepth = MaxValue) - callers resize deliberately; we do not
+                // want a silent no-op if the new capsule momentarily overlaps the floor.
+                bool ok = rec.Character.SetShape(
+                    0f, wrapper, float.MaxValue, new ObjectLayer((uint)PhysicsLayer.Avatar), _system, null, null);
+                if (ok)
+                {
+                    rec.StandingShape?.Dispose();
+                    rec.InnerCapsule?.Dispose();
+                    rec.StandingShape = wrapper;
+                    rec.InnerCapsule = inner;
+                    rec.CapsuleHalfHeight = capsuleHalfHeight;
+                    rec.CapsuleRadius = capsuleRadius;
+                    // NOTE: the SupportingVolume plane still uses the ORIGINAL radius; a large radius change
+                    // would want it refreshed too. Minor for M3 (resize is rare) - noted for the terrain/M6 pass.
+                }
+                else
+                {
+                    wrapper.Dispose();
+                    inner.Dispose();
+                }
+            }
+        }
+
+        public void SetCharacterMovement(CharacterId character, Vector3 desiredVelocity, bool jump, bool flying)
+        {
+            lock (_characterGate)
+            {
+                if (_characters.TryGet(character.Value, out JoltCharacterRecord rec))
+                {
+                    rec.DesiredVelocity = desiredVelocity;
+                    rec.JumpRequested = jump;
+                    rec.Flying = flying;
+                }
+            }
+        }
+
+        public bool TryGetCharacterState(CharacterId character, out CharacterState state)
+        {
+            lock (_characterGate)
+            {
+                if (!_characters.TryGet(character.Value, out JoltCharacterRecord rec) || rec.Character == null)
+                {
+                    state = default;
+                    return false;
+                }
+                state = BuildCharacterState(rec);
+                return true;
+            }
+        }
+
+        // Snapshot the controller's current kinematic + ground state. Caller holds _characterGate.
+        private CharacterState BuildCharacterState(JoltCharacterRecord rec)
+        {
+            CharacterVirtual ch = rec.Character!;
+            GroundState gs = ch.GroundState;
+            _joltToRecord.TryGetValue(ch.GroundBodyId, out JoltBodyRecord? groundRec);
+            return new CharacterState
+            {
+                Character = new CharacterId(rec.Handle),
+                UserData = rec.UserData,
+                Position = ch.Position,
+                LinearVelocity = ch.LinearVelocity,
+                GroundNormal = ch.GroundNormal,
+                GroundBody = groundRec != null ? new BodyId(groundRec.Handle) : BodyId.Invalid,
+                IsSupported = ch.IsSupported,
+                IsSliding = gs == GroundState.OnSteepGround,
+            };
+        }
+
+        // Advance one CharacterVirtual. Caller holds _characterGate. Runs BEFORE _system.Update so the
+        // controller sees the world at frame start (DESIGN.md). This is the canonical CharacterVirtual
+        // velocity model: keep vertical + integrate gravity, adopt ground velocity to ride moving
+        // platforms, jump from solid ground, then collide-and-slide via ExtendedUpdate.
+        private void StepCharacter(JoltCharacterRecord rec, float dt)
+        {
+            CharacterVirtual? ch = rec.Character;
+            if (ch == null || _system == null)
+                return;
+
+            float gz = _settings.Gravity.Z;
+            Vector3 desired = rec.DesiredVelocity;
+            Vector3 newVel;
+
+            if (rec.Flying)
+            {
+                // Flying: full 3D control, ground gravity disabled.
+                newVel = desired;
+            }
+            else
+            {
+                ch.UpdateGroundVelocity(); // refresh GroundVelocity from the (possibly moving) ground body
+                GroundState gs = ch.GroundState;
+                float vz = ch.LinearVelocity.Z;
+
+                // On solid ground and not moving up: adopt the ground's vertical velocity (moving
+                // platform) rather than the accumulated fall speed.
+                if (gs == GroundState.OnGround && vz <= 0f)
+                    vz = ch.GroundVelocity.Z;
+
+                // Jump only from solid ground.
+                if (rec.JumpRequested && gs == GroundState.OnGround)
+                    vz = rec.JumpSpeed;
+
+                // Gravity integrates every frame (canonical pattern). On steep ground this keeps pulling
+                // the character down the slope, which ExtendedUpdate resolves into a slide.
+                vz += gz * dt;
+
+                // Horizontal = intent, plus the ground's horizontal velocity so we ride a platform that
+                // is being pushed sideways.
+                Vector3 horiz = new Vector3(desired.X, desired.Y, 0f);
+                if (gs == GroundState.OnGround)
+                    horiz += new Vector3(ch.GroundVelocity.X, ch.GroundVelocity.Y, 0f);
+
+                newVel = new Vector3(horiz.X, horiz.Y, vz);
+            }
+
+            ch.LinearVelocity = newVel;
+            rec.JumpRequested = false;
+
+            // Z-up remap of the (Y-up-defaulted) stair/stick settings. Step-up height = the avatar's
+            // StepHeight; stick-to-floor pulls straight down so it tracks steps/ramps without floating.
+            var ext = new ExtendedUpdateSettings
+            {
+                WalkStairsStepUp = new Vector3(0f, 0f, MathF.Max(0f, rec.StepHeight)),
+                StickToFloorStepDown = new Vector3(0f, 0f, -MathF.Max(0.05f, rec.StepHeight)),
+            };
+            ch.ExtendedUpdate(dt, ext, new ObjectLayer((uint)PhysicsLayer.Avatar), _system, null, null);
+        }
 
         // =====================================================================
         // Constraints
@@ -1083,9 +1327,14 @@ namespace Legion.Physics.Jolt
         {
             _stepTimer.Restart();
 
-            // 1. (Task 4) Step every CharacterVirtual BEFORE the physics update. They are
-            //    not part of the solve, so they must see the world as it was at the start
-            //    of the frame or avatars jitter against moving prims.
+            // 1. Step every CharacterVirtual BEFORE the physics update. They are not part of the
+            //    solve, so they must see the world as it was at the start of the frame or avatars
+            //    jitter against moving prims. (DESIGN.md step ordering - confirmed done here.)
+            lock (_characterGate)
+            {
+                for (int i = 0; i < _characterList.Count; i++)
+                    StepCharacter(_characterList[i], deltaTime);
+            }
 
             // 2. Advance the simulation (delta #4: 3-arg Update, temp allocation internal).
             if (_system != null && _jobSystem != null)
@@ -1169,8 +1418,17 @@ namespace Legion.Physics.Jolt
                 };
             }
 
-            // 4. (Task 5+) Drain character state.
+            // 4. Drain character state (post-ExtendedUpdate position + the ground each one found).
             int charCount = 0;
+            lock (_characterGate)
+            {
+                for (int i = 0; i < _characterList.Count && charCount < characterUpdates.Length; i++)
+                {
+                    if (_characterList[i].Character == null)
+                        continue;
+                    characterUpdates[charCount++] = BuildCharacterState(_characterList[i]);
+                }
+            }
 
             // 5. Drain contacts from the listener's ring buffer. Fed by the OnContact* handlers
             //    (delta #7); no contacts fire for static-only M1, so this drains empty.
@@ -1350,8 +1608,21 @@ namespace Legion.Physics.Jolt
 
     internal sealed class JoltCharacterRecord
     {
-        public IntPtr Native;
+        public uint Handle;                   // our Legion HandleTable handle
+        public CharacterVirtual? Character;    // the Jolt controller, stepped outside _system.Update
+        public Shape? StandingShape;           // Z-up rotated-capsule wrapper we own (disposed on remove)
+        public Shape? InnerCapsule;            // the Y-up capsule the wrapper references (disposed with it)
         public uint UserData;
+
+        // Tuning knobs captured from CharacterDesc.
+        public float CapsuleHalfHeight;
+        public float CapsuleRadius;
+        public float MaxSlopeAngle;
+        public float StepHeight;
+        public float PushStrength;
+        public float JumpSpeed;
+
+        // Per-frame movement intent (set by SetCharacterMovement, consumed by StepCharacter).
         public Vector3 DesiredVelocity;
         public bool JumpRequested;
         public bool Flying;

@@ -310,6 +310,100 @@ internal static class Program
             Check(of.OverflowSeen, "ContactBufferOverflowed reported TRUE when contacts exceed the buffer");
             Check(of.DrainSafe, "drain stayed safe under overflow (ContactCount never exceeded the buffer)");
 
+            // ================= MILESTONE 3 - THE AVATAR (CharacterVirtual) =================
+            // Mechanism checks only - feel is John's call in a viewer at M6.
+            backend.SetTerrain(flat, Vector3.Zero);
+            var cbuf = new CharacterState[4];
+            var abuf = new BodyState[16];
+            var acont = new ContactReport[32];
+
+            // ---- 16. SPAWN + REST: supported, no sink, no jitter. ----
+            Console.WriteLine("\n[16] Character spawns on terrain: IsSupported, rests without sinking");
+            var adesc = CharacterDesc.Default;   // capsule 0.45/0.30 -> centre rests at 0.75 on z=0
+            adesc.Position = new Vector3(20f, 20f, 0.75f);
+            adesc.UserData = 9001u;
+            CharacterId avatar = backend.CreateCharacter(adesc);
+            Check(avatar.IsValid, $"character created -> {avatar}");
+            for (int i = 0; i < 60; i++) { backend.SetCharacterMovement(avatar, Vector3.Zero, false, false); backend.Step(1f / 60f, abuf, cbuf, acont); }
+            backend.TryGetCharacterState(avatar, out CharacterState rest);
+            Console.WriteLine($"      rest pos={rest.Position} IsSupported={rest.IsSupported} groundNormal={rest.GroundNormal}");
+            Check(rest.IsSupported, "IsSupported true at rest");
+            Check(MathF.Abs(rest.Position.Z - 0.75f) < 0.05f, $"rests without sinking: centre Z ~0.75 (got {rest.Position.Z:0.000})");
+            Check(MathF.Abs(rest.Position.X - 20f) < 0.02f && MathF.Abs(rest.Position.Y - 20f) < 0.02f, "no horizontal drift at rest");
+            Check(rest.GroundNormal.Z > 0.9f, $"ground normal points +Z (n.z={rest.GroundNormal.Z:0.000})");
+
+            // ---- 17. WALK across flat terrain. ----
+            Console.WriteLine("\n[17] Walk a horizontal velocity across flat terrain");
+            float wx0 = rest.Position.X;
+            for (int i = 0; i < 60; i++) { backend.SetCharacterMovement(avatar, new Vector3(2f, 0f, 0f), false, false); backend.Step(1f / 60f, abuf, cbuf, acont); }
+            backend.TryGetCharacterState(avatar, out CharacterState walked);
+            Console.WriteLine($"      X {wx0:0.00} -> {walked.Position.X:0.00} (1 s @ 2 m/s)  z={walked.Position.Z:0.00}");
+            Check(MathF.Abs((walked.Position.X - wx0) - 2f) < 0.25f, $"advanced ~2 m in X (got {walked.Position.X - wx0:0.00})");
+            Check(walked.IsSupported && MathF.Abs(walked.Position.Z - 0.75f) < 0.05f, "stayed on the ground while walking");
+
+            // ---- 18. STEP UP below StepHeight; BLOCKED above it. Both sides of the threshold. ----
+            Console.WriteLine("\n[18] Steps up a rise <= StepHeight (0.45); BLOCKED by a rise above it");
+            (bool climbedLow, float zLow, float xLow) = WalkIntoStep(backend, 0.30f, 0);
+            (bool climbedHigh, float zHigh, float xHigh) = WalkIntoStep(backend, 0.80f, 1);
+            Console.WriteLine($"      low step 0.30: climbed={climbedLow} (z={zLow:0.00})   high step 0.80: climbed={climbedHigh} (z={zHigh:0.00})");
+            Check(climbedLow, $"climbs a 0.30 m step (< StepHeight): ended z={zLow:0.00} (~1.05 expected)");
+            Check(!climbedHigh, $"BLOCKED by a 0.80 m step (> StepHeight): stayed low z={zHigh:0.00} (~0.75 expected)");
+
+            // ---- 19. SLOPE stable below MaxSlopeAngle; slides above it. Both sides. ----
+            Console.WriteLine("\n[19] Slope: stable below MaxSlopeAngle (50 deg), IsSliding + slides above");
+            (bool slid30, float drift30, bool sup30) = RunSlopeTest(backend, 30f, 0);
+            (bool slid60, float drift60, bool sup60) = RunSlopeTest(backend, 60f, 1);
+            Console.WriteLine($"      30 deg: IsSliding={slid30} drift={drift30:0.00} supported={sup30}   60 deg: IsSliding={slid60} drift={drift60:0.00} supported={sup60}");
+            Check(!slid30 && drift30 < 0.6f, $"30 deg slope (< 50): stable, not sliding (drift {drift30:0.00})");
+            Check(slid60 && drift60 > 0.6f, $"60 deg slope (> 50): IsSliding true and slides down (drift {drift60:0.00})");
+
+            // ---- 20. MOVING PLATFORM: stands on a kinematic box and rides it. ----
+            Console.WriteLine("\n[20] Rides a moving platform (kinematic box)");
+            (float charDx, float boxDx, bool rode) = RunMovingPlatform(backend, 0);
+            Console.WriteLine($"      platform moved {boxDx:0.00} m, character moved {charDx:0.00} m");
+            Check(rode, $"character rode the platform (char {charDx:0.00} ~ platform {boxDx:0.00})");
+
+            // ---- 21. PUSH a dynamic box; does NOT pass through. ----
+            Console.WriteLine("\n[21] Pushes a dynamic box (PushStrength) and does not tunnel through it");
+            (float pushBoxDx, bool noTunnel) = RunPushTest(backend, 0);
+            Console.WriteLine($"      box pushed {pushBoxDx:0.00} m, tunnelled={( !noTunnel )}");
+            Check(pushBoxDx > 0.3f, $"box was pushed forward (moved {pushBoxDx:0.00} m)");
+            Check(noTunnel, "character did not pass through the box");
+
+            // ---- 22. JUMP + FLYING. ----
+            Console.WriteLine("\n[22] Jump initial velocity; flying disables ground gravity");
+            for (int i = 0; i < 40; i++) { backend.SetCharacterMovement(avatar, Vector3.Zero, false, false); backend.Step(1f / 60f, abuf, cbuf, acont); }
+            backend.SetCharacterMovement(avatar, Vector3.Zero, true, false);   // jump this frame
+            backend.Step(1f / 60f, abuf, cbuf, acont);
+            backend.TryGetCharacterState(avatar, out CharacterState jumped);
+            float jumpVz = jumped.LinearVelocity.Z;
+            float peak = jumped.Position.Z;
+            for (int i = 0; i < 60; i++) { backend.SetCharacterMovement(avatar, Vector3.Zero, false, false); backend.Step(1f / 60f, abuf, cbuf, acont); backend.TryGetCharacterState(avatar, out CharacterState s); if (s.Position.Z > peak) peak = s.Position.Z; }
+            Console.WriteLine($"      jump vz={jumpVz:0.00} (JumpSpeed 4.0), peak z={peak:0.00} (rest 0.75)");
+            Check(jumpVz > 3.0f && jumpVz < 4.5f, $"jump initial vertical velocity ~JumpSpeed 4.0 (got {jumpVz:0.00})");
+            Check(peak > 0.75f + 0.3f, $"jump left the ground (peak z {peak:0.00})");
+            for (int i = 0; i < 60; i++) { backend.SetCharacterMovement(avatar, Vector3.Zero, false, false); backend.Step(1f / 60f, abuf, cbuf, acont); } // land
+            for (int i = 0; i < 30; i++) { backend.SetCharacterMovement(avatar, new Vector3(0f, 0f, 2f), false, true); backend.Step(1f / 60f, abuf, cbuf, acont); }
+            backend.TryGetCharacterState(avatar, out CharacterState flew);
+            Console.WriteLine($"      flying up 2 m/s for 0.5 s -> z={flew.Position.Z:0.00}, supported={flew.IsSupported}");
+            Check(flew.Position.Z > 0.75f + 0.5f, $"flying rises against gravity (z {flew.Position.Z:0.00})");
+            Check(!flew.IsSupported, "flying: not ground-supported");
+
+            // ---- 23. STATIONARY CHARACTER does not flood Persist (the #4 awake case). ----
+            Console.WriteLine("\n[23] Stationary character does not flood Persist [#4]");
+            for (int i = 0; i < 90; i++) { backend.SetCharacterMovement(avatar, Vector3.Zero, false, false); backend.Step(1f / 60f, abuf, cbuf, acont); } // fall back + settle
+            int charPersist = 0;
+            for (int i = 0; i < 100; i++)
+            {
+                backend.SetCharacterMovement(avatar, Vector3.Zero, false, false);
+                StepResult r = backend.Step(1f / 60f, abuf, cbuf, acont);
+                for (int k = 0; k < r.ContactCount; k++) if (acont[k].Phase == ContactPhase.Persist) charPersist++;
+            }
+            Console.WriteLine($"      Persist events over 100 rest steps = {charPersist} (a pure CharacterVirtual is not a solver body -> no body contacts)");
+            Check(charPersist == 0, $"resting character produces no Persist flood (got {charPersist})");
+
+            backend.RemoveCharacter(avatar);
+
             // cleanup
             backend.RemoveBody(boxBody);
             backend.ReleaseShape(box);
@@ -333,12 +427,197 @@ internal static class Program
         // so the two deterministic runs go strictly one-after-another. This is the seed of the A/B
         // parity harness DESIGN.md calls for.
         RunDeterminismCheck();
+        RunCharacterDeterminismCheck();
 
         Console.WriteLine();
         Console.WriteLine(_fails == 0
-            ? "=== M1+M2 HARNESS: PASS ==="
-            : $"=== M1+M2 HARNESS: FAIL ({_fails} failed check(s)) ===");
+            ? "=== M1+M2+M3 HARNESS: PASS ==="
+            : $"=== M1+M2+M3 HARNESS: FAIL ({_fails} failed check(s)) ===");
         return _fails == 0 ? 0 : 1;
+    }
+
+    // Character walks +X into a static plateau whose top is at stepTopZ. Returns whether it climbed
+    // onto it (rose ~stepTopZ and advanced past the front face) - true for a step <= StepHeight,
+    // false for one above it (blocked). `region` spaces successive tests apart on the shared terrain.
+    private static (bool climbed, float finalZ, float finalX) WalkIntoStep(ILegionPhysicsBackend b, float stepTopZ, uint region)
+    {
+        float baseX = 40f + region * 20f;
+        ShapeId stepShape = b.CreateBoxShape(new Vector3(4f, 4f, MathF.Max(0.05f, stepTopZ / 2f)));
+        var sd = BodyDesc.Default;
+        sd.Shape = stepShape;
+        sd.Position = new Vector3(baseX + 5f, 20f, stepTopZ / 2f); // top face at stepTopZ, front face at baseX+1
+        sd.MotionType = BodyMotionType.Static;
+        sd.Layer = PhysicsLayer.Static;
+        BodyId step = b.CreateBody(sd);
+
+        var cd = CharacterDesc.Default;
+        cd.Position = new Vector3(baseX, 20f, 0.75f);
+        cd.UserData = 8000u + region;
+        CharacterId c = b.CreateCharacter(cd);
+
+        var bb = new BodyState[8]; var cc = new CharacterState[2]; var ct = new ContactReport[16];
+        for (int i = 0; i < 180; i++) { b.SetCharacterMovement(c, new Vector3(1.5f, 0f, 0f), false, false); b.Step(1f / 60f, bb, cc, ct); }
+        b.TryGetCharacterState(c, out CharacterState st);
+
+        bool climbed = st.Position.Z > 0.75f + stepTopZ - 0.15f && st.Position.X > baseX + 2f;
+        b.RemoveCharacter(c);
+        b.RemoveBody(step);
+        b.ReleaseShape(stepShape);
+        return (climbed, st.Position.Z, st.Position.X);
+    }
+
+    // Drops a character onto a static ramp tilted `angleDeg` about Y and lets it settle with no input.
+    // Below MaxSlopeAngle it should stand (not sliding, little drift); above it, IsSliding and it slides.
+    private static (bool sliding, float drift, bool supported) RunSlopeTest(ILegionPhysicsBackend b, float angleDeg, uint region)
+    {
+        float baseX = 90f + region * 25f;
+        float th = angleDeg * MathF.PI / 180f;
+        ShapeId rampShape = b.CreateBoxShape(new Vector3(10f, 10f, 0.25f));
+        var rd = BodyDesc.Default;
+        rd.Shape = rampShape;
+        rd.Position = new Vector3(baseX, 20f, 4f);
+        rd.Orientation = Quaternion.CreateFromAxisAngle(Vector3.UnitY, th); // tilt about Y
+        rd.MotionType = BodyMotionType.Static;
+        rd.Layer = PhysicsLayer.Static;
+        BodyId ramp = b.CreateBody(rd);
+
+        var cd = CharacterDesc.Default;
+        cd.Position = new Vector3(baseX, 20f, 4f + 0.25f + 0.75f + 0.4f); // just above the ramp top
+        cd.UserData = 8500u + region;
+        CharacterId c = b.CreateCharacter(cd);
+
+        var bb = new BodyState[8]; var cc = new CharacterState[2]; var ct = new ContactReport[16];
+        for (int i = 0; i < 40; i++) { b.SetCharacterMovement(c, Vector3.Zero, false, false); b.Step(1f / 60f, bb, cc, ct); } // land
+        b.TryGetCharacterState(c, out CharacterState landed);
+        Vector3 landedXY = new Vector3(landed.Position.X, landed.Position.Y, 0f);
+
+        // Observe: IsSliding must be sampled DURING the descent - by the end a steep-slope character
+        // has slid off onto flat terrain and reads OnGround again. Track whether it ever slid, and its
+        // total horizontal drift.
+        bool everSlid = false;
+        bool supported = true;
+        for (int i = 0; i < 120; i++)
+        {
+            b.SetCharacterMovement(c, Vector3.Zero, false, false);
+            b.Step(1f / 60f, bb, cc, ct);
+            b.TryGetCharacterState(c, out CharacterState s);
+            if (s.IsSliding) everSlid = true;
+            supported = s.IsSupported;
+        }
+        b.TryGetCharacterState(c, out CharacterState after);
+        Vector3 afterXY = new Vector3(after.Position.X, after.Position.Y, 0f);
+
+        float drift = (afterXY - landedXY).Length();
+        bool sliding = everSlid;
+        b.RemoveCharacter(c);
+        b.RemoveBody(ramp);
+        b.ReleaseShape(rampShape);
+        return (sliding, drift, supported);
+    }
+
+    // Character stands on a kinematic box moving +X at constant velocity and should ride it.
+    private static (float charDx, float boxDx, bool rode) RunMovingPlatform(ILegionPhysicsBackend b, uint region)
+    {
+        float baseX = 150f + region * 10f;
+        ShapeId platShape = b.CreateBoxShape(new Vector3(1.5f, 1.5f, 0.25f));
+        var pd = BodyDesc.Default;
+        pd.Shape = platShape;
+        pd.Position = new Vector3(baseX, 20f, 1.0f);           // top face at 1.25
+        pd.MotionType = BodyMotionType.Kinematic;
+        pd.Layer = PhysicsLayer.Dynamic;
+        pd.StartActive = true;
+        BodyId plat = b.CreateBody(pd);
+        b.SetBodyLinearVelocity(plat, new Vector3(1f, 0f, 0f)); // 1 m/s +X
+        b.ActivateBody(plat);
+
+        var cd = CharacterDesc.Default;
+        cd.Position = new Vector3(baseX, 20f, 2.0f);           // centre = platform top 1.25 + 0.75
+        cd.UserData = 8600u + region;
+        CharacterId c = b.CreateCharacter(cd);
+
+        var bb = new BodyState[8]; var cc = new CharacterState[2]; var ct = new ContactReport[16];
+        for (int i = 0; i < 120; i++) { b.SetCharacterMovement(c, Vector3.Zero, false, false); b.Step(1f / 60f, bb, cc, ct); }
+        b.TryGetCharacterState(c, out CharacterState cs);
+        b.TryGetBodyState(plat, out BodyState ps);
+        float charDx = cs.Position.X - baseX, boxDx = ps.Position.X - baseX;
+        bool rode = charDx > 1.0f && MathF.Abs(charDx - boxDx) < 0.5f;
+        b.RemoveCharacter(c);
+        b.RemoveBody(plat);
+        b.ReleaseShape(platShape);
+        return (charDx, boxDx, rode);
+    }
+
+    // Character walks +X into a light dynamic box: should push it and not tunnel through.
+    private static (float boxDx, bool noTunnel) RunPushTest(ILegionPhysicsBackend b, uint region)
+    {
+        float baseX = 170f + region * 10f;
+        ShapeId boxShape = b.CreateBoxShape(new Vector3(0.4f, 0.4f, 0.4f));
+        var bd = BodyDesc.Default;
+        bd.Shape = boxShape;
+        bd.Position = new Vector3(baseX + 2f, 20f, 0.4f);
+        bd.MotionType = BodyMotionType.Dynamic;
+        bd.Layer = PhysicsLayer.Dynamic;
+        bd.Mass = 10f;
+        bd.StartActive = true;
+        BodyId box = b.CreateBody(bd);
+
+        var cd = CharacterDesc.Default;
+        cd.Position = new Vector3(baseX, 20f, 0.75f);
+        cd.UserData = 8700u + region;
+        CharacterId c = b.CreateCharacter(cd);
+
+        var bb = new BodyState[8]; var cc = new CharacterState[2]; var ct = new ContactReport[16];
+        for (int i = 0; i < 180; i++) { b.SetCharacterMovement(c, new Vector3(1.5f, 0f, 0f), false, false); b.Step(1f / 60f, bb, cc, ct); }
+        b.TryGetBodyState(box, out BodyState bs);
+        b.TryGetCharacterState(c, out CharacterState cs);
+        float boxDx = bs.Position.X - (baseX + 2f);
+        bool noTunnel = cs.Position.X < bs.Position.X + 0.5f; // stayed behind/against the box
+        b.RemoveCharacter(c);
+        b.RemoveBody(box);
+        b.ReleaseShape(boxShape);
+        return (boxDx, noTunnel);
+    }
+
+    private static void RunCharacterWalk(ILegionPhysicsBackend b, System.Collections.Generic.List<Vector3> log)
+    {
+        ShapeId flat = b.CreateHeightFieldShape(new float[N * N], N, N, new Vector3(S, S, S));
+        b.SetTerrain(flat, Vector3.Zero);
+        var cd = CharacterDesc.Default;
+        cd.Position = new Vector3(20f, 20f, 0.75f);
+        CharacterId c = b.CreateCharacter(cd);
+        var bb = new BodyState[4]; var cc = new CharacterState[2]; var ct = new ContactReport[8];
+        for (int i = 0; i < 120; i++)
+        {
+            b.SetCharacterMovement(c, new Vector3(2f, 0.5f, 0f), false, false);
+            b.Step(1f / 60f, bb, cc, ct);
+            b.TryGetCharacterState(c, out CharacterState s);
+            log.Add(s.Position);
+        }
+        b.RemoveCharacter(c);
+        b.ReleaseShape(flat);
+    }
+
+    private static void RunCharacterDeterminismCheck()
+    {
+        Console.WriteLine("\n[24] Determinism with a character (two identical DeterministicMode runs)");
+        var settings = PhysicsBackendSettings.Default;
+        settings.DeterministicMode = true;
+        var logA = new System.Collections.Generic.List<Vector3>();
+        var logB = new System.Collections.Generic.List<Vector3>();
+
+        var a = new JoltPhysicsBackend(); a.Initialize(settings);
+        try { RunCharacterWalk(a, logA); } finally { a.Dispose(); }
+        var b = new JoltPhysicsBackend(); b.Initialize(settings);
+        try { RunCharacterWalk(b, logB); } finally { b.Dispose(); }
+
+        Check(logA.Count > 0 && logA.Count == logB.Count, $"same character state count (A={logA.Count} B={logB.Count})");
+        bool identical = logA.Count == logB.Count;
+        int firstDiff = -1;
+        for (int i = 0; identical && i < logA.Count; i++)
+            if (logA[i] != logB[i]) { identical = false; firstDiff = i; }
+        Check(identical, identical
+            ? $"all {logA.Count} character transforms bit-identical across runs"
+            : $"DIVERGED at state {firstDiff}: {logA[firstDiff]} vs {logB[firstDiff]}");
     }
 
     // Metrics collected from one drop of a dynamic box onto flat terrain.
