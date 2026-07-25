@@ -184,6 +184,35 @@ are not silently "corrected" later — they are deliberate, not incidental.
   Do NOT "tighten" this later into "touch no bodies at all" — that misreads the rule and would
   throw away the only real impulse we can report. (M2 delta #18.)
 
+- **Avatar collision citizenship is part of the M3 avatar model (NOT deferred).** M3 limitation #1
+  (avatars generated no collision events) is RESOLVED. **How — and why not the inner body:** the
+  literal `InnerBodyShape` path was tried and rejected on evidence in 2.18.6:
+  (a) the kinematic inner body does **not** report contacts against **static/terrain** (Jolt disables
+  kinematic-vs-non-dynamic by default), so it misses the most common avatar-collision content —
+  scripted static floor prims (sit pads, pressure plates); (b) the fix, `CollideKinematicVsNonDynamic
+  = true`, **HANGS the solver** when the avatar meets a dynamic body (reproduced); (c) a solid inner
+  body **changes the M3 push behaviour** (2.34 m vs the movement-preserving 2.92 m), violating the
+  bit-identical-movement requirement. Instead we forward the **CharacterVirtual's own contact events**
+  (`OnContactAdded/Persisted/Removed` for bodies, `OnCharacterContact*` for avatar-avatar). They fire
+  on the STEP thread during `ExtendedUpdate`, cover terrain/static/dynamic/**sensor**, and — verified —
+  a standing avatar re-reports its floor contact **every step** (600 Persist / 100 steps), which is the
+  real thing decision #4's gate suppresses. Because they are observational, **M3 movement stays
+  bit-identical** ([16]-[24] unchanged; push still 2.92 m). Avatar reports carry the avatar's UserData
+  on side A with an **Invalid BodyId** (an avatar is not a solver body). Avatar-avatar collision is ON
+  by default (`CharacterVsCharacterCollisionSimple`: they push and block), matching SL's
+  `[BulletSim]AvatarToAvatarCollisionsByDefault = true` — making that a config knob is M6.
+  Known gap left open: a thrown physical object does NOT bounce off a standing avatar (no solid
+  presence in the solve); the avatar detects/reports it and side-steps via penetration recovery. If
+  true momentum transfer onto avatars is wanted later, it needs a solid presence and must be weighed
+  against the push-behaviour change above. (M3.5; deltas #27-#30.)
+
+- **ACCEPTED characteristics (documented, not open items):**
+  - *Characters are not lock-free like bodies (M3 #2).* `CharacterVirtual` create/remove/set/step are
+    serialised to the step thread via a gate. The taint-free "call from any thread" property is
+    **bodies-only**; this asymmetry is accepted.
+  - *`CharacterDesc.Friction` is unused (M3 #5).* `CharacterVirtual` has no body-style friction; an
+    avatar's ground friction is the M6 movement model's accel/decel business, not a backend knob.
+
 ## Build notes
 
 - New `.cs` files need explicit `<Compile Include>` entries — `EnableDefaultItems`
