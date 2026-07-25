@@ -91,8 +91,32 @@ namespace OpenSim.Region.PhysicsModules.LegionJolt
         {
             public int Verts, Tris, DegenerateTris, DuplicateVerts, OutOfRangeIndices;
             public SVector3 Min, Max;
+            public float Volume;   // enclosed volume of the (closed) mesh; == convex-hull volume for a convex prim
         }
         private MeshStats _lastMeshStats;
+
+        // M6.4 dynamics: per-frame step counter + latest active-body count (drop asserts read these), and
+        // the tracked physical drops for `jolt droptest`/`dropmesh`/`dropstatus`. _lastBoxRestZ/_lastMeshRestZ
+        // persist across drops so a re-run can report determinism (same rest height).
+        private long _stepCount;
+        private int _lastActiveBodyCount;
+        private float _lastBoxRestZ = float.NaN, _lastMeshRestZ = float.NaN;
+        private sealed class DropTrack
+        {
+            public uint LocalId;
+            public string Kind;                 // "box" or "mesh"
+            public float StartZ;
+            public long StartStep;
+            public float MinZ = float.MaxValue;
+            public float LastZ, LastSpeed;
+            public int JustDeactivatedCount;
+            public float RestZ = float.NaN;
+            public long RestStep = -1;
+            public float ExpectedMass;          // box: volume*density; mesh: hull(=mesh)volume*density
+            public float ExpectedRestZ;         // terrain Z + half-height
+        }
+        private readonly List<DropTrack> _drops = new List<DropTrack>();
+        private long _logStepsUntil = -1;   // window: log per-frame dt/ActiveBodyCount/liveZ after a drop
 
         // Caller-owned step buffers (M1 contract: nothing allocates per frame). Empty world drains
         // nothing; sized modestly for the skeleton and revisited when real actors arrive (M6.4).
@@ -195,7 +219,7 @@ namespace OpenSim.Region.PhysicsModules.LegionJolt
             {
                 _consoleRegistered = true;
                 MainConsole.Instance.Commands.AddCommand("Physics", false, "jolt",
-                    "jolt terraintest | terrainslope | terrainhill | hilltest | probe <x> <y> | rezprims | rayprims | rezmesh | rezmeshn <count> | raymesh | clearprims",
+                    "jolt terraintest | terrainslope | terrainhill | hilltest | probe <x> <y> | rezprims | rayprims | rezmesh | rezmeshn <count> | raymesh | droptest | dropmesh | dropstatus | heights <x> <y> | clearprims",
                     "Legion Jolt proofs (M6.2 terrain / M6.3 prims): raycast the cooked collision surfaces and report hits.",
                     HandleJoltConsole);
             }
@@ -383,6 +407,57 @@ namespace OpenSim.Region.PhysicsModules.LegionJolt
                 return;
             }
 
+            if (cmd.Length >= 2 && cmd[1] == "droptest")
+            {
+                if (_scene == null) { MainConsole.Instance.Output($"{LogHeader} no scene."); return; }
+                ClearTestPrims();
+                DropOne("box", new Vector3(2f, 2f, 2f), 120f, 128f);
+                return;
+            }
+
+            if (cmd.Length >= 2 && cmd[1] == "dropmesh")
+            {
+                if (_scene == null) { MainConsole.Instance.Output($"{LogHeader} no scene."); return; }
+                ClearTestPrims();
+                DropOne("prism", new Vector3(2f, 2f, 2f), 136f, 128f);
+                return;
+            }
+
+            if (cmd.Length >= 2 && cmd[1] == "dropstatus")
+            {
+                DropStatus();
+                return;
+            }
+
+            if (cmd.Length >= 4 && cmd[1] == "heights"
+                && float.TryParse(cmd[2], out float hx) && float.TryParse(cmd[3], out float hy))
+            {
+                // Line up the four heights at one XY so a "box rests at the wrong Z" is unambiguous:
+                // (a) what Jolt actually collides at (heightfield raycast), (b) what OpenSim's scene
+                // heightmap says, (c) where the dropped box actually is, (d) the water plane. Water and
+                // buoyancy are non-colliding, so the box MUST rest on (a); if (a)!=(b) the cook is wrong,
+                // if (c)!=(a) the box isn't resting on terrain.
+                bool hit = _backend.RayCast(new SVector3(hx, hy, 5000f), new SVector3(0f, 0f, -1f), 10000f, QueryFilter.Terrain, out RayHit rh);
+                float sceneH = float.NaN;
+                int gx = (int)Math.Round(hx), gy = (int)Math.Round(hy);
+                if (_scene?.Heightmap != null && gx >= 0 && gx < _regionSizeX && gy >= 0 && gy < _regionSizeY)
+                    sceneH = (float)_scene.Heightmap[gx, gy];
+                float water = (float)(_scene?.RegionInfo?.RegionSettings?.WaterHeight ?? 0.0);
+
+                MainConsole.Instance.Output($"{LogHeader} heights at ({hx:0.0},{hy:0.0}):");
+                MainConsole.Instance.Output($"  (a) Jolt heightfield raycast : {(hit ? $"HIT z={rh.Point.Z:0.000} (n.z={rh.Normal.Z:0.00})" : "MISS - NO terrain collision here")}");
+                MainConsole.Instance.Output($"  (b) OpenSim scene heightmap  : {sceneH:0.000}");
+                MainConsole.Instance.Output($"  (d) region water height      : {water:0.000}");
+                foreach (DropTrack t in _drops)
+                {
+                    lock (_prims)
+                        if (_prims.TryGetValue(t.LocalId, out JoltPrim jp) && _backend.TryGetBodyState(jp.BodyHandle, out BodyState st))
+                            MainConsole.Instance.Output($"  (c) drop {t.Kind} id={t.LocalId} : liveZ={st.Position.Z:0.000} joltActive={(((st.Flags & BodyStateFlags.Active) != 0) ? "Y" : "N")} startZ={t.StartZ:0.00}");
+                }
+                MainConsole.Instance.Output($"  read: (a)==(b) => cook matches OpenSim; box rest (c) should ~= (a)+halfHeight. (c)~water while (a)!=water => box not on terrain.");
+                return;
+            }
+
             if (cmd.Length >= 2 && cmd[1] == "clearprims")
             {
                 int n = ClearTestPrims();
@@ -390,13 +465,13 @@ namespace OpenSim.Region.PhysicsModules.LegionJolt
                 return;
             }
 
-            MainConsole.Instance.Output("Usage: jolt terraintest | terrainslope | terrainhill | hilltest | probe <x> <y> | rezprims | rayprims | rezmesh | rezmeshn <count> | raymesh | clearprims");
+            MainConsole.Instance.Output("Usage: jolt terraintest | terrainslope | terrainhill | hilltest | probe <x> <y> | rezprims | rayprims | rezmesh | rezmeshn <count> | raymesh | droptest | dropmesh | dropstatus | heights <x> <y> | clearprims");
         }
 
         // Build one basic prim with a CANONICAL PrimitiveBaseShape (a real viewer/OAR prim's values,
         // not the quirky CreateCylinder factory) and rez it through the genuine scene path so OpenSim -
         // not us - calls AddPrimShape. Non-physical, non-phantom by default => a static Jolt body.
-        private void RezTestPrim(string kind, Vector3 pos, Vector3 size)
+        private SceneObjectGroup RezTestPrim(string kind, Vector3 pos, Vector3 size)
         {
             PrimitiveBaseShape pbs;
             switch (kind)
@@ -425,6 +500,7 @@ namespace OpenSim.Region.PhysicsModules.LegionJolt
                 Pos = pos,
                 Size = size,
             });
+            return sog;
         }
 
         // Delete every console-rezzed test prim through the real scene-delete path (-> RemovePrim ->
@@ -442,6 +518,7 @@ namespace OpenSim.Region.PhysicsModules.LegionJolt
                 }
             }
             _testPrims.Clear();
+            _drops.Clear();
             return n;
         }
 
@@ -558,6 +635,141 @@ namespace OpenSim.Region.PhysicsModules.LegionJolt
                 ? $"  PASS: {count}/{count} repeated identical mesh cooks are clean - delta #38 (cache poisoning) stays fixed."
                 : $"  FAIL: a prim fell to bbox/failed - cache poisoning or cook regression. Investigate before shipping.");
             MainConsole.Instance.Output($"  (jolt clearprims then jolt raymesh -> all miss.)");
+        }
+
+        // M6.4: rez a prim NON-physical via the real path, then flip it physical through OpenSim's own
+        // ScriptSetPhysicsStatus (-> the actor's IsPhysical setter -> recreate Dynamic, delta #15) so it
+        // FALLS. Probes terrain at the drop XY to pick a modest drop height (no tunnelling) and the
+        // expected rest Z. A physical MESH (prism) recreates to a convex HULL - the load-bearing case.
+        private void DropOne(string kind, Vector3 size, float x, float y)
+        {
+            float terrainZ = 20f;
+            if (_backend.RayCast(new SVector3(x, y, 5000f), new SVector3(0f, 0f, -1f), 10000f, QueryFilter.Terrain, out RayHit th))
+                terrainZ = th.Point.Z;
+            float dropZ = terrainZ + 15f;
+
+            SceneObjectGroup sog = RezTestPrim(kind, new Vector3(x, y, dropZ), size);
+            if (sog == null) { MainConsole.Instance.Output($"{LogHeader} rez failed."); return; }
+
+            sog.ScriptSetPhysicsStatus(true);   // OpenSim's real physics toggle -> IsPhysical setter -> Dynamic
+
+            uint id = sog.RootPart.LocalId;
+            string shapeNow = "?";
+            lock (_prims)
+                if (_prims.TryGetValue(id, out JoltPrim jp)) shapeNow = jp.ShapeKind;
+
+            bool isBox = kind == "box";
+            // Mass basis: box = exact box volume; mesh hull = enclosed mesh volume (== convex-hull volume
+            // for the convex prism), captured from the cook. Both x density 1000 (BodyDesc.Default).
+            float volume = isBox ? size.X * size.Y * size.Z : _lastMeshStats.Volume;
+            float expMass = volume * 1000f;
+
+            _drops.Add(new DropTrack
+            {
+                LocalId = id,
+                Kind = isBox ? "box" : "mesh",
+                StartZ = dropZ,
+                StartStep = _stepCount,
+                ExpectedMass = expMass,
+                ExpectedRestZ = terrainZ + size.Z * 0.5f,
+            });
+
+            _logStepsUntil = _stepCount + 25;   // log the next ~25 Simulate frames (dt / active / liveZ)
+
+            MainConsole.Instance.Output($"{LogHeader} dropped physical {kind} id={id} shape={shapeNow} from z={dropZ:0.00} (terrain {terrainZ:0.00}) at ({x:0},{y:0}).");
+            MainConsole.Instance.Output($"  expected: mass~={expMass:0} kg (volume {volume:0.000} x 1000), rest z~={terrainZ + size.Z * 0.5f:0.00}. WATCH the viewer, then: jolt dropstatus");
+        }
+
+        // Update a tracked drop from a drained BodyState (called in the Simulate drain).
+        private void UpdateDropTelemetry(in BodyState bs)
+        {
+            foreach (DropTrack t in _drops)
+            {
+                if (t.LocalId != bs.UserData) continue;
+                float z = bs.Position.Z;
+                t.LastZ = z;
+                if (z < t.MinZ) t.MinZ = z;
+                t.LastSpeed = bs.LinearVelocity.Length();
+                if ((bs.Flags & BodyStateFlags.JustDeactivated) != 0)
+                {
+                    t.JustDeactivatedCount++;    // must be EXACTLY 1 at rest (the settle update)
+                    t.RestZ = z;
+                    t.RestStep = _stepCount;
+                }
+                break;
+            }
+        }
+
+        // Report each tracked drop: fell / rested / JustDeactivated-exactly-once / steps-to-rest / rest Z
+        // vs expected / mass / determinism vs the previous same-kind drop. This is the rigorous console gate
+        // behind the viewer watch.
+        private void DropStatus()
+        {
+            if (_drops.Count == 0) { MainConsole.Instance.Output($"{LogHeader} no active drops - run jolt droptest / jolt dropmesh first."); return; }
+
+            // dropstatus is a SINGLE-INSTANT snapshot. Read once, right after `droptest`, it can catch the
+            // body still spawning/mid-air and (M6.4 delta) mislabel a healthy fall as a stall. The sim thread
+            // keeps stepping and updating each DropTrack while this console-thread handler blocks, so auto-wait
+            // until every tracked drop has rested (JustDeactivated -> RestZ set) or a hard timeout elapses,
+            // BEFORE printing PASS/FAIL. [dropframe] remains the honest continuous per-frame trace.
+            const int settleTimeoutMs = 4000, pollMs = 100;
+            int waitedMs = 0;
+            while (waitedMs < settleTimeoutMs && _drops.Exists(d => float.IsNaN(d.RestZ)))
+            {
+                System.Threading.Thread.Sleep(pollMs);
+                waitedMs += pollMs;
+            }
+            if (waitedMs > 0)
+                MainConsole.Instance.Output($"{LogHeader} waited {waitedMs} ms for drops to settle before reading.");
+
+            MainConsole.Instance.Output($"{LogHeader} drop status (step {_stepCount}, ActiveBodyCount now={_lastActiveBodyCount}):");
+            foreach (DropTrack t in _drops)
+            {
+                string shapeNow = "?";
+                string live = "no body";
+                bool haveLive = false;
+                float liveZ = float.NaN, liveVz = float.NaN;
+                lock (_prims)
+                    if (_prims.TryGetValue(t.LocalId, out JoltPrim jp))
+                    {
+                        shapeNow = jp.ShapeKind;
+                        // Ground truth from Jolt: is the body active, and where is it NOW? Distinguishes
+                        // Static/asleep (active=N, liveZ==startZ) from active-falling (active=Y, liveZ<startZ)
+                        // from fell-through-terrain (liveZ << terrain).
+                        if (_backend.TryGetBodyState(jp.BodyHandle, out BodyState st))
+                        {
+                            haveLive = true;
+                            liveZ = st.Position.Z;
+                            liveVz = st.LinearVelocity.Z;
+                            live = $"joltActive={(((st.Flags & BodyStateFlags.Active) != 0) ? "Y" : "N")} liveZ={liveZ:0.000}";
+                        }
+                    }
+
+                bool fell = (t.StartZ - t.MinZ) > 0.5f;
+                bool rested = t.JustDeactivatedCount >= 1;
+                long steps = t.RestStep >= 0 ? t.RestStep - t.StartStep : -1;
+                float restErr = float.IsNaN(t.RestZ) ? float.NaN : t.RestZ - t.ExpectedRestZ;
+
+                float prevRest = t.Kind == "box" ? _lastBoxRestZ : _lastMeshRestZ;
+                // Not yet rested after the settle wait is NOT a failure - it means the body is still in
+                // motion. Report it as such (live Z + vertical velocity) so an early/incomplete read can
+                // never be misread as "hung". Only a truly rested drop feeds the determinism compare.
+                string det = float.IsNaN(t.RestZ)
+                    ? (haveLive ? $"still falling (liveZ={liveZ:0.000}, vZ={liveVz:0.000})" : "still falling (no live body)")
+                    : (float.IsNaN(prevRest) ? "first drop (re-run to compare)" : $"det dZ={t.RestZ - prevRest:0.0000} vs previous {t.Kind}");
+
+                MainConsole.Instance.Output($"  {t.Kind,-4} id={t.LocalId,-6} shape={shapeNow,-12} startZ={t.StartZ:0.00} [{live}]");
+                MainConsole.Instance.Output($"        fell={(fell ? "Y" : "N")} rested={(rested ? "Y" : "N")} JustDeactivated={t.JustDeactivatedCount}(want 1) steps-to-rest={steps}");
+                MainConsole.Instance.Output($"        restZ={t.RestZ:0.000} exp={t.ExpectedRestZ:0.000} dErr={restErr:0.000} speed={t.LastSpeed:0.000} mass~={t.ExpectedMass:0} kg  [{det}]");
+            }
+            // Record rest Z for the next-run determinism compare.
+            foreach (DropTrack t in _drops)
+                if (!float.IsNaN(t.RestZ))
+                {
+                    if (t.Kind == "box") _lastBoxRestZ = t.RestZ;
+                    else _lastMeshRestZ = t.RestZ;
+                }
+            MainConsole.Instance.Output($"  PASS/row: fell=Y, rested=Y, JustDeactivated=1 (exactly once), dErr~0, mass>0. Re-run droptest+dropstatus -> det dZ ~ 0 (determinism).");
         }
 
         // The canonical triangular-prism PrimitiveBaseShape (EquilateralTriangle + Straight) used by the
@@ -818,15 +1030,20 @@ namespace OpenSim.Region.PhysicsModules.LegionJolt
                 seen.Add(((int)MathF.Round(p.X * 1000f), (int)MathF.Round(p.Y * 1000f), (int)MathF.Round(p.Z * 1000f)));
             s.DuplicateVerts = points.Length - seen.Count;
 
+            double vol6 = 0.0;   // 6x the signed enclosed volume: sum of dot(v0, cross(v1,v2)) over tris
             for (int t = 0; t < indices.Length; t += 3)
             {
                 int a = indices[t], b = indices[t + 1], c = indices[t + 2];
+                bool bad = a < 0 || b < 0 || c < 0 || a >= points.Length || b >= points.Length || c >= points.Length;
+                if (bad) { s.OutOfRangeIndices++; continue; }
                 if (a == b || b == c || a == c) { s.DegenerateTris++; continue; }
                 float area2 = SVector3.Cross(points[b] - points[a], points[c] - points[a]).Length();
                 if (area2 < 1e-9f) s.DegenerateTris++;
-                bool bad = a < 0 || b < 0 || c < 0 || a >= points.Length || b >= points.Length || c >= points.Length;
-                if (bad) s.OutOfRangeIndices++;
+                vol6 += SVector3.Dot(points[a], SVector3.Cross(points[b], points[c]));
             }
+            // For a closed, consistently-wound mesh (prim mesher output) this is the exact enclosed volume,
+            // which equals the convex-hull volume for a convex shape (prism) - i.e. the physical hull mass basis.
+            s.Volume = (float)(Math.Abs(vol6) / 6.0);
             return s;
         }
 
@@ -897,9 +1114,46 @@ namespace OpenSim.Region.PhysicsModules.LegionJolt
 
         public override float Simulate(float timeStep)
         {
-            // Step the empty world: no actors, so the active-set drain fills nothing. This proves the
-            // per-frame path runs without throwing. Returns one simulated frame.
-            _backend?.Step(timeStep, _bodyBuf, _charBuf, _contactBuf);
+            if (_backend == null)
+                return 1f;
+
+            // Step, then DRAIN: the backend fills _bodyBuf with a BodyState per ACTIVE body (moving prims)
+            // plus one final JustDeactivated state per body that slept this step. For each, push the new
+            // transform/velocity into the matching actor (by UserData = LocalID) and fire its terse update
+            // so the viewer sees motion; the JustDeactivated state is the settle update that stops a rested
+            // object drifting. Sleeping bodies aren't reported, so idle prims cost nothing.
+            StepResult r = _backend.Step(timeStep, _bodyBuf, _charBuf, _contactBuf);
+            _stepCount++;
+            _lastActiveBodyCount = r.ActiveBodyCount;
+
+            // Windowed per-frame diagnostic (set by a drop): is Step advancing with a REAL dt, is the
+            // just-dropped body in our active set, and is its Z actually changing? This is the definitive
+            // read on the "1st drop works, 2nd hangs" pattern - dt=0 => idle-step stall; active=1 but
+            // liveZ frozen => body active-but-not-integrated (deeper); active=0 => activation lost.
+            if (_stepCount <= _logStepsUntil && _drops.Count > 0)
+            {
+                DropTrack td = _drops[_drops.Count - 1];
+                float lz = float.NaN, vz = float.NaN; bool ja = false;
+                lock (_prims)
+                    if (_prims.TryGetValue(td.LocalId, out JoltPrim jd) && _backend.TryGetBodyState(jd.BodyHandle, out BodyState sd))
+                    { lz = sd.Position.Z; vz = sd.LinearVelocity.Z; ja = (sd.Flags & BodyStateFlags.Active) != 0; }
+                m_log.Debug($"{LogHeader} [dropframe] step={_stepCount} dt={timeStep:0.0000} active={r.ActiveBodyCount} updates={r.BodyUpdateCount} box(id={td.LocalId}) liveZ={lz:0.000} vZ={vz:0.000} joltActive={ja}");
+            }
+
+            if (r.BodyBufferOverflowed)
+                m_log.Warn($"{LogHeader} body update buffer overflowed ({_bodyBuf.Length}); some terse updates dropped this step.");
+
+            int n = r.BodyUpdateCount;
+            for (int i = 0; i < n; i++)
+            {
+                BodyState bs = _bodyBuf[i];
+                JoltPrim p;
+                lock (_prims)
+                    _prims.TryGetValue(bs.UserData, out p);
+                p?.ApplyStepState(in bs);
+                if (_drops.Count > 0)
+                    UpdateDropTelemetry(in bs);
+            }
             return 1f;
         }
 
