@@ -284,6 +284,24 @@ are not silently "corrected" later — they are deliberate, not incidental.
   `SceneObjectPart.LocalId`). The rest of the query family — `SphereProbe`/`BoxProbe` (llSensor),
   `RaycastActor`, sit-avatar detection — remains **M6.7**.
 
+- **M6.3 MESHER CACHE POISONING — `releaseSourceMeshData()` IS A TRAP (delta #38, load-bearing for
+  M6.5).** The Meshmerizer **caches and shares** the `Mesh` object: `Meshmerizer.CreateMesh` stores it
+  in `m_uniqueMeshes` keyed on `GetMeshKey(size, lod)` (the key ignores `isPhysical`/`convex`) and
+  returns the **same instance** for every identical prim — and `shouldCache` defaults **true** on all
+  reachable overloads (the 8-arg one that takes `shouldCache` is itself bugged and ignores it). `Mesh`
+  extraction throws when its source is gone: `getIndexListAsInt()` / `getVertexListAsFloat()` do
+  **`if (m_triangles/m_vertices == null) throw new NotSupportedException()`**, and
+  **`releaseSourceMeshData()` nulls exactly those fields**. So calling `releaseSourceMeshData()` on a
+  cooked mesh **poisons the shared cached instance** — the *next* prim with identical geometry gets the
+  poisoned mesh and its extraction throws. This bites **every repeated mesh asset** (a region with N
+  copies of one mesh: the first cooks, the rest throw), which is precisely M6.5-with-real-content.
+  **Correct handling:** `getIndexListAsInt()`/`getVertexListAsFloat()` already return **fresh copies**,
+  so extract and keep those; **never** call `releaseSourceMeshData()` (or otherwise mutate) a mesher-
+  returned `Mesh`; `ReleaseMesh()` is a no-op (the mesher owns eviction). Wrap **all** mesher extraction
+  in a guard with a bbox fallback so a `NotSupportedException` can never propagate out and abort a rez.
+  BulletSim dodges this by passing `shouldCache=false` for a private throwaway mesh; we keep caching (it
+  is desirable — cook once per asset) and simply never poison it.
+
 - **ACCEPTED characteristics (documented, not open items):**
   - *Characters are not lock-free like bodies (M3 #2).* `CharacterVirtual` create/remove/set/step are
     serialised to the step thread via a gate. The taint-free "call from any thread" property is
