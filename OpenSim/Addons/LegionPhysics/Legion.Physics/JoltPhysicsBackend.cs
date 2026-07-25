@@ -162,6 +162,7 @@ namespace Legion.Physics.Jolt
             PhysicsLayer.Avatar => BroadPhase.Moving,
             PhysicsLayer.Debris => BroadPhase.Moving,
             PhysicsLayer.Sensor => BroadPhase.Sensor,
+            PhysicsLayer.AvatarQuery => BroadPhase.Moving, // in the broadphase so queries find it; collides with nothing
             _ => BroadPhase.Moving,
         };
 
@@ -173,6 +174,12 @@ namespace Legion.Physics.Jolt
         /// </summary>
         private static bool ShouldCollide(PhysicsLayer a, PhysicsLayer b)
         {
+            // The avatar query-marker layer NEVER collides in simulation. Keeping it out of every
+            // collision pair is exactly what makes the marker inert - no push, no contacts (verified) -
+            // so it can be findable by queries without ever entering the solve. (M4.5, resolves #35.)
+            if (a == PhysicsLayer.AvatarQuery || b == PhysicsLayer.AvatarQuery)
+                return false;
+
             // Normalise so we only fill the lower triangle.
             if (a > b) (a, b) = (b, a);
 
@@ -838,6 +845,8 @@ namespace Legion.Physics.Jolt
         {
             if (!_bodies.TryGet(body.Value, out JoltBodyRecord rec))
                 return; // stale/invalid handle - idempotent no-op.
+            if (rec.IsCharacterMarker)
+                return; // an avatar query-marker is owned by its character; RemoveCharacter destroys it.
 
             var joltId = new BodyID(rec.NativeBodyId);
             _bodyInterface.RemoveAndDestroyBody(joltId);
@@ -1115,6 +1124,37 @@ namespace Legion.Physics.Jolt
                 uint handle = _characters.Add(rec);
                 rec.Handle = handle;
 
+                // Avatar as a QUERY CITIZEN (M4.5, resolves #35). A kinematic marker body on the inert
+                // AvatarQuery layer (collides with NOTHING - no push, no contacts) carries the avatar's
+                // shape + UserData so RayCast/Overlap/ShapeCast can find the avatar. It is synced to the
+                // character's position each step (in Step, after ExtendedUpdate, before _system.Update).
+                // Distinct from the rejected contact inner body: that failure (CollideKinematicVsNonDynamic
+                // HANGS, solid presence changes push) was a SIMULATION-collision problem; a query-only
+                // marker never enters the solve, so a query sees it regardless of the collision matrix.
+                var markerBcs = new BodyCreationSettings(
+                    wrapper, desc.Position, desc.Orientation, MotionType.Kinematic,
+                    new ObjectLayer((uint)PhysicsLayer.AvatarQuery));
+                markerBcs.UserData = desc.UserData;
+                BodyID markerId;
+                try { markerId = _bodyInterface.CreateAndAddBody(markerBcs, Activation.DontActivate); }
+                finally { markerBcs.Dispose(); }
+
+                var markerRec = new JoltBodyRecord
+                {
+                    NativeBodyId = markerId.ID,
+                    Shape = ShapeId.Invalid,
+                    Layer = PhysicsLayer.AvatarQuery,
+                    MotionType = BodyMotionType.Kinematic,
+                    UserData = desc.UserData,
+                    WantsContactEvents = false,
+                    IsCharacterMarker = true,
+                };
+                uint markerHandle = _bodies.Add(markerRec);
+                markerRec.Handle = markerHandle;
+                _joltToRecord[markerId.ID] = markerRec;
+                rec.MarkerBodyId = markerId.ID;
+                rec.MarkerRecord = markerRec;
+
                 // Avatar as a COLLISION CITIZEN. Rather than an inner rigid body (which in 2.18.6
                 // cannot report kinematic-vs-static/terrain, whose CollideKinematicVsNonDynamic fix
                 // HANGS the solver, and which as a solid body perturbs the M3 push behaviour), we
@@ -1217,7 +1257,19 @@ namespace Legion.Physics.Jolt
                 _characterList.Remove(rec);
                 if (_charVsChar != null && rec.Character != null)
                     _charVsChar.Remove(rec.Character);
-                // Character first (it holds a ref to _system), then the shapes it referenced.
+
+                // Destroy the query marker body first (it native-refs the shared wrapper shape).
+                if (rec.MarkerBodyId != 0)
+                {
+                    _bodyInterface.RemoveAndDestroyBody(new BodyID(rec.MarkerBodyId));
+                    _joltToRecord.TryRemove(rec.MarkerBodyId, out _);
+                    if (rec.MarkerRecord != null)
+                        _bodies.Remove(rec.MarkerRecord.Handle);
+                    rec.MarkerBodyId = 0;
+                    rec.MarkerRecord = null;
+                }
+
+                // Character next (it holds a ref to _system), then the shapes it referenced.
                 rec.Character?.Dispose();
                 rec.Character = null;
                 rec.StandingShape?.Dispose();
@@ -1642,6 +1694,10 @@ namespace Legion.Physics.Jolt
             PhysicsLayer.Dynamic => (filter & QueryFilter.Dynamic) != 0,
             PhysicsLayer.Avatar => (filter & QueryFilter.Avatar) != 0,
             PhysicsLayer.Sensor => (filter & QueryFilter.Sensor) != 0,
+            // The avatar query-marker is found by exactly the filters that name Avatar (llSensor/
+            // sit-target). filter=Static/Dynamic/Terrain do NOT return it. This is the ONLY way an
+            // avatar surfaces to the query family (M4.5).
+            PhysicsLayer.AvatarQuery => (filter & QueryFilter.Avatar) != 0,
             // Debris has no QueryFilter bit - detection queries (llCastRay/llSensor) never return particle
             // debris, so it is excluded from every filter, INCLUDING All.
             PhysicsLayer.Debris => false,
@@ -1671,7 +1727,16 @@ namespace Legion.Physics.Jolt
             lock (_characterGate)
             {
                 for (int i = 0; i < _characterList.Count; i++)
-                    StepCharacter(_characterList[i], deltaTime);
+                {
+                    JoltCharacterRecord crec = _characterList[i];
+                    StepCharacter(crec, deltaTime);
+                    // Sync the query marker to the JUST-stepped position, before _system.Update, so a
+                    // query running mid-frame sees the avatar where it now is. DontActivate keeps the
+                    // marker out of the active set (it never simulates) - it is only a query target.
+                    if (crec.MarkerBodyId != 0 && crec.Character != null)
+                        _bodyInterface.SetPositionAndRotation(
+                            new BodyID(crec.MarkerBodyId), crec.Character.Position, crec.Character.Rotation, Activation.DontActivate);
+                }
             }
 
             // 2. Advance the simulation (delta #4: 3-arg Update, temp allocation internal).
@@ -1932,6 +1997,7 @@ namespace Legion.Physics.Jolt
         public bool WantsContactEvents;   // gates Persist forwarding
         public float Mass;                // explicit or Volume x Density; 0 where mass is unused (static)
         public bool AllowMotionChange;    // created movable (AllowDynamicOrKinematic) -> may flip motion type
+        public bool IsCharacterMarker;    // a query-only avatar marker (owned by its character; not a real prim)
     }
 
     internal sealed class JoltShapeRecord
@@ -1954,6 +2020,8 @@ namespace Legion.Physics.Jolt
         public Shape? InnerCapsule;            // the Y-up capsule the wrapper references (disposed with it)
         public uint UserData;
         public bool WantsContactEvents;        // gates Persist forwarding for this avatar's contacts
+        public uint MarkerBodyId;              // Jolt BodyID.ID of the query-visible marker (0 = none)
+        public JoltBodyRecord? MarkerRecord;   // the marker's body record (in _bodies + _joltToRecord)
 
         // Tuning knobs captured from CharacterDesc.
         public float CapsuleHalfHeight;

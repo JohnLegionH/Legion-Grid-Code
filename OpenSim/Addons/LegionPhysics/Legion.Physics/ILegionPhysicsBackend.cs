@@ -119,6 +119,14 @@ namespace Legion.Physics
         /// Useful for bullet-hell / particle-ish content. Not required for first light.
         /// </summary>
         Debris = 5,
+
+        /// <summary>
+        /// INTERNAL: the query-visible marker carried by each avatar. Collides with NOTHING in the
+        /// simulation (never enters the solve - no push, no contacts), so it is inert; it exists ONLY
+        /// so RayCast/Overlap/ShapeCast can find an avatar (whose CharacterVirtual is not a body).
+        /// Backend-managed; do not put prims on this layer. Found only by Avatar-filtered queries.
+        /// </summary>
+        AvatarQuery = 6,
     }
 
     public enum BodyMotionType : byte

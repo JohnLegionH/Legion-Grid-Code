@@ -669,23 +669,41 @@ internal static class Program
             Check(scHit && scH.Normal.Z > 0.8f, $"contact normal points up +Z (n.z={scH.Normal.Z:0.00})");
             backend.RemoveBody(scT); backend.ReleaseShape(castSphere);
 
-            // ---- 38. AVATAR VISIBILITY to the query family (#30 answer). ----
-            Console.WriteLine("\n[38] Avatar visibility to queries [#30]");
+            // ---- 38. AVATAR IS QUERY-VISIBLE via the marker body (#35 resolved). ----
+            Console.WriteLine("\n[38] Avatar query-visibility via marker body [#35]");
             var avq = CharacterDesc.Default; avq.Position = new Vector3(90f, 90f, 0.75f); avq.UserData = 7500u;
             CharacterId avatarQ = backend.CreateCharacter(avq);
             for (int i = 0; i < 10; i++) { backend.SetCharacterMovement(avatarQ, Vector3.Zero, false, false); backend.Step(1f / 60f, abuf, cbuf, acont); }
-            bool avRay = backend.RayCast(new Vector3(90f, 90f, 20f), new Vector3(0, 0, -1), 25f, QueryFilter.All, out RayHit avR);
+
+            // RayCast filter=Avatar now HITS the avatar; filter=Static EXCLUDES it.
+            bool avRay = backend.RayCast(new Vector3(90f, 90f, 20f), new Vector3(0, 0, -1), 25f, QueryFilter.Avatar, out RayHit avR);
+            bool avStatic = backend.RayCast(new Vector3(90f, 90f, 20f), new Vector3(0, 0, -1), 25f, QueryFilter.Static, out RayHit avRS);
+            Check(avRay && avR.UserData == 7500u, $"RayCast filter=Avatar now HITS the avatar (ud {(avRay ? avR.UserData : 0)})");
+            Check(!(avStatic && avRS.UserData == 7500u), "RayCast filter=Static EXCLUDES the avatar marker");
+
+            // RayCastAll includes the avatar.
             var avAll = new RayHit[8];
             int avN = backend.RayCastAll(new Vector3(90f, 90f, 20f), new Vector3(0, 0, -1), 25f, QueryFilter.All, avAll);
-            int avOv = backend.OverlapSphere(new Vector3(90f, 90f, 0.9f), 2f, QueryFilter.All, obuf);
-            bool rayIsAvatar = avRay && avR.UserData == 7500u;
             bool allHasAvatar = false; for (int i = 0; i < avN; i++) if (avAll[i].UserData == 7500u) allHasAvatar = true;
-            bool ovHasAvatar = false; for (int i = 0; i < avOv; i++) { backend.TryGetBodyState(obuf[i], out BodyState bst); if (bst.UserData == 7500u) ovHasAvatar = true; }
-            Console.WriteLine($"      RayCast hit ud={(avRay ? avR.UserData : 0)} (terrain, not avatar); RayCastAll includes avatar={allHasAvatar}; OverlapSphere count={avOv} includes avatar={ovHasAvatar}");
-            Check(!rayIsAvatar, "RayCast does NOT return the avatar (CharacterVirtual is not a body)");
-            Check(!allHasAvatar, "RayCastAll does NOT include the avatar");
-            Check(!ovHasAvatar, "OverlapSphere does NOT find the avatar");
-            Console.WriteLine("      => FINDING: avatars are INVISIBLE to the query family. llSensor / sit-target search need a query-visible marker (see report).");
+            Check(allHasAvatar, "RayCastAll now includes the avatar");
+
+            // OverlapSphere finds the avatar under filter=Avatar, excludes under filter=Static.
+            int avOv = backend.OverlapSphere(new Vector3(90f, 90f, 0.9f), 2f, QueryFilter.Avatar, obuf);
+            bool ovHasAvatar = false; BodyId markerBody = BodyId.Invalid;
+            for (int i = 0; i < avOv; i++) { backend.TryGetBodyState(obuf[i], out BodyState bst); if (bst.UserData == 7500u) { ovHasAvatar = true; markerBody = obuf[i]; } }
+            int avOvS = backend.OverlapSphere(new Vector3(90f, 90f, 0.9f), 2f, QueryFilter.Static, obuf);
+            bool ovStaticHasAvatar = false; for (int i = 0; i < avOvS; i++) { backend.TryGetBodyState(obuf[i], out BodyState b2); if (b2.UserData == 7500u) ovStaticHasAvatar = true; }
+            Check(ovHasAvatar, "OverlapSphere filter=Avatar now FINDS the avatar");
+            Check(!ovStaticHasAvatar, "OverlapSphere filter=Static EXCLUDES the avatar");
+
+            // #30 query-boundary contract: a query hands back the marker's BodyId. It IS a valid body -
+            // TryGetBodyState returns the avatar's TRANSFORM (position/orientation) but it is a kinematic
+            // marker with no dynamics. Identity is UserData (the avatar id), never the BodyId.
+            backend.TryGetBodyState(markerBody, out BodyState markerState);
+            Console.WriteLine($"      marker BodyId valid={backend.IsBodyValid(markerBody)}; TryGetBodyState -> pos={markerState.Position} ud={markerState.UserData} (avatar transform; kinematic)");
+            Check(markerBody.IsValid && backend.IsBodyValid(markerBody), "marker BodyId is a valid body handle");
+            Check(markerState.UserData == 7500u && MathF.Abs(markerState.Position.Z - 0.75f) < 0.05f, "marker BodyId resolves to the avatar transform (identity via UserData)");
+            Console.WriteLine("      => #35 RESOLVED: avatars are query-visible (Avatar filter only). Movement/contacts unchanged (marker collides with nothing).");
             backend.RemoveCharacter(avatarQ);
 
             backend.ReleaseShape(sphere); backend.ReleaseShape(qbox);
@@ -720,8 +738,8 @@ internal static class Program
 
         Console.WriteLine();
         Console.WriteLine(_fails == 0
-            ? "=== M1..M4 HARNESS: PASS ==="
-            : $"=== M1..M4 HARNESS: FAIL ({_fails} failed check(s)) ===");
+            ? "=== M1..M4.5 HARNESS: PASS ==="
+            : $"=== M1..M4.5 HARNESS: FAIL ({_fails} failed check(s)) ===");
         return _fails == 0 ? 0 : 1;
     }
 
