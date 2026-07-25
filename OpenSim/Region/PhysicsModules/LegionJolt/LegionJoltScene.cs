@@ -34,6 +34,7 @@ using LegionJoltBackend = Legion.Physics.Jolt.JoltPhysicsBackend;
 // The backend speaks System.Numerics.Vector3; OpenSim speaks OpenMetaverse.Vector3 (the unqualified
 // Vector3 here). Alias the numerics one so backend calls are unambiguous.
 using SVector3 = System.Numerics.Vector3;
+using SQuaternion = System.Numerics.Quaternion;
 
 namespace OpenSim.Region.PhysicsModules.LegionJolt
 {
@@ -72,6 +73,16 @@ namespace OpenSim.Region.PhysicsModules.LegionJolt
             float d = (float)Math.Sqrt(dx * dx + dy * dy);
             return _hillBase + _hillAmp * Math.Max(0f, 1f - d / _hillR);
         }
+
+        // M6.3: live prims by SceneObjectPart.LocalId. RemovePrim looks up here; also the future
+        // Step-drain target for physical (M6.4) actors. Guarded because Add/RemovePrim can arrive off
+        // the heartbeat thread (the backend permits concurrent Create/Remove with Step).
+        private readonly Dictionary<uint, JoltPrim> _prims = new Dictionary<uint, JoltPrim>();
+
+        // M6.3 Task 2 proof bookkeeping: the console-rezzed test prims (so `jolt rayprims` can state
+        // expected hits and `jolt clearprims` can delete them through the real scene-delete path).
+        private struct TestPrim { public uint LocalId; public UUID Sog; public string Kind; public Vector3 Pos; public Vector3 Size; }
+        private readonly List<TestPrim> _testPrims = new List<TestPrim>();
 
         // Caller-owned step buffers (M1 contract: nothing allocates per frame). Empty world drains
         // nothing; sized modestly for the skeleton and revisited when real actors arrive (M6.4).
@@ -174,8 +185,8 @@ namespace OpenSim.Region.PhysicsModules.LegionJolt
             {
                 _consoleRegistered = true;
                 MainConsole.Instance.Commands.AddCommand("Physics", false, "jolt",
-                    "jolt terraintest | jolt probe <x> <y>",
-                    "Legion Jolt terrain proof (M6.2): raycast straight down at XY and report the hit Z.",
+                    "jolt terraintest | terrainslope | terrainhill | hilltest | probe <x> <y> | rezprims | rayprims | clearprims",
+                    "Legion Jolt proofs (M6.2 terrain / M6.3 prims): raycast the cooked collision surfaces and report hits.",
                     HandleJoltConsole);
             }
         }
@@ -281,7 +292,157 @@ namespace OpenSim.Region.PhysicsModules.LegionJolt
                 return;
             }
 
-            MainConsole.Instance.Output("Usage: jolt terraintest | jolt probe <x> <y>");
+            if (cmd.Length >= 2 && cmd[1] == "rezprims")
+            {
+                if (_scene == null) { MainConsole.Instance.Output($"{LogHeader} no scene."); return; }
+                ClearTestPrims();   // idempotent: re-rez from a clean slate
+
+                // Three basic shapes at z=100 (above any terrain/hill), spread 8 m in X so they don't
+                // overlap. Sizes chosen so the raycast proofs are unambiguous: the cylinder is tall+thin
+                // (halfHeight 2, radius 0.5) so a Z-axis (correct) top-cap hit at 102 is nowhere near a
+                // Y-axis (wrong) curved-side hit at 100.5.
+                RezTestPrim("box", new Vector3(120f, 128f, 100f), new Vector3(2f, 3f, 4f));
+                RezTestPrim("sphere", new Vector3(128f, 128f, 100f), new Vector3(2f, 2f, 2f));
+                RezTestPrim("cylinder", new Vector3(136f, 128f, 100f), new Vector3(1f, 1f, 4f));
+
+                MainConsole.Instance.Output($"{LogHeader} rezzed {_testPrims.Count} test prims via the real AddNewSceneObject -> ApplyPhysics -> AddPrimShape path:");
+                foreach (var tp in _testPrims)
+                {
+                    string via = "?";
+                    lock (_prims)
+                        if (_prims.TryGetValue(tp.LocalId, out JoltPrim jp)) via = jp.ShapeKind;
+                    MainConsole.Instance.Output($"  id={tp.LocalId,-6} {tp.Kind,-9} pos=({tp.Pos.X:0.0},{tp.Pos.Y:0.0},{tp.Pos.Z:0.0}) size=({tp.Size.X:0.0},{tp.Size.Y:0.0},{tp.Size.Z:0.0}) -> jolt shape: {via}");
+                }
+                MainConsole.Instance.Output($"  now run: jolt rayprims  (casts through Scene.RayCastFiltered - the exact llCastRay pipeline).");
+                return;
+            }
+
+            if (cmd.Length >= 2 && cmd[1] == "rayprims")
+            {
+                if (_scene == null) { MainConsole.Instance.Output($"{LogHeader} no scene."); return; }
+                RayPrims();   // runs with prims (expect hits) OR after clearprims (expect all miss)
+                return;
+            }
+
+            if (cmd.Length >= 2 && cmd[1] == "clearprims")
+            {
+                int n = ClearTestPrims();
+                MainConsole.Instance.Output($"{LogHeader} deleted {n} test prims (scene delete -> RemovePrim). `jolt rayprims` should now miss.");
+                return;
+            }
+
+            MainConsole.Instance.Output("Usage: jolt terraintest | terrainslope | terrainhill | hilltest | probe <x> <y> | rezprims | rayprims | clearprims");
+        }
+
+        // Build one basic prim with a CANONICAL PrimitiveBaseShape (a real viewer/OAR prim's values,
+        // not the quirky CreateCylinder factory) and rez it through the genuine scene path so OpenSim -
+        // not us - calls AddPrimShape. Non-physical, non-phantom by default => a static Jolt body.
+        private void RezTestPrim(string kind, Vector3 pos, Vector3 size)
+        {
+            PrimitiveBaseShape pbs;
+            switch (kind)
+            {
+                case "sphere":   pbs = PrimitiveBaseShape.CreateSphere(); break;              // HalfCircle + Curve1
+                case "cylinder": pbs = PrimitiveBaseShape.CreateBox();                        // start from Square+Straight (no-cut, scale 100)
+                                 pbs.ProfileShape = ProfileShape.Circle; break;               // -> canonical cylinder: Circle + Straight
+                default:         pbs = PrimitiveBaseShape.CreateBox(); break;                 // Square + Straight
+            }
+
+            UUID owner = _scene.RegionInfo.EstateSettings.EstateOwner;
+            var sog = new SceneObjectGroup(owner, pos, Quaternion.Identity, pbs);
+            sog.RootPart.Scale = size;   // AddPrimShape receives this as `size` (== SceneObjectPart.Scale)
+
+            // attachToBackup:false -> ephemeral (no region-DB residue), but still physics-wired and
+            // viewer-visible this session. AttachToScene calls ApplyPhysics synchronously here.
+            _scene.AddNewSceneObject(sog, false);
+
+            _testPrims.Add(new TestPrim
+            {
+                LocalId = sog.RootPart.LocalId,
+                Sog = sog.UUID,
+                Kind = kind,
+                Pos = pos,
+                Size = size,
+            });
+        }
+
+        // Delete every console-rezzed test prim through the real scene-delete path (-> RemovePrim ->
+        // backend RemoveBody/ReleaseShape). Returns how many were removed.
+        private int ClearTestPrims()
+        {
+            int n = 0;
+            foreach (var tp in _testPrims)
+            {
+                SceneObjectGroup sog = _scene?.GetSceneObjectGroup(tp.Sog);
+                if (sog != null)
+                {
+                    _scene.DeleteSceneObject(sog, false);
+                    n++;
+                }
+            }
+            _testPrims.Clear();
+            return n;
+        }
+
+        // Cast the proof rays through Scene.RayCastFiltered - the SAME call llCastRay makes - so this
+        // is Jolt answering a real SL-facing raycast, just triggered from the console (no viewer/chat
+        // dependency). Each row prints expected-vs-actual-vs-delta and which prim id was struck.
+        private void RayPrims()
+        {
+            // Resolve the three ids for readability.
+            uint boxId = 0, sphId = 0, cylId = 0;
+            foreach (var tp in _testPrims)
+            {
+                if (tp.Kind == "box") boxId = tp.LocalId;
+                else if (tp.Kind == "sphere") sphId = tp.LocalId;
+                else if (tp.Kind == "cylinder") cylId = tp.LocalId;
+            }
+
+            const float sq75 = 0.8660254f;   // sqrt(1 - 0.5^2), the sphere offset-surface height
+            const float cy = 128f;
+            bool haveP = _testPrims.Count > 0;   // false after clearprims -> every row should MISS
+
+            // label, origin, expectedZ (NaN = expect a MISS), expected prim id (0 = n/a), filter
+            var rays = new (string label, Vector3 origin, float expZ, uint expId, RayFilterFlags filter)[]
+            {
+                ("box   top (face)",     new Vector3(120f,  cy, 107f), 102f,      boxId, RayFilterFlags.land | RayFilterFlags.nonphysical),
+                ("sphere top (centre)",  new Vector3(128f,  cy, 106f), 101f,      sphId, RayFilterFlags.land | RayFilterFlags.nonphysical),
+                ("sphere +0.5 (CURVE)",  new Vector3(128.5f,cy, 106f), 100f+sq75, sphId, RayFilterFlags.land | RayFilterFlags.nonphysical),
+                ("cyl top cap (AXIS)",   new Vector3(136f,   cy,    107f), 102f,      cylId, RayFilterFlags.land | RayFilterFlags.nonphysical),
+                ("cyl diag .4,.4 ROUND", new Vector3(136.4f, cy+0.4f,107f), float.NaN, 0u,    RayFilterFlags.land | RayFilterFlags.nonphysical),
+                ("box, STATIC excluded", new Vector3(120f,  cy, 107f), float.NaN, 0u,    RayFilterFlags.land),
+            };
+
+            MainConsole.Instance.Output($"{LogHeader} rayprims via Scene.RayCastFiltered (the llCastRay pipeline) - {_testPrims.Count} test prim(s) live{(haveP ? "" : " -> EVERY row should MISS")}.");
+            MainConsole.Instance.Output($"  CURVE proves sphere-surface-not-bbox; AXIS proves the cylinder Z-height correction. (NaN exp = expect miss.)");
+            MainConsole.Instance.Output($"     label            |   exp z  |  act z   |  delta  | hit id | note");
+            foreach (var r in rays)
+            {
+                var dir = new Vector3(0f, 0f, -1f);
+                var hits = _scene.RayCastFiltered(r.origin, dir, 10f, 4, r.filter) as List<ContactResult>;
+                ContactResult? best = null;
+                if (hits != null)
+                    foreach (var h in hits)
+                        if (best == null || h.Depth < best.Value.Depth) best = h;
+
+                // After clearprims there are no prims, so a hit-expecting row should now miss.
+                bool expMiss = float.IsNaN(r.expZ) || !haveP;
+                if (best == null)
+                {
+                    string ok = expMiss ? "OK (miss)" : "MISS (expected hit!)";
+                    MainConsole.Instance.Output($"  {r.label,-20} | {(float.IsNaN(r.expZ) ? "  miss  " : r.expZ.ToString("0.000")),8} |   miss   |    -    |   -    | {ok}");
+                }
+                else
+                {
+                    float az = best.Value.Pos.Z;
+                    string del = float.IsNaN(r.expZ) ? "   -    " : $"{az - r.expZ,7:0.000}";
+                    string note = expMiss ? "hit (expected MISS!)"
+                                 : (best.Value.ConsumerID == r.expId ? "OK" : $"WRONG id (want {r.expId})");
+                    MainConsole.Instance.Output($"  {r.label,-20} | {(float.IsNaN(r.expZ) ? "  miss  " : r.expZ.ToString("0.000")),8} | {az,8:0.000} | {del} | {best.Value.ConsumerID,6} | {note}");
+                }
+            }
+            MainConsole.Instance.Output($"  CURVE row exp {100f + sq75:0.000} (bbox would read 101.000); AXIS row exp 102.000 (wrong Y-axis cylinder -> 100.500);");
+            MainConsole.Instance.Output($"  ROUND row exp miss (offset 0.566 > radius 0.5; a bbox fallback would instead HIT ~102.000, proving the cross-section is circular).");
         }
 
         // Decision #3: MaxBodies ceiling tracks TOTAL prim count (every prim is a body), default
@@ -304,11 +465,146 @@ namespace OpenSim.Region.PhysicsModules.LegionJolt
 
         public override void RemoveAvatar(PhysicsActor actor) { /* M6.5 */ }
 
-        public override void RemovePrim(PhysicsActor prim) { /* M6.3 */ }
+        public override void RemovePrim(PhysicsActor prim)
+        {
+            if (prim is JoltPrim jp)
+            {
+                jp.Destroy();
+                lock (_prims)
+                    _prims.Remove(jp.LocalID);
+            }
+        }
 
+        // The real OpenSim delivery boundary: SceneObjectPart.AddToPhysics -> (via the base
+        // isPhantom/shapetype overloads) -> this. A non-physical, non-phantom prim becomes a STATIC
+        // Jolt body. (Pure phantoms never reach here - ApplyPhysics skips them; physical dynamics is M6.4.)
         public override PhysicsActor AddPrimShape(string primName, PrimitiveBaseShape pbs, Vector3 position,
                                                   Vector3 size, Quaternion rotation, bool isPhysical, uint localid)
-            => PhysicsActor.Null; // M6.3
+        {
+            if (_backend == null || pbs == null)
+                return PhysicsActor.Null;
+
+            var prim = new JoltPrim(this, _backend, localid, primName, pbs, position, size, rotation, isPhysical);
+            lock (_prims)
+                _prims[localid] = prim;
+            return prim;
+        }
+
+        // Fixed-shape fast path (M6.3 Task 1): an UN-CUT box / sphere / cylinder cooks straight to a
+        // Jolt primitive with NO meshmerizer. Classification matches what a real viewer/OAR prim
+        // carries (canonical ProfileShape+Extrusion), NOT PrimitiveBaseShape.CreateCylinder() - whose
+        // factory emits Square+Curve1 (an SL "tube"), a known OpenSim quirk. Anything else (cut/hollow/
+        // twisted, sculpt/mesh, non-uniform sphere/cylinder) falls back to a bounding box for now; the
+        // real IMesher path is M6.3 Task 2. `axisCorrection` (System.Numerics) is folded into the body
+        // orientation by JoltPrim; `kind` is for the proof read-out.
+        internal ShapeId CookPrimShape(PrimitiveBaseShape pbs, Vector3 size, out SQuaternion axisCorrection, out string kind)
+        {
+            axisCorrection = SQuaternion.Identity;
+            float hx = size.X * 0.5f, hy = size.Y * 0.5f, hz = size.Z * 0.5f;
+
+            if (pbs != null && PrimHasNoCuts(pbs))
+            {
+                byte path = pbs.PathCurve;
+                ProfileShape profile = pbs.ProfileShape;
+
+                // BOX: square profile, straight extrusion. Half-extents = size/2.
+                if (profile == ProfileShape.Square && path == (byte)Extrusion.Straight)
+                {
+                    kind = "box";
+                    return _backend.CreateBoxShape(new SVector3(hx, hy, hz));
+                }
+
+                // SPHERE: half-circle profile, curve1 extrusion. Native sphere only when uniform - a
+                // non-uniform "sphere" is an ellipsoid and must go through the mesher (Task 2).
+                if (profile == ProfileShape.HalfCircle && path == (byte)Extrusion.Curve1
+                    && Approx(size.X, size.Y) && Approx(size.Y, size.Z))
+                {
+                    kind = "sphere";
+                    return _backend.CreateSphereShape(hx);
+                }
+
+                // CYLINDER: circle profile, straight extrusion. SL cylinders are Z-height; Jolt's
+                // CylinderShape axis is Y, so correct +90 deg about X (local Y -> local Z) before the
+                // prim's own rotation. Circular cross-section only (X==Y); elliptical -> mesher.
+                if (profile == ProfileShape.Circle && path == (byte)Extrusion.Straight
+                    && Approx(size.X, size.Y))
+                {
+                    kind = "cylinder";
+                    axisCorrection = SQuaternion.CreateFromAxisAngle(SVector3.UnitX, MathF.PI * 0.5f);
+                    return _backend.CreateCylinderShape(hz, hx);   // halfHeight=Z/2, radius=X/2
+                }
+            }
+
+            // Fallback until the IMesher path lands (M6.3 Task 2): a conservative solid bounding box.
+            kind = "bbox(fallback)";
+            m_log.Debug($"{LogHeader} prim shape is not a basic un-cut box/sphere/cylinder - bounding-box fallback until the mesher (M6.3 Task 2).");
+            return _backend.CreateBoxShape(new SVector3(hx, hy, hz));
+        }
+
+        // BulletSim's cut test, verbatim: an un-cut basic shape has no profile/path cut, hollow, twist,
+        // taper, non-100 path scale, or shear. (PathScaleX/Y are stored as 100 = "1.0".)
+        private static bool PrimHasNoCuts(PrimitiveBaseShape p) =>
+            p.ProfileBegin == 0 && p.ProfileEnd == 0 && p.ProfileHollow == 0 &&
+            p.PathTwist == 0 && p.PathTwistBegin == 0 && p.PathBegin == 0 && p.PathEnd == 0 &&
+            p.PathTaperX == 0 && p.PathTaperY == 0 && p.PathScaleX == 100 && p.PathScaleY == 100 &&
+            p.PathShearX == 0 && p.PathShearY == 0;
+
+        private static bool Approx(float a, float b) =>
+            Math.Abs(a - b) <= 1e-4f * Math.Max(1f, Math.Max(Math.Abs(a), Math.Abs(b)));
+
+        // ---------------------------------------------------------------------
+        // Query wiring pulled forward for the M6.3 proof: this is the path a SCRIPT llCastRay takes.
+        // llCastRay -> Scene.RayCastFiltered -> PhysicsScene.RaycastWorld (here) -> backend.RayCast.
+        // Returning true from SupportsRaycastWorldFiltered flips llCastRay onto the physics engine
+        // instead of OpenSim's own geometry intersection, so a script ray genuinely tests Jolt's
+        // shapes. (Full query family - RaycastActor, Sphere/BoxProbe for llSensor - remains M6.7.)
+        // ---------------------------------------------------------------------
+
+        public override bool SupportsRaycastWorldFiltered() => true;
+
+        public override object RaycastWorld(Vector3 position, Vector3 direction, float length, int Count, RayFilterFlags filter)
+        {
+            var results = new List<ContactResult>();
+            if (_backend == null)
+                return results;
+
+            QueryFilter qf = ToQueryFilter(filter);
+            if (qf == QueryFilter.None)
+                return results;
+
+            Vector3 dn = direction;
+            dn.Normalize();
+            var origin = new SVector3(position.X, position.Y, position.Z);
+            var dir = new SVector3(dn.X, dn.Y, dn.Z);
+
+            int want = Count > 0 ? Count : 1;
+            var hits = new RayHit[want];
+            int n = _backend.RayCastAll(origin, dir, length, qf, hits);
+            for (int i = 0; i < n; i++)
+            {
+                results.Add(new ContactResult
+                {
+                    ConsumerID = hits[i].UserData,           // SceneObjectPart.LocalId
+                    Pos = new Vector3(hits[i].Point.X, hits[i].Point.Y, hits[i].Point.Z),
+                    Normal = new Vector3(hits[i].Normal.X, hits[i].Normal.Y, hits[i].Normal.Z),
+                    Depth = hits[i].Distance,
+                });
+            }
+            return results;   // boxed as object; llCastRay casts back to List<ContactResult>
+        }
+
+        // llCastRay's reject-type flags -> our layer filter. water has no body; phantom/volumedetect
+        // map to the Sensor layer (M6.6).
+        private static QueryFilter ToQueryFilter(RayFilterFlags f)
+        {
+            QueryFilter q = QueryFilter.None;
+            if ((f & RayFilterFlags.land) != 0) q |= QueryFilter.Terrain;
+            if ((f & RayFilterFlags.nonphysical) != 0) q |= QueryFilter.Static;
+            if ((f & RayFilterFlags.physical) != 0) q |= QueryFilter.Dynamic;
+            if ((f & RayFilterFlags.agent) != 0) q |= QueryFilter.Avatar;
+            if ((f & (RayFilterFlags.phantom | RayFilterFlags.volumedtc)) != 0) q |= QueryFilter.Sensor;
+            return q;
+        }
 
         public override float Simulate(float timeStep)
         {
