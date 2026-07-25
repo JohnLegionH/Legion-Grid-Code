@@ -61,7 +61,7 @@ namespace OpenSim.Region.ClientStack.LindenUDP
         /// <summary>
         /// Priority queue for determining which image to send first.
         /// </summary>
-		private C5.IntervalHeap<J2KImage> m_priorityQueue = new C5.IntervalHeap<J2KImage>();
+		private C5.IntervalHeap<J2KImage> m_priorityQueue = new C5.IntervalHeap<J2KImage>(new J2KImageComparer());
 
         /// <summary>
         /// Used to control thread access to the priority queue.
