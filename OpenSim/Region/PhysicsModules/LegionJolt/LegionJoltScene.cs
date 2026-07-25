@@ -61,6 +61,18 @@ namespace OpenSim.Region.PhysicsModules.LegionJolt
         private int _regionSizeY;
         private Scene _scene;
 
+        // M6.2 Task 2: radial-cone hill parameters (set by `jolt terrainhill`) so `jolt hilltest` can
+        // print hand-computable expected Z. z = base + amp*max(0, 1 - dist((x,y),(cx,cy))/R).
+        private float _hillCx, _hillCy, _hillBase, _hillAmp, _hillR;
+        private bool _hillSet;
+
+        private float HillZ(float x, float y)
+        {
+            float dx = x - _hillCx, dy = y - _hillCy;
+            float d = (float)Math.Sqrt(dx * dx + dy * dy);
+            return _hillBase + _hillAmp * Math.Max(0f, 1f - d / _hillR);
+        }
+
         // Caller-owned step buffers (M1 contract: nothing allocates per frame). Empty world drains
         // nothing; sized modestly for the skeleton and revisited when real actors arrive (M6.4).
         private BodyState[] _bodyBuf = new BodyState[1024];
@@ -211,6 +223,51 @@ namespace OpenSim.Region.PhysicsModules.LegionJolt
                 SetTerrain(hm);
                 MainConsole.Instance.Output($"{LogHeader} set X-gradient terrain: z = {baseZ} + x*{slope} (independent of y).");
                 MainConsole.Instance.Output($"  confirm orientation: jolt probe 50 200 -> z~15 ; jolt probe 200 50 -> z~30 (z tracks X, not Y).");
+                return;
+            }
+
+            if (cmd.Length >= 2 && cmd[1] == "terrainhill")
+            {
+                // A KNOWN radial cone: elevation varies in BOTH axes (a transpose/single-axis bug shows),
+                // exact closed form, and equal-distance symmetry for the 2D-orientation check. R is large
+                // enough that the slope reaches the region edges (no flat base to hide behind).
+                _hillCx = _regionSizeX / 2f; _hillCy = _regionSizeY / 2f;
+                _hillBase = 20f; _hillAmp = 40f; _hillR = 200f; _hillSet = true;
+
+                // Write into the SCENE heightmap (not just physics), so the taint propagates to the
+                // VIEWER (patch send) as well; then push to physics immediately so `jolt hilltest`
+                // works this instant instead of waiting for the ~5 s terrain tick.
+                for (int gy = 0; gy < _regionSizeY; gy++)
+                    for (int gx = 0; gx < _regionSizeX; gx++)
+                        _scene.Heightmap[gx, gy] = HillZ(gx, gy);
+                SetTerrain(_scene.Heightmap.GetFloatsSerialised());
+
+                MainConsole.Instance.Output($"{LogHeader} radial cone set (scene + physics): z = {_hillBase} + {_hillAmp}*max(0, 1 - dist((x,y),({_hillCx},{_hillCy}))/{_hillR})");
+                MainConsole.Instance.Output($"  peak ({_hillCx},{_hillCy}) z={_hillBase + _hillAmp:0.00}; hand-check any XY with that formula. Run: jolt hilltest");
+                return;
+            }
+
+            if (cmd.Length >= 2 && cmd[1] == "hilltest")
+            {
+                if (!_hillSet) { MainConsole.Instance.Output($"{LogHeader} run `jolt terrainhill` first."); return; }
+                float cx = _hillCx, cy = _hillCy;
+                // (peak; two equal-distance points at +X vs +Y - MUST match; a mid-slope; the non-flat
+                // EDGE at (255.5,255.5); the last real edge sample; a low corner).
+                var pts = new (float x, float y)[]
+                { (cx, cy), (cx + 50f, cy), (cx, cy + 50f), (cx + 72f, cy + 72f),
+                  (_regionSizeX - 0.5f, _regionSizeY - 0.5f), (_regionSizeX - 1f, _regionSizeY - 1f), (10f, 10f) };
+                MainConsole.Instance.Output($"{LogHeader} hill raycast probes (expected = cone formula; small interp/edge-strip deltas OK):");
+                MainConsole.Instance.Output($"     x       y   |  expected |  actual  |  delta   |  dist");
+                foreach (var (px, py) in pts)
+                {
+                    float exp = HillZ(px, py);
+                    float dd = (float)Math.Sqrt((px - cx) * (px - cx) + (py - cy) * (py - cy));
+                    bool hit = _backend.RayCast(new SVector3(px, py, 5000f), new SVector3(0f, 0f, -1f), 10000f, QueryFilter.All, out RayHit h);
+                    string act = hit ? $"{h.Point.Z,8:0.000}" : "  miss  ";
+                    string del = hit ? $"{h.Point.Z - exp,8:0.000}" : "   -    ";
+                    MainConsole.Instance.Output($"  ({px,6:0.0},{py,6:0.0}) | {exp,8:0.000} | {act} | {del} | {dd,6:0.0}");
+                }
+                MainConsole.Instance.Output($"  ({cx + 50f:0},{cy}) and ({cx},{cy + 50f:0}) are equal-distance -> MUST read the same Z (2D orientation).");
                 return;
             }
 
