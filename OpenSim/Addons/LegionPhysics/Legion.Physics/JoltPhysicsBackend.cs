@@ -24,6 +24,7 @@
 
 using System;
 using System.Collections.Concurrent;
+using System.Collections.Generic;
 using System.Diagnostics;
 using System.Numerics;
 using System.Threading;
@@ -58,6 +59,40 @@ namespace Legion.Physics.Jolt
         private ObjectVsBroadPhaseLayerFilterTable? _objectVsBroadPhaseFilter;
         // NOTE (delta #4): 2.18.6 has NO TempAllocator - temp allocation is internal
         // to PhysicsSystem.Update. There is deliberately no _tempAllocator field.
+
+        // Cached LOCKING BodyInterface - safe to call from any thread. This is what lets Legion
+        // drop the taint-queue pattern (Create/Remove/Set* run straight from the scene thread).
+        // Valid for the PhysicsSystem's lifetime.
+        private BodyInterface _bodyInterface;
+
+        // --- Active-body tracking (Task 4; delta #8 mechanism) ---
+        // OnBodyActivated/OnBodyDeactivated fire from Jolt WORKER threads during Update(), and
+        // activation can also flip from the SCENE thread (SetBodyTransform activate:true - no
+        // taint queue). A plain shared HashSet would tear. So the event handlers only ENQUEUE;
+        // the HashSet is owned SOLELY by the Step thread. Zero cross-thread set mutation; zero
+        // per-frame allocation (the scratch collections are Clear()ed and refilled, not realloc'd;
+        // foreach over a concrete HashSet/List uses a struct enumerator).
+        private readonly ConcurrentQueue<ActivationDelta> _activationQueue = new ConcurrentQueue<ActivationDelta>();
+        private readonly HashSet<uint> _activeBodies = new HashSet<uint>();   // step-thread only
+        private readonly HashSet<uint> _justActivated = new HashSet<uint>();  // scratch, per-step
+        private readonly List<uint> _justDeactivated = new List<uint>();      // scratch, per-step
+        private readonly List<uint> _staleActive = new List<uint>();          // scratch, per-step
+
+        // Reverse map: Jolt BodyID.ID -> our record. Written on Create/Remove (scene thread),
+        // read from Step and from the contact/activation callbacks (worker threads).
+        private readonly ConcurrentDictionary<uint, JoltBodyRecord> _joltToRecord =
+            new ConcurrentDictionary<uint, JoltBodyRecord>();
+
+        // Box convex radius is clamped to min(this, 0.1 * smallest half-extent) so Jolt never
+        // asserts "convex radius larger than shape".
+        private const float DefaultConvexRadius = 0.05f;
+
+        private readonly struct ActivationDelta
+        {
+            public readonly uint BodyId;
+            public readonly bool Activated;
+            public ActivationDelta(uint bodyId, bool activated) { BodyId = bodyId; Activated = activated; }
+        }
 
         // Number of ObjectLayers = number of PhysicsLayer members. Derived from the
         // enum so the filter tables never silently drift if a layer is added.
@@ -206,6 +241,16 @@ namespace Legion.Physics.Jolt
 
             _system = new PhysicsSystem(systemSettings);
             _system.Gravity = settings.Gravity;
+            _bodyInterface = _system.BodyInterface;
+
+            // Contacts + body activation arrive as C# EVENTS in 2.18.6 (delta #7), not a
+            // listener object. The handlers ONLY enqueue / push into the ring - they never touch
+            // scene state, never allocate, and never mutate the active set (see the field notes).
+            _system.OnBodyActivated += HandleBodyActivated;
+            _system.OnBodyDeactivated += HandleBodyDeactivated;
+            _system.OnContactAdded += HandleContactAdded;
+            _system.OnContactPersisted += HandleContactPersisted;
+            _system.OnContactRemoved += HandleContactRemoved;
 
             // Worker pool (delta #4: Update takes this JobSystem; no TempAllocator).
             // Jolt's canonical limits: 2048 jobs, 8 barriers. DeterministicMode / an
@@ -233,6 +278,20 @@ namespace Legion.Physics.Jolt
             _characters.Clear();
             _bodies.Clear();
             _shapes.Clear();
+            _joltToRecord.Clear();
+            _activeBodies.Clear();
+            while (_activationQueue.TryDequeue(out _)) { }
+
+            // Unsubscribe before teardown so no worker-thread callback fires into a half-disposed
+            // backend during the final Update-drain window.
+            if (_system != null)
+            {
+                _system.OnBodyActivated -= HandleBodyActivated;
+                _system.OnBodyDeactivated -= HandleBodyDeactivated;
+                _system.OnContactAdded -= HandleContactAdded;
+                _system.OnContactPersisted -= HandleContactPersisted;
+                _system.OnContactRemoved -= HandleContactRemoved;
+            }
 
             // Native teardown order (delta #6): system -> jobs -> filters -> Foundation.
             // The PhysicsSystem holds the filter interfaces and steps on the job system,
@@ -254,10 +313,68 @@ namespace Legion.Physics.Jolt
         }
 
         // =====================================================================
+        // Jolt event callbacks (delta #7). WORKER-THREAD context: enqueue / push only.
+        // No allocation, no scene-state access, no mutation of _activeBodies.
+        // =====================================================================
+
+        private void HandleBodyActivated(PhysicsSystem system, in BodyID bodyID, ulong bodyUserData)
+            => _activationQueue.Enqueue(new ActivationDelta(bodyID.ID, true));
+
+        private void HandleBodyDeactivated(PhysicsSystem system, in BodyID bodyID, ulong bodyUserData)
+            => _activationQueue.Enqueue(new ActivationDelta(bodyID.ID, false));
+
+        private void HandleContactAdded(
+            PhysicsSystem system, in Body body1, in Body body2,
+            in ContactManifold manifold, ref ContactSettings settings)
+            => PushContact(body1.ID.ID, body2.ID.ID, in manifold, ContactPhase.Begin);
+
+        private void HandleContactPersisted(
+            PhysicsSystem system, in Body body1, in Body body2,
+            in ContactManifold manifold, ref ContactSettings settings)
+            => PushContact(body1.ID.ID, body2.ID.ID, in manifold, ContactPhase.Persist);
+
+        private void HandleContactRemoved(PhysicsSystem system, ref SubShapeIDPair pair)
+            => _contactListener.Push(BuildContact(
+                pair.Body1ID.ID, pair.Body2ID.ID, default, default, ContactPhase.End));
+
+        private void PushContact(uint joltA, uint joltB, in ContactManifold manifold, ContactPhase phase)
+        {
+            // Impulse is a post-solve quantity; Added/Persisted fire pre-solve, so it is not
+            // available here (left 0). Point/normal come straight off the manifold.
+            Vector3 point = manifold.PointCount > 0 ? manifold.GetWorldSpaceContactPointOn1(0) : default;
+            _contactListener.Push(BuildContact(joltA, joltB, point, manifold.WorldSpaceNormal, phase));
+        }
+
+        private ContactReport BuildContact(
+            uint joltA, uint joltB, Vector3 point, Vector3 normal, ContactPhase phase)
+        {
+            _joltToRecord.TryGetValue(joltA, out JoltBodyRecord? ra);
+            _joltToRecord.TryGetValue(joltB, out JoltBodyRecord? rb);
+            return new ContactReport
+            {
+                BodyA = ra != null ? new BodyId(ra.Handle) : BodyId.Invalid,
+                BodyB = rb != null ? new BodyId(rb.Handle) : BodyId.Invalid,
+                UserDataA = ra != null ? ra.UserData : 0u,
+                UserDataB = rb != null ? rb.UserData : 0u,
+                Point = point,
+                Normal = normal,
+                Impulse = 0f,
+                Phase = phase,
+            };
+        }
+
+        // =====================================================================
         // Shapes
         // =====================================================================
 
-        public ShapeId CreateBoxShape(Vector3 halfExtents) => throw new NotImplementedException();
+        public ShapeId CreateBoxShape(Vector3 halfExtents)
+        {
+            float minHalf = MathF.Min(halfExtents.X, MathF.Min(halfExtents.Y, halfExtents.Z));
+            float convexRadius = MathF.Max(0f, MathF.Min(DefaultConvexRadius, minHalf * 0.1f));
+            var shape = new BoxShape(halfExtents, convexRadius);
+            return RegisterShape(shape);
+        }
+
         public ShapeId CreateSphereShape(float radius) => throw new NotImplementedException();
         public ShapeId CreateCapsuleShape(float halfHeight, float radius) => throw new NotImplementedException();
         public ShapeId CreateCylinderShape(float halfHeight, float radius) => throw new NotImplementedException();
@@ -284,10 +401,42 @@ namespace Legion.Physics.Jolt
         public ShapeId CreateHeightFieldShape(
             ReadOnlySpan<float> heights, int sampleCountX, int sampleCountY, Vector3 scale)
         {
-            // Jolt's HeightFieldShape wants a power-of-two square sample count.
-            // 256x256 regions land exactly; varregions will need tiling or
-            // padding. Worth deciding before you write the terrain path.
-            throw new NotImplementedException();
+            // Jolt HeightFieldShape is SQUARE (one sample count) and Y-UP: a sample at grid
+            // (x,y) sits at offset + scale * (x, height, y) - the height axis is Jolt's Y and the
+            // grid spans X and Z. A Z-up region therefore needs the terrain BODY rotated at
+            // placement (SetTerrain, later); the shape is cooked here in Jolt-local space.
+            //
+            // Sample-count constraint (verified empirically vs joltc 2.18.6 - see MILESTONE1
+            // notes): the managed HeightFieldShapeSettings exposes NO block-size / bits-per-sample
+            // setter, so the native default block size is used. joltc is a RELEASE build with
+            // Jolt's asserts compiled out, so a bad count does NOT throw - it silently mis-cooks
+            // (n>=3 incl. odd/non-PoT all return a non-null shape; only n<3 fails). We therefore
+            // require a power-of-two count (>= 4): that is exactly what OpenSim terrain produces
+            // (256) and is a safe multiple of any power-of-two block size. Loosening this for odd
+            // varregion tile sizes needs a geometry-correctness test, not just a non-null Create -
+            // input to the still-open varregion-tiling decision.
+            if (sampleCountX != sampleCountY)
+                throw new ArgumentException(
+                    $"Jolt HeightFieldShape is square; got {sampleCountX}x{sampleCountY}. " +
+                    "Non-square regions need padding/tiling (open varregion decision).");
+            int n = sampleCountX;
+            if (n < 4 || (n & (n - 1)) != 0)
+                throw new ArgumentException($"HeightFieldShape sample count must be a power of two >= 4; got {n}.");
+            if (heights.Length < n * n)
+                throw new ArgumentException($"height buffer too small: need {n * n} samples, got {heights.Length}.");
+
+            // settings copies the samples into native storage during construction, so a
+            // cook-time temp array is fine (this path runs once per terrain asset, not per frame).
+            float[] samples = heights.Slice(0, n * n).ToArray();
+            Vector3 offset = Vector3.Zero;
+            Vector3 scl = scale;
+            var settings = new HeightFieldShapeSettings(samples, offset, scl, n);
+            try
+            {
+                Shape shape = settings.Create();
+                return RegisterShape(shape);
+            }
+            finally { settings.Dispose(); }
         }
 
         public ShapeId CreateScaledShape(ShapeId baseShape, Vector3 scale)
@@ -300,8 +449,33 @@ namespace Legion.Physics.Jolt
             throw new NotImplementedException();
         }
 
-        public void AddShapeRef(ShapeId shape) => throw new NotImplementedException();
-        public void ReleaseShape(ShapeId shape) => throw new NotImplementedException();
+        public void AddShapeRef(ShapeId shape)
+        {
+            if (_shapes.TryGet(shape.Value, out JoltShapeRecord rec))
+                Interlocked.Increment(ref rec.RefCount);
+        }
+
+        public void ReleaseShape(ShapeId shape)
+        {
+            if (!_shapes.TryGet(shape.Value, out JoltShapeRecord rec))
+                return;
+            if (Interlocked.Decrement(ref rec.RefCount) <= 0)
+            {
+                // Last Legion reference gone. Dispose our managed Shape wrapper (releases one
+                // native ref). Any Body still using the shape holds its OWN native ref, so the
+                // native RefTarget survives until that body is destroyed - no premature free.
+                rec.NativeShape?.Dispose();
+                rec.NativeShape = null;
+                _shapes.Remove(shape.Value);
+            }
+        }
+
+        // Registers a freshly-created Jolt shape, RefCount = 1 (the creator's reference).
+        private ShapeId RegisterShape(Shape shape)
+        {
+            var rec = new JoltShapeRecord { NativeShape = shape, RefCount = 1 };
+            return new ShapeId(_shapes.Add(rec));
+        }
 
         // =====================================================================
         // Bodies
@@ -309,22 +483,66 @@ namespace Legion.Physics.Jolt
 
         public BodyId CreateBody(in BodyDesc desc)
         {
-            // The important line in this whole method is the activation mode:
-            //
-            //   _bodyInterface.AddBody(id, desc.StartActive ? Activation.Activate
-            //                                               : Activation.DontActivate);
-            //
-            // Jolt deliberately does not auto-wake on insert. Honour that. A
-            // region loading 50k prims with Activate is a stall you will spend
-            // a week chasing.
-            //
-            // Also: because BodyInterface is safe to call off the step thread,
-            // this can be invoked straight from the scene's rez path. No taint
-            // queue, no deferred-add list. That is the concurrency payoff.
-            throw new NotImplementedException();
+            // M1 scope: STATIC bodies only. Dynamics/kinematics (mass from density, CCD,
+            // damping, gravity factor) are deferred, so reject them loudly rather than create a
+            // half-configured body.
+            if (_system == null)
+                throw new InvalidOperationException("CreateBody before Initialize.");
+            if (desc.MotionType != BodyMotionType.Static)
+                throw new NotImplementedException(
+                    $"M1 supports Static bodies only; {desc.MotionType} is deferred past this milestone.");
+            if (!_shapes.TryGet(desc.Shape.Value, out JoltShapeRecord shapeRec) || shapeRec.NativeShape == null)
+                throw new ArgumentException($"CreateBody: {desc.Shape} is not a live shape handle.");
+
+            var objectLayer = new ObjectLayer((uint)desc.Layer);
+            var bcs = new BodyCreationSettings(
+                shapeRec.NativeShape, desc.Position, desc.Orientation, MotionType.Static, objectLayer);
+            try
+            {
+                bcs.Friction = desc.Friction;
+                bcs.Restitution = desc.Restitution;
+                bcs.IsSensor = desc.IsSensor;
+                bcs.UserData = desc.UserData;
+
+                // The load-bearing line (DESIGN.md): do NOT wake on insert unless asked. A region
+                // rezzing tens of thousands of prims with Activate is a pathological startup stall.
+                Activation activation = desc.StartActive ? Activation.Activate : Activation.DontActivate;
+                BodyID joltId = _bodyInterface.CreateAndAddBody(bcs, activation);
+
+                var rec = new JoltBodyRecord
+                {
+                    NativeBodyId = joltId.ID,
+                    Shape = desc.Shape,
+                    Layer = desc.Layer,
+                    MotionType = desc.MotionType,
+                    UserData = desc.UserData,
+                    WantsContactEvents = false,
+                };
+                uint handle = _bodies.Add(rec);
+                rec.Handle = handle;
+                _joltToRecord[joltId.ID] = rec;
+                return new BodyId(handle);
+            }
+            finally
+            {
+                // CreateAndAddBody copies the settings; the managed settings object is ours to free.
+                bcs.Dispose();
+            }
         }
 
-        public void RemoveBody(BodyId body) => throw new NotImplementedException();
+        public void RemoveBody(BodyId body)
+        {
+            if (!_bodies.TryGet(body.Value, out JoltBodyRecord rec))
+                return; // stale/invalid handle - idempotent no-op.
+
+            var joltId = new BodyID(rec.NativeBodyId);
+            _bodyInterface.RemoveAndDestroyBody(joltId);
+            _joltToRecord.TryRemove(rec.NativeBodyId, out _);
+            _bodies.Remove(body.Value); // bumps the generation so the stale handle fails validation.
+            // _activeBodies is step-thread-owned; if this body happened to be active, the stale
+            // id is self-healed at the top of Step (it no longer resolves via _joltToRecord).
+        }
+
         public bool IsBodyValid(BodyId body) => _bodies.IsValid(body.Value);
 
         public void SetBodyShape(BodyId body, ShapeId shape, bool recomputeMass) => throw new NotImplementedException();
@@ -369,7 +587,27 @@ namespace Legion.Physics.Jolt
 
         public void ActivateBody(BodyId body) => throw new NotImplementedException();
         public void DeactivateBody(BodyId body) => throw new NotImplementedException();
-        public bool TryGetBodyState(BodyId body, out BodyState state) => throw new NotImplementedException();
+
+        public bool TryGetBodyState(BodyId body, out BodyState state)
+        {
+            if (!_bodies.TryGet(body.Value, out JoltBodyRecord rec))
+            {
+                state = default;
+                return false;
+            }
+            var joltId = new BodyID(rec.NativeBodyId);
+            state = new BodyState
+            {
+                Body = body,
+                UserData = rec.UserData,
+                Position = _bodyInterface.GetPosition(joltId),
+                Orientation = _bodyInterface.GetRotation(joltId),
+                LinearVelocity = _bodyInterface.GetLinearVelocity(joltId),
+                AngularVelocity = _bodyInterface.GetAngularVelocity(joltId),
+                Flags = _bodyInterface.IsActive(joltId) ? BodyStateFlags.Active : BodyStateFlags.None,
+            };
+            return true;
+        }
 
         // =====================================================================
         // Characters
@@ -463,17 +701,86 @@ namespace Legion.Physics.Jolt
                 _system.Update(deltaTime, collisionSteps, _jobSystem);
             }
 
-            // 3. (Task 4) Drain the ACTIVE bodies - NOT every body. 2.18.6 has no
-            //    GetActiveBodies-returning-a-set; the drain will read from an active set we
-            //    maintain via OnBodyActivated/OnBodyDeactivated. See the Task 4 scout notes.
+            // 3. Fold this frame's queued activation deltas into the step-thread-owned active
+            //    set. This is the ONLY place _activeBodies is mutated. Ordered drain so an
+            //    activate-then-deactivate within one frame nets out correctly.
+            _justActivated.Clear();
+            _justDeactivated.Clear();
+            _staleActive.Clear();
+            while (_activationQueue.TryDequeue(out ActivationDelta delta))
+            {
+                if (delta.Activated)
+                {
+                    if (_activeBodies.Add(delta.BodyId))
+                        _justActivated.Add(delta.BodyId);
+                }
+                else
+                {
+                    _activeBodies.Remove(delta.BodyId);
+                    _justActivated.Remove(delta.BodyId);
+                    _justDeactivated.Add(delta.BodyId);
+                }
+            }
+
             int bodyCount = 0;
             bool bodyOverflow = false;
 
-            // 4. (Task 4) Drain character state.
+            // Drain the ACTIVE set: O(active), NOT O(total). foreach over the concrete HashSet
+            // uses a struct enumerator - no allocation. For static-only M1 this set is empty and
+            // bodyCount stays 0, which is the correct result, not a failure.
+            foreach (uint joltId in _activeBodies)
+            {
+                if (!_joltToRecord.TryGetValue(joltId, out JoltBodyRecord? rec))
+                {
+                    _staleActive.Add(joltId); // removed out from under us; clean up after the loop
+                    continue;
+                }
+                if (bodyCount >= bodyUpdates.Length) { bodyOverflow = true; break; }
+
+                var jid = new BodyID(joltId);
+                BodyStateFlags flags = BodyStateFlags.Active;
+                if (_justActivated.Contains(joltId)) flags |= BodyStateFlags.JustActivated;
+                bodyUpdates[bodyCount++] = new BodyState
+                {
+                    Body = new BodyId(rec.Handle),
+                    UserData = rec.UserData,
+                    Position = _bodyInterface.GetPosition(jid),
+                    Orientation = _bodyInterface.GetRotation(jid),
+                    LinearVelocity = _bodyInterface.GetLinearVelocity(jid),
+                    AngularVelocity = _bodyInterface.GetAngularVelocity(jid),
+                    Flags = flags,
+                };
+            }
+            for (int i = 0; i < _staleActive.Count; i++)
+                _activeBodies.Remove(_staleActive[i]);
+
+            // Bodies that slept THIS step get one final state with JustDeactivated set - without
+            // it the viewer keeps interpolating and settled objects visibly drift.
+            for (int i = 0; i < _justDeactivated.Count && !bodyOverflow; i++)
+            {
+                uint joltId = _justDeactivated[i];
+                if (!_joltToRecord.TryGetValue(joltId, out JoltBodyRecord? rec))
+                    continue; // deactivated AND removed same frame - nothing to emit.
+                if (bodyCount >= bodyUpdates.Length) { bodyOverflow = true; break; }
+
+                var jid = new BodyID(joltId);
+                bodyUpdates[bodyCount++] = new BodyState
+                {
+                    Body = new BodyId(rec.Handle),
+                    UserData = rec.UserData,
+                    Position = _bodyInterface.GetPosition(jid),
+                    Orientation = _bodyInterface.GetRotation(jid),
+                    LinearVelocity = _bodyInterface.GetLinearVelocity(jid),
+                    AngularVelocity = _bodyInterface.GetAngularVelocity(jid),
+                    Flags = BodyStateFlags.JustDeactivated,
+                };
+            }
+
+            // 4. (Task 5+) Drain character state.
             int charCount = 0;
 
-            // 5. Drain contacts from the listener's ring buffer. Empty until the OnContact*
-            //    events are wired (delta #7), but the plumbing is in place.
+            // 5. Drain contacts from the listener's ring buffer. Fed by the OnContact* handlers
+            //    (delta #7); no contacts fire for static-only M1, so this drains empty.
             int contactCount = _contactListener.Drain(contacts, out bool contactOverflow);
 
             _stepTimer.Stop();
@@ -484,7 +791,7 @@ namespace Legion.Physics.Jolt
                 contactCount,
                 bodyOverflow,
                 contactOverflow,
-                activeBodyCount: bodyCount,
+                activeBodyCount: _activeBodies.Count,
                 physicsMs: (float)_stepTimer.Elapsed.TotalMilliseconds);
         }
     }
@@ -627,7 +934,8 @@ namespace Legion.Physics.Jolt
     // engine will not remember for us.
     internal sealed class JoltBodyRecord
     {
-        public uint NativeBodyId;
+        public uint Handle;               // our Legion HandleTable handle (for jolt-id -> BodyId)
+        public uint NativeBodyId;         // Jolt BodyID.ID
         public ShapeId Shape;
         public PhysicsLayer Layer;
         public BodyMotionType MotionType;
@@ -637,7 +945,7 @@ namespace Legion.Physics.Jolt
 
     internal sealed class JoltShapeRecord
     {
-        public IntPtr Native;
+        public Shape? NativeShape;        // managed Jolt shape wrapper; disposed at RefCount 0
         public int RefCount;
         public bool IsScaledWrapper;
         public ShapeId BaseShape;
