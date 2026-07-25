@@ -128,11 +128,21 @@ These need answers before implementation, not during:
    evidence. The ini plumbing is M6 integration work — this records the decision
    only. Varregion TILING (decision #1) stays OPEN.
 
-4. **Persist-contact filtering.** An avatar standing still generates a contact
+4. **Persist-contact filtering.** ~~An avatar standing still generates a contact
    event every step forever. The `WantsContactEvents` flag on the body record
    gates this, but something has to set it from whether the object has a
    `collision` handler registered. That plumbing crosses into the script engine
-   and is worth designing alongside Phlox rather than bolting on.
+   and is worth designing alongside Phlox rather than bolting on.~~
+   **RESOLVED (M2 Task 2, measured):** Jolt STOPS firing `OnContactPersisted` the
+   moment a body sleeps — zero after-sleep Persist at every drop height tested. So
+   **sleep is the filter for resting objects**; a settled prim generates no ongoing
+   Persist and `WantsContactEvents` does NOT need to gate settled content. Its SOLE
+   job is the **awake-but-touching** case — specifically an avatar standing still:
+   `CharacterVirtual` never sleeps, so without the gate it would emit a Persist
+   against the floor every step forever. The gate (Begin/End always forwarded;
+   Persist forwarded only when a body in the pair wants events) is set from whether
+   the object has a `collision` handler registered — a `BodyDesc.WantsContactEvents`
+   creation flag today, with a runtime setter deferred to the M5 script surface.
 
 5. **JoltPhysicsSharp version pin.** Current releases target net9.0/net10.0.
    Either pin around 2.15.0 for net8.0 or bump Legion's target. Worth deciding
@@ -163,6 +173,16 @@ are not silently "corrected" later — they are deliberate, not incidental.
   **recreates** the body as movable. The recreation cost is paid only for the rare prim
   that actually goes physical; the ~99% that never do keep the cheap Static path. (M2
   delta #15.)
+
+- **Contact impulse is read inside the contact callback — and that is within discipline.**
+  The reported impulse comes from `Jolt.EstimateCollisionResponse`, Jolt's own in-callback
+  helper, which reads the two `Body` refs Jolt **already locked and handed** to the callback.
+  This is NOT a violation of the worker-thread contact discipline. The rule is precise: **no
+  lock we take, no allocation, no scene-state access** — all three hold (we take no lock; it is
+  measured allocation-free at ~0 bytes/call; it touches no Legion scene state). Impulse is
+  physically unobtainable without the bodies' velocity/mass, and this is the sanctioned source.
+  Do NOT "tighten" this later into "touch no bodies at all" — that misreads the rule and would
+  throw away the only real impulse we can report. (M2 delta #18.)
 
 ## Build notes
 
