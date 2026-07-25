@@ -265,6 +265,51 @@ internal static class Program
             backend.RemoveBody(impBody);
             backend.ReleaseShape(dynBox);
 
+            // ---- 12. CONTACT LIFECYCLE: Begin on landing, Persist while settling, End on removal. ----
+            Console.WriteLine("\n[12] Contact lifecycle (Begin/Persist/End, UserData both sides, normal A->B, impulse)");
+            ContactTally ct = RunContactDrop(backend, 10f, wantsEvents: true, boxUD: 4242u, contactsBufLen: 16);
+            Console.WriteLine($"      Begin={ct.Begin} Persist={ct.Persist} End={ct.End}  maxImpulse={ct.MaxImpulse:0} Ns  landingNormal={ct.LandingNormal}");
+            Console.WriteLine($"      persistBeforeSleep={ct.PersistBeforeSleep} persistAfterSleep={ct.PersistAfterSleep} sleepStep={ct.SleepStep} overflowSeen={ct.OverflowSeen}");
+            Check(ct.Begin >= 1, $"Begin fired on landing (got {ct.Begin})");
+            Check(ct.Persist >= 1, $"Persist fired while settling (got {ct.Persist})");
+            Check(ct.End >= 1, $"End fired when the box was removed (got {ct.End})");
+            Check(ct.AnyReport && ct.AllBothSidesResolved, "both BodyA and BodyB resolved on every contact report");
+            Check(ct.AllBoxSideOk, "box side UserData == 4242 and maps to the box body");
+            Check(ct.AllTerrainSideOk, "terrain side UserData == 0 and is a valid body");
+            // Contract: Normal points A->B. The box lands ON TOP of the terrain, so A->B is vertical;
+            // its sign depends on which body Jolt made A. If box is A (upper), A->B points DOWN; if the
+            // terrain is A (lower), A->B points UP. Either is correct - assert consistency, not a fixed sign.
+            Check(ct.GotLandingNormal && MathF.Abs(ct.LandingNormal.Z) > 0.9f
+                  && (ct.LandingBoxIsA ? ct.LandingNormal.Z < 0f : ct.LandingNormal.Z > 0f),
+                $"landing normal is vertical and points A->B (box is {(ct.LandingBoxIsA ? "A->down" : "B->up")}, n.z={ct.LandingNormal.Z:0.000})");
+            Check(ct.MaxImpulse > 0f, $"impulse non-zero on impact (peak {ct.MaxImpulse:0} Ns)");
+            Check(!ct.OverflowSeen, "contact ring overflow flag FALSE in normal operation");
+            // decision #4 input, baked in as a permanent regression: sleep silences Persist.
+            Check(ct.PersistAfterSleep == 0, $"Persist STOPS once the body sleeps (after-sleep Persist = {ct.PersistAfterSleep})  [#4 input]");
+
+            // ---- 13. IMPULSE SCALES WITH DROP HEIGHT. ----
+            Console.WriteLine("\n[13] Impulse scales with drop height (harder landing -> larger impulse)");
+            ContactTally lo = RunContactDrop(backend, 2f, wantsEvents: true, boxUD: 11u, contactsBufLen: 16);
+            ContactTally hi = RunContactDrop(backend, 30f, wantsEvents: true, boxUD: 22u, contactsBufLen: 16);
+            Console.WriteLine($"      drop 2m -> peak {lo.MaxImpulse:0} Ns    drop 30m -> peak {hi.MaxImpulse:0} Ns");
+            Check(lo.MaxImpulse > 0f && hi.MaxImpulse > lo.MaxImpulse,
+                $"higher drop yields larger peak impulse ({hi.MaxImpulse:0} > {lo.MaxImpulse:0})");
+
+            // ---- 14. PERSIST GATE: WantsContactEvents=false suppresses Persist; Begin/End still fire. ----
+            Console.WriteLine("\n[14] Persist gate (WantsContactEvents=false suppresses Persist, edge events survive)");
+            ContactTally gated = RunContactDrop(backend, 10f, wantsEvents: false, boxUD: 55u, contactsBufLen: 16);
+            Console.WriteLine($"      wants=false: Begin={gated.Begin} Persist={gated.Persist} End={gated.End}");
+            Check(gated.Begin >= 1, $"Begin still fires when gated (edge event, got {gated.Begin})");
+            Check(gated.End >= 1, $"End still fires when gated (edge event, got {gated.End})");
+            Check(gated.Persist == 0, $"Persist SUPPRESSED when WantsContactEvents=false (got {gated.Persist}, want 0)");
+
+            // ---- 15. OVERFLOW must SURFACE, not silently eat: tiny buffer + many simultaneous contacts. ----
+            Console.WriteLine("\n[15] Contact overflow trips the flag and drains safely (tiny buffer, many contacts)");
+            ContactTally of = RunManyContactsOverflow(backend);
+            Console.WriteLine($"      overflowSeen={of.OverflowSeen} drainSafe={of.DrainSafe}");
+            Check(of.OverflowSeen, "ContactBufferOverflowed reported TRUE when contacts exceed the buffer");
+            Check(of.DrainSafe, "drain stayed safe under overflow (ContactCount never exceeded the buffer)");
+
             // cleanup
             backend.RemoveBody(boxBody);
             backend.ReleaseShape(box);
@@ -326,6 +371,8 @@ internal static class Program
         d.Layer = PhysicsLayer.Dynamic;
         d.StartActive = true;
         d.UserData = 4242u;
+        d.WantsContactEvents = true;   // exercise the full contact path (Persist + impulse estimate)
+                                       // during the drop, incl. the determinism runs in [11].
         BodyId body = b.CreateBody(d);
 
         var m = new DropMetrics();
@@ -369,6 +416,157 @@ internal static class Program
         b.ReleaseShape(box);
         b.ReleaseShape(flat);
         return m;
+    }
+
+    // Tally of contact reports observed across one drop.
+    private struct ContactTally
+    {
+        public int Begin, Persist, End;
+        public int PersistBeforeSleep, PersistAfterSleep;
+        public float MaxImpulse;
+        public Vector3 LandingNormal;
+        public bool LandingBoxIsA;         // at the landing contact, was the box BodyA? (fixes normal sign expectation)
+        public bool GotLandingNormal;
+        public bool AnyReport;              // saw at least one Begin/Persist (makes the *Ok flags meaningful)
+        public bool AllBothSidesResolved;   // every Begin/Persist had BodyA AND BodyB valid
+        public bool AllBoxSideOk;           // box side UserData matched boxUD and mapped to the box body
+        public bool AllTerrainSideOk;       // other side had UserData 0 and a valid body
+        public bool OverflowSeen;
+        public bool DrainSafe;
+        public int SleepStep;
+    }
+
+    private static void ClassifyPair(ref ContactTally t, in ContactReport c, BodyId box, uint boxUD)
+    {
+        t.AnyReport = true;
+        if (!(c.BodyA.IsValid && c.BodyB.IsValid)) t.AllBothSidesResolved = false;
+        bool aIsBox = c.BodyA.Equals(box);
+        bool bIsBox = c.BodyB.Equals(box);
+        if (aIsBox ^ bIsBox)
+        {
+            uint boxSideUD = aIsBox ? c.UserDataA : c.UserDataB;
+            uint terrSideUD = aIsBox ? c.UserDataB : c.UserDataA;
+            BodyId terrSide = aIsBox ? c.BodyB : c.BodyA;
+            if (boxSideUD != boxUD) t.AllBoxSideOk = false;
+            if (!(terrSideUD == 0u && terrSide.IsValid)) t.AllTerrainSideOk = false;
+        }
+        else
+        {
+            t.AllBoxSideOk = false; // neither or both side is the box -> unexpected pairing
+        }
+    }
+
+    // Drops one Dynamic box onto flat terrain and tallies the contact reports Begin/Persist/End,
+    // then removes the box and steps once more to catch End. contactsBufLen sizes the per-step
+    // contact buffer (small values deliberately probe the overflow path).
+    private static ContactTally RunContactDrop(ILegionPhysicsBackend b, float height, bool wantsEvents, uint boxUD, int contactsBufLen)
+    {
+        ShapeId flat = b.CreateHeightFieldShape(new float[N * N], N, N, new Vector3(S, S, S));
+        b.SetTerrain(flat, Vector3.Zero);
+        ShapeId box = b.CreateBoxShape(new Vector3(0.5f, 0.5f, 0.5f));
+
+        var d = BodyDesc.Default;
+        d.Shape = box;
+        d.Position = new Vector3(20f, 20f, height);
+        d.MotionType = BodyMotionType.Dynamic;
+        d.Layer = PhysicsLayer.Dynamic;
+        d.StartActive = true;
+        d.UserData = boxUD;
+        d.WantsContactEvents = wantsEvents;
+        BodyId body = b.CreateBody(d);
+
+        var t = new ContactTally { AllBothSidesResolved = true, AllBoxSideOk = true, AllTerrainSideOk = true, DrainSafe = true, SleepStep = -1 };
+        var buf = new BodyState[8];
+        var chars = new CharacterState[2];
+        var contacts = new ContactReport[Math.Max(1, contactsBufLen)];
+        const int MaxSteps = 1200;
+
+        for (int i = 0; i < MaxSteps; i++)
+        {
+            StepResult r = b.Step(1f / 60f, buf, chars, contacts);
+            if (r.ContactBufferOverflowed) t.OverflowSeen = true;
+            if (r.ContactCount > contacts.Length) t.DrainSafe = false;
+
+            for (int k = 0; k < r.ContactCount; k++)
+            {
+                ContactReport c = contacts[k];
+                switch (c.Phase)
+                {
+                    case ContactPhase.Begin:
+                        t.Begin++;
+                        ClassifyPair(ref t, in c, body, boxUD);
+                        if (!t.GotLandingNormal) { t.LandingNormal = c.Normal; t.LandingBoxIsA = c.BodyA.Equals(body); t.GotLandingNormal = true; }
+                        if (c.Impulse > t.MaxImpulse) t.MaxImpulse = c.Impulse;
+                        break;
+                    case ContactPhase.Persist:
+                        t.Persist++;
+                        ClassifyPair(ref t, in c, body, boxUD);
+                        if (c.Impulse > t.MaxImpulse) t.MaxImpulse = c.Impulse;
+                        if (t.SleepStep < 0) t.PersistBeforeSleep++; else t.PersistAfterSleep++;
+                        break;
+                    case ContactPhase.End:
+                        t.End++;
+                        break;
+                }
+            }
+
+            if (t.SleepStep < 0 && r.ActiveBodyCount == 0 && i > 0)
+                t.SleepStep = i;
+            if (t.SleepStep >= 0 && i > t.SleepStep + 30) // observe post-sleep Persist for a while, then stop
+                break;
+        }
+
+        // Remove the box -> End should fire on the next step for the resting pair.
+        b.RemoveBody(body);
+        StepResult rEnd = b.Step(1f / 60f, buf, chars, contacts);
+        for (int k = 0; k < rEnd.ContactCount; k++)
+            if (contacts[k].Phase == ContactPhase.End) t.End++;
+
+        b.ReleaseShape(box);
+        b.ReleaseShape(flat);
+        return t;
+    }
+
+    // Rests many Dynamic boxes on terrain (all wanting contact events) and drains through a
+    // deliberately tiny 2-slot contact buffer, forcing the overflow flag to trip. Proves the
+    // overflow is SURFACED (flag true) and the drain stays safe (never writes past the buffer).
+    private static ContactTally RunManyContactsOverflow(ILegionPhysicsBackend b)
+    {
+        ShapeId flat = b.CreateHeightFieldShape(new float[N * N], N, N, new Vector3(S, S, S));
+        b.SetTerrain(flat, Vector3.Zero);
+        ShapeId box = b.CreateBoxShape(new Vector3(0.5f, 0.5f, 0.5f));
+
+        var bodies = new System.Collections.Generic.List<BodyId>();
+        const int Count = 24;
+        for (int i = 0; i < Count; i++)
+        {
+            var d = BodyDesc.Default;
+            d.Shape = box;
+            d.Position = new Vector3(10f + i * 2f, 10f, 0.5f); // bottom on terrain, 2 m apart (no mutual overlap)
+            d.MotionType = BodyMotionType.Dynamic;
+            d.Layer = PhysicsLayer.Dynamic;
+            d.StartActive = true;
+            d.WantsContactEvents = true;
+            d.UserData = (uint)(1000 + i);
+            bodies.Add(b.CreateBody(d));
+        }
+
+        var t = new ContactTally { DrainSafe = true };
+        var buf = new BodyState[64];
+        var chars = new CharacterState[2];
+        var contacts = new ContactReport[2]; // TINY on purpose
+
+        for (int i = 0; i < 30; i++)
+        {
+            StepResult r = b.Step(1f / 60f, buf, chars, contacts);
+            if (r.ContactBufferOverflowed) t.OverflowSeen = true;
+            if (r.ContactCount > contacts.Length) t.DrainSafe = false;
+        }
+
+        foreach (BodyId bd in bodies) b.RemoveBody(bd);
+        b.ReleaseShape(box);
+        b.ReleaseShape(flat);
+        return t;
     }
 
     private static void RunDeterminismCheck()

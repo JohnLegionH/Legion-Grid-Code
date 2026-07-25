@@ -90,6 +90,11 @@ namespace Legion.Physics.Jolt
         // asserts "convex radius larger than shape".
         private const float DefaultConvexRadius = 0.05f;
 
+        // Restitution below this closing speed is dropped (Jolt's default 1.0 m/s). Used ONLY to feed
+        // the contact-impulse estimator (EstimateCollisionResponse) with the same threshold the solver
+        // will use, so the reported impulse matches what actually gets applied.
+        private const float MinVelocityForRestitution = 1.0f;
+
         private readonly struct ActivationDelta
         {
             public readonly uint BodyId;
@@ -340,30 +345,69 @@ namespace Legion.Physics.Jolt
         private void HandleContactAdded(
             PhysicsSystem system, in Body body1, in Body body2,
             in ContactManifold manifold, ref ContactSettings settings)
-            => PushContact(body1.ID.ID, body2.ID.ID, in manifold, ContactPhase.Begin);
+            => PushContact(in body1, in body2, in manifold, in settings, ContactPhase.Begin);
 
         private void HandleContactPersisted(
             PhysicsSystem system, in Body body1, in Body body2,
             in ContactManifold manifold, ref ContactSettings settings)
-            => PushContact(body1.ID.ID, body2.ID.ID, in manifold, ContactPhase.Persist);
+            => PushContact(in body1, in body2, in manifold, in settings, ContactPhase.Persist);
 
         private void HandleContactRemoved(PhysicsSystem system, ref SubShapeIDPair pair)
-            => _contactListener.Push(BuildContact(
-                pair.Body1ID.ID, pair.Body2ID.ID, default, default, ContactPhase.End));
-
-        private void PushContact(uint joltA, uint joltB, in ContactManifold manifold, ContactPhase phase)
         {
-            // Impulse is a post-solve quantity; Added/Persisted fire pre-solve, so it is not
-            // available here (left 0). Point/normal come straight off the manifold.
-            Vector3 point = manifold.PointCount > 0 ? manifold.GetWorldSpaceContactPointOn1(0) : default;
-            _contactListener.Push(BuildContact(joltA, joltB, point, manifold.WorldSpaceNormal, phase));
+            // The pair separated (or a body was destroyed): no manifold, so no point/normal/impulse.
+            // Still resolve both sides from the reverse map for the collision_end dispatch above. If
+            // one body was just removed its record may already be gone -> that side reports Invalid,
+            // which is correct (there is nothing left to name).
+            _joltToRecord.TryGetValue(pair.Body1ID.ID, out JoltBodyRecord? ra);
+            _joltToRecord.TryGetValue(pair.Body2ID.ID, out JoltBodyRecord? rb);
+            _contactListener.Push(BuildContact(ra, rb, default, default, 0f, ContactPhase.End));
         }
 
-        private ContactReport BuildContact(
-            uint joltA, uint joltB, Vector3 point, Vector3 normal, ContactPhase phase)
+        // WORKER-THREAD context. Resolve both sides from the reverse map (never lock a body), apply the
+        // Persist gate, estimate the impulse, and push into the ring. No allocation, no scene state.
+        private void PushContact(
+            in Body body1, in Body body2, in ContactManifold manifold,
+            in ContactSettings settings, ContactPhase phase)
         {
-            _joltToRecord.TryGetValue(joltA, out JoltBodyRecord? ra);
-            _joltToRecord.TryGetValue(joltB, out JoltBodyRecord? rb);
+            _joltToRecord.TryGetValue(body1.ID.ID, out JoltBodyRecord? ra);
+            _joltToRecord.TryGetValue(body2.ID.ID, out JoltBodyRecord? rb);
+
+            // Persist gate (DESIGN.md #4). Persist fires every step for every touching pair; forward it
+            // ONLY when a body in the pair wants contact events (has a collision handler). Begin/End are
+            // cheap edge events and are never gated. Empirically Jolt STOPS firing Persist once a body
+            // sleeps, so this gate only ever suppresses awake-but-touching pairs (e.g. an avatar
+            // standing still). Final #4 policy is John's call - this is the mechanism, on by design.
+            if (phase == ContactPhase.Persist &&
+                !((ra?.WantsContactEvents ?? false) || (rb?.WantsContactEvents ?? false)))
+                return;
+
+            // Point on body 1, and the manifold normal. Jolt's WorldSpaceNormal points body1 -> body2,
+            // which IS our A->B convention (A = body1) - verified on a box-on-ground drop (normal +Z,
+            // ground=A -> box=B). No sign flip.
+            Vector3 point = manifold.PointCount > 0 ? manifold.GetWorldSpaceContactPointOn1(0) : default;
+            Vector3 normal = manifold.WorldSpaceNormal;
+
+            // Impulse is a POST-solve quantity but Added/Persisted fire PRE-solve, so we use Jolt's own
+            // in-callback estimator - the same helper its collision-sound sample uses. It reads only the
+            // two bodies Jolt already handed us (NOT a lock we take) plus the manifold, and is
+            // allocation-free (measured ~0 bytes/call). Sum the per-point NORMAL impulses -> newton-seconds.
+            float impulse = 0f;
+            // Fully qualified: our own namespace is Legion.Physics.Jolt, which would otherwise shadow
+            // the JoltPhysicsSharp.Jolt static helper class.
+            JoltPhysicsSharp.Jolt.EstimateCollisionResponse(
+                body1, body2, manifold, out CollisionEstimationResult response,
+                settings.CombinedFriction, settings.CombinedRestitution,
+                MinVelocityForRestitution, Math.Max(1, _settings.VelocityIterations));
+            ReadOnlySpan<CollisionEstimationResult.Impulse> impulses = response.Impulses;
+            for (int i = 0; i < impulses.Length; i++)
+                impulse += impulses[i].ContactImpulse;
+
+            _contactListener.Push(BuildContact(ra, rb, point, normal, MathF.Max(0f, impulse), phase));
+        }
+
+        private static ContactReport BuildContact(
+            JoltBodyRecord? ra, JoltBodyRecord? rb, Vector3 point, Vector3 normal, float impulse, ContactPhase phase)
+        {
             return new ContactReport
             {
                 BodyA = ra != null ? new BodyId(ra.Handle) : BodyId.Invalid,
@@ -372,7 +416,7 @@ namespace Legion.Physics.Jolt
                 UserDataB = rb != null ? rb.UserData : 0u,
                 Point = point,
                 Normal = normal,
-                Impulse = 0f,
+                Impulse = impulse,
                 Phase = phase,
             };
         }
@@ -604,7 +648,7 @@ namespace Legion.Physics.Jolt
                     Layer = desc.Layer,
                     MotionType = desc.MotionType,
                     UserData = desc.UserData,
-                    WantsContactEvents = false,
+                    WantsContactEvents = desc.WantsContactEvents,
                     Mass = mass,
                     AllowMotionChange = movable,
                 };

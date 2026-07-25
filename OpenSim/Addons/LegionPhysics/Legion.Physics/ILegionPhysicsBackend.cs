@@ -235,6 +235,15 @@ namespace Legion.Physics
         public bool IsSensor;
 
         /// <summary>
+        /// Whether this body wants per-step contact (Persist) events forwarded. Begin/End edge
+        /// events are ALWAYS reported; Persist is gated on this so a resting or standing object
+        /// does not emit a contact every step forever. Set it from whether the object has a
+        /// <c>collision</c> handler registered. (Jolt also stops firing Persist once a body sleeps,
+        /// so this gate only ever suppresses awake-but-touching pairs.)
+        /// </summary>
+        public bool WantsContactEvents;
+
+        /// <summary>
         /// Whether to wake the body on insertion. Default FALSE and that matters:
         /// region startup inserts tens of thousands of bodies and waking each one
         /// is the single easiest way to make startup pathological.
