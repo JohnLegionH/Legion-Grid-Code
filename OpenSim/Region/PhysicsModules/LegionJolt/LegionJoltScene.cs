@@ -197,6 +197,23 @@ namespace OpenSim.Region.PhysicsModules.LegionJolt
                 return;
             }
 
+            if (cmd.Length >= 2 && cmd[1] == "terrainslope")
+            {
+                // Push a KNOWN X-gradient (z rises with X, independent of Y) through the real SetTerrain
+                // path to prove orientation + the row-mirror fix on real-shaped data: a raycast at (x,y)
+                // must read z = base + x*slope. A transpose would make z depend on Y; a mirror would
+                // invert it. base+slope chosen so probes are unambiguous.
+                const float baseZ = 10f, slope = 0.1f;
+                var hm = new float[_regionSizeX * _regionSizeY];
+                for (int gy = 0; gy < _regionSizeY; gy++)
+                    for (int gx = 0; gx < _regionSizeX; gx++)
+                        hm[gy * _regionSizeX + gx] = baseZ + gx * slope;
+                SetTerrain(hm);
+                MainConsole.Instance.Output($"{LogHeader} set X-gradient terrain: z = {baseZ} + x*{slope} (independent of y).");
+                MainConsole.Instance.Output($"  confirm orientation: jolt probe 50 200 -> z~15 ; jolt probe 200 50 -> z~30 (z tracks X, not Y).");
+                return;
+            }
+
             if (cmd.Length >= 4 && cmd[1] == "probe"
                 && float.TryParse(cmd[2], out float x) && float.TryParse(cmd[3], out float y))
             {
