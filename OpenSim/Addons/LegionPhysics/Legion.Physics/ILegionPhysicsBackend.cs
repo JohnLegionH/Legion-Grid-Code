@@ -114,9 +114,9 @@ namespace Legion.Physics
         Sensor = 4,
 
         /// <summary>
-        /// Optional cheap tier: collides with Terrain and Static only, never with
-        /// other Debris. Useful for bullet-hell / particle-ish content that would
-        /// otherwise be O(n^2). Not required for first light.
+        /// Cheap tier: collides with Terrain, Static, Dynamic and Avatar, but NEVER
+        /// with other Debris - the Debris-vs-Debris pair is what would be O(n^2).
+        /// Useful for bullet-hell / particle-ish content. Not required for first light.
         /// </summary>
         Debris = 5,
     }
