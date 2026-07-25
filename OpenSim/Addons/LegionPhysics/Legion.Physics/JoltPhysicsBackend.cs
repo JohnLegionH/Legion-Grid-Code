@@ -86,6 +86,10 @@ namespace Legion.Physics.Jolt
         // Current terrain body (SetTerrain replaces it). BodyId.Invalid = none.
         private BodyId _terrainBody = BodyId.Invalid;
 
+        // Region water plane height (metres, region-local Z). Stored for buoyancy (M8) and queries;
+        // no water collision body in the solve yet - water is a force field, not a surface.
+        private float _waterHeight;
+
         // ObjectLayerFilter objects (native callbacks) keyed by QueryFilter value, built lazily so each
         // distinct filter allocates its callback once. Disposed in Dispose.
         private readonly ConcurrentDictionary<QueryFilter, LayerQueryFilter> _queryFilters =
@@ -119,6 +123,11 @@ namespace Legion.Physics.Jolt
         // the contact-impulse estimator (EstimateCollisionResponse) with the same threshold the solver
         // will use, so the reported impulse matches what actually gets applied.
         private const float MinVelocityForRestitution = 1.0f;
+
+        // Minimum heightfield sample count per side. joltc 2.18.6 silently mis-cooks n<3 (asserts
+        // compiled out); the M6 terrain feed passes region-derived (N+1) odd counts (257, 513, ...),
+        // which the M1 "257 result" proved cook faithfully. 4 is a defensive floor above the 3 hard limit.
+        private const int MinHeightFieldSampleCount = 4;
 
         private readonly struct ActivationDelta
         {
@@ -582,22 +591,25 @@ namespace Legion.Physics.Jolt
             // Y-up field, then wrap it in a RotatedTranslatedShape and return the WRAPPER's handle,
             // which is already Z-up-correct and self-consistent for any caller/query. See below.
             //
-            // Sample-count constraint (verified empirically vs joltc 2.18.6 - see MILESTONE1
-            // notes): the managed HeightFieldShapeSettings exposes NO block-size / bits-per-sample
-            // setter, so the native default block size is used. joltc is a RELEASE build with
-            // Jolt's asserts compiled out, so a bad count does NOT throw - it silently mis-cooks
-            // (n>=3 incl. odd/non-PoT all return a non-null shape; only n<3 fails). We therefore
-            // require a power-of-two count (>= 4): that is exactly what OpenSim terrain produces
-            // (256) and is a safe multiple of any power-of-two block size. Loosening this for odd
-            // varregion tile sizes needs a geometry-correctness test, not just a non-null Create -
-            // input to the still-open varregion-tiling decision.
+            // Sample-count constraint (verified empirically vs joltc 2.18.6 - see the MILESTONE notes):
+            // the managed HeightFieldShapeSettings exposes NO block-size / bits-per-sample setter, so the
+            // native default block size is used. joltc is a RELEASE build with Jolt's asserts compiled
+            // out, so a bad count does NOT throw - it silently mis-cooks (n>=3 incl. odd/non-PoT all
+            // return a non-null shape; only n<3 fails). The M1 "257 result" PROVED an odd/prime count
+            // reproduces its input faithfully (block divisibility is a NON-constraint), and the varregion
+            // decision is CLOSED on one (N+1)-square field per region (257 for a 256 m region, 513 for a
+            // 512 m one). So the M6 terrain feed hands ODD (N+1) counts, and this guard now accepts
+            // square + >= a sane floor - NOT power-of-two. Non-square is padded to square (edge
+            // replication) by the terrain feed above the seam; we still reject it here defensively.
             if (sampleCountX != sampleCountY)
                 throw new ArgumentException(
                     $"Jolt HeightFieldShape is square; got {sampleCountX}x{sampleCountY}. " +
-                    "Non-square regions need padding/tiling (open varregion decision).");
+                    "Non-square regions must be padded to square (edge replication) before cooking.");
             int n = sampleCountX;
-            if (n < 4 || (n & (n - 1)) != 0)
-                throw new ArgumentException($"HeightFieldShape sample count must be a power of two >= 4; got {n}.");
+            if (n < MinHeightFieldSampleCount)
+                throw new ArgumentException(
+                    $"HeightFieldShape sample count must be >= {MinHeightFieldSampleCount}; got {n} " +
+                    "(n<3 silently mis-cooks in joltc 2.18.6).");
             if (heights.Length < n * n)
                 throw new ArgumentException($"height buffer too small: need {n * n} samples, got {heights.Length}.");
 
@@ -1500,7 +1512,7 @@ namespace Legion.Physics.Jolt
             finally { bcs.Dispose(); }
         }
 
-        public void SetWaterHeight(float height) => throw new NotImplementedException();
+        public void SetWaterHeight(float height) => _waterHeight = height;
 
         // =====================================================================
         // Queries  (safe concurrent with Step - use the NarrowPhaseQuery)
