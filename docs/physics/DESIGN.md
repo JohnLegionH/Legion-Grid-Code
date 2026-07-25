@@ -201,10 +201,23 @@ are not silently "corrected" later — they are deliberate, not incidental.
   on side A with an **Invalid BodyId** (an avatar is not a solver body). Avatar-avatar collision is ON
   by default (`CharacterVsCharacterCollisionSimple`: they push and block), matching SL's
   `[BulletSim]AvatarToAvatarCollisionsByDefault = true` — making that a config knob is M6.
-  Known gap left open: a thrown physical object does NOT bounce off a standing avatar (no solid
-  presence in the solve); the avatar detects/reports it and side-steps via penetration recovery. If
-  true momentum transfer onto avatars is wanted later, it needs a solid presence and must be weighed
-  against the push-behaviour change above. (M3.5; deltas #27-#30.)
+  Known gap (**a real SL-parity gap, NOT intentional parity** — verified against the SL wiki: "avatars
+  will collide with solid objects", and physical objects collide with avatars unless the object is
+  Phantom/VolumeDetect): a thrown physical object does NOT bounce off a standing avatar here — a pure
+  `CharacterVirtual` has no solid presence in the solve, so the avatar detects/reports the object and
+  side-steps via penetration recovery instead of stopping/deflecting it. SL genuinely stops/deflects
+  physical objects on avatars, so closing this is worth doing eventually; it needs a solid presence
+  and must be weighed against the push-behaviour change in (c) above. Tracked, not closed. (M3.5;
+  deltas #27-#30.)
+
+- **M5 SCRIPT-DISPATCH CONTRACT for avatar contacts (delta #30) — build M5 to this, do not patch later.**
+  An avatar is not a solver body, so its contact reports carry **`BodyId.Invalid` on the avatar side**
+  and the **avatar's identity in `UserData`**. Consequences the M5 collision-dispatch layer MUST honour:
+  (1) key avatar identity off **`UserData`**, NEVER off `BodyId` (which is Invalid for avatars — do not
+  call `TryGetBodyState`/`IsBodyValid` on it); (2) **collision FORCE/impulse is unavailable for avatar
+  contacts** (reported as 0 — the CharacterVirtual contact is controller-resolved, not solver-resolved),
+  so any collision **sound-volume or damage magnitude** model must treat avatar hits as force-less
+  (fall back to a fixed/typed value, do not read `ContactReport.Impulse` for them).
 
 - **ACCEPTED characteristics (documented, not open items):**
   - *Characters are not lock-free like bodies (M3 #2).* `CharacterVirtual` create/remove/set/step are
