@@ -591,6 +591,32 @@ internal static class Program
             Check(hitL.UserData == 8000u, $"compound body UserData is the linkset root 8000 (got {hitL.UserData})");
             backend.RemoveBody(compBody); backend.ReleaseShape(compound);
 
+            // [32b] Compound as a DYNAMIC body (M7 Task 1 foundation): a linkset (root + 2 children) is ONE
+            // rigid body - it falls and rests as one (children welded, not simulating apart), and its mass
+            // is the SUM of the parts. This is what a physical linkset's compound body must do.
+            Console.WriteLine("\n[32b] Compound DYNAMIC (linkset): falls + rests as one body; mass = sum of parts");
+            ShapeId lcb = backend.CreateBoxShape(new Vector3(0.5f, 0.5f, 0.5f)); // 1 m box, volume 1
+            var lkids = new CompoundChild[]
+            {
+                new CompoundChild { Shape = lcb, Position = new Vector3(0f, 0f, 0f), Orientation = System.Numerics.Quaternion.Identity, UserData = 8100u },
+                new CompoundChild { Shape = lcb, Position = new Vector3(1.5f, 0f, 0f), Orientation = System.Numerics.Quaternion.Identity, UserData = 8101u },
+                new CompoundChild { Shape = lcb, Position = new Vector3(0f, 1.5f, 0f), Orientation = System.Numerics.Quaternion.Identity, UserData = 8102u },
+            };
+            ShapeId lcompound = backend.CreateCompoundShape(lkids);
+            var lDesc = BodyDesc.Default; lDesc.Shape = lcompound; lDesc.Position = new Vector3(100f, 100f, 30f);
+            lDesc.MotionType = BodyMotionType.Dynamic; lDesc.Layer = PhysicsLayer.Dynamic; lDesc.UserData = 8100u; lDesc.StartActive = true;
+            BodyId lbody = backend.CreateBody(lDesc); backend.ActivateBody(lbody);
+            float lmass = backend.GetBodyMass(lbody);
+            float lsingle;
+            { var sDesc = BodyDesc.Default; sDesc.Shape = lcb; sDesc.MotionType = BodyMotionType.Dynamic; sDesc.Layer = PhysicsLayer.Dynamic; sDesc.Position = new Vector3(120f, 120f, 30f); BodyId sb = backend.CreateBody(sDesc); lsingle = backend.GetBodyMass(sb); backend.RemoveBody(sb); }
+            var lbuf = new BodyState[8]; var lchars = new CharacterState[2]; var lct = new ContactReport[16];
+            for (int i = 0; i < 600; i++) backend.Step(1f / 60f, lbuf, lchars, lct);
+            backend.TryGetBodyState(lbody, out BodyState lend);
+            Console.WriteLine($"      compound mass={lmass:0.0} (single box {lsingle:0.0} x3 = {lsingle * 3f:0.0}); rest z={lend.Position.Z:0.00} (dropped from 30)");
+            Check(lend.Position.Z < 29f && lend.Position.Z > 0f, $"compound FELL and rested as one body (z {lend.Position.Z:0.00})");
+            Check(MathF.Abs(lmass - lsingle * 3f) < lsingle * 0.05f, $"compound mass = sum of 3 children ({lmass:0.0} ~ {lsingle * 3f:0.0})");
+            backend.RemoveBody(lbody); backend.ReleaseShape(lcompound); backend.ReleaseShape(lcb);
+
             // ---- 33. SCALED SHAPE: box takes non-uniform scale; sphere non-uniform CLAMPS to uniform. ----
             Console.WriteLine("\n[33] CreateScaledShape: box non-uniform applied; sphere non-uniform clamped; SetBodyShape swap");
             ShapeId baseBox = backend.CreateBoxShape(new Vector3(0.5f, 0.5f, 0.5f));

@@ -244,7 +244,7 @@ namespace OpenSim.Region.PhysicsModules.LegionJolt
             {
                 _consoleRegistered = true;
                 MainConsole.Instance.Commands.AddCommand("Physics", false, "jolt",
-                    "jolt terraintest | terrainslope | terrainhill | hilltest | probe <x> <y> | rezprims | rayprims | rezmesh | rezmeshn <count> | raymesh | droptest | dropmesh | dropstatus | avatarstatus | charframe [secs] | sitstatus | sittest | unsit | sittarget | sensortest | raytest | heights <x> <y> | clearprims",
+                    "jolt linktest | terraintest | terrainslope | terrainhill | hilltest | probe <x> <y> | rezprims | rayprims | rezmesh | rezmeshn <count> | raymesh | droptest | dropmesh | dropstatus | avatarstatus | charframe [secs] | sitstatus | sittest | unsit | sittarget | sensortest | raytest | heights <x> <y> | clearprims",
                     "Legion Jolt proofs (M6.2 terrain / M6.3 prims): raycast the cooked collision surfaces and report hits.",
                     HandleJoltConsole);
             }
@@ -258,6 +258,8 @@ namespace OpenSim.Region.PhysicsModules.LegionJolt
         private void HandleJoltConsole(string module, string[] cmd)
         {
             if (_backend == null) { MainConsole.Instance.Output($"{LogHeader} no backend."); return; }
+
+            if (cmd.Length >= 2 && cmd[1] == "linktest") { JoltLinkTest(); return; }
 
             if (cmd.Length >= 2 && cmd[1] == "terraintest")
             {
@@ -543,7 +545,45 @@ namespace OpenSim.Region.PhysicsModules.LegionJolt
                 return;
             }
 
-            MainConsole.Instance.Output("Usage: jolt terraintest | terrainslope | terrainhill | hilltest | probe <x> <y> | rezprims | rayprims | rezmesh | rezmeshn <count> | raymesh | droptest | dropmesh | dropstatus | avatarstatus | charframe [secs] | sitstatus | sittest | unsit | sittarget | sensortest | raytest | heights <x> <y> | clearprims");
+            MainConsole.Instance.Output("Usage: jolt linktest | terraintest | terrainslope | terrainhill | hilltest | probe <x> <y> | rezprims | rayprims | rezmesh | rezmeshn <count> | raymesh | droptest | dropmesh | dropstatus | avatarstatus | charframe [secs] | sitstatus | sittest | unsit | sittarget | sensortest | raytest | heights <x> <y> | clearprims");
+        }
+
+        // M7 Task 1 proof: rez a root + 2 children at offsets, make the root physical, then run the OpenSim
+        // handoff (child.PhysActor.link(root.PhysActor)) so the children WELD into the root's compound body.
+        // Assert the compound's mass jumps to ~3x a single prim (sum of parts) and the whole thing falls as
+        // ONE body. (Children are separate SOGs here, so this proves the PHYSICS - the visual linkset is the
+        // viewer Ctrl+L test.)
+        private void JoltLinkTest()
+        {
+            float tz = 25f;
+            try { tz = (float)_scene.Heightmap[128, 128]; } catch { }
+            Vector3 rootPos = new Vector3(128f, 128f, tz + 12f);
+            var size = new Vector3(0.5f, 0.5f, 0.5f);
+            SceneObjectGroup root = RezTestPrim("box", rootPos, size);
+            SceneObjectGroup c1 = RezTestPrim("box", rootPos + new Vector3(0.6f, 0f, 0f), size);
+            SceneObjectGroup c2 = RezTestPrim("box", rootPos + new Vector3(0f, 0.6f, 0f), size);
+
+            root.ScriptSetPhysicsStatus(true);
+            PhysicsActor rpa = root.RootPart.PhysActor;
+            if (rpa == null) { MainConsole.Instance.Output($"{LogHeader} linktest: root has no PhysActor."); return; }
+            float singleMass = rpa.Mass;
+            c1.RootPart.PhysActor?.link(rpa);   // the OpenSim child.link(root) handoff
+            c2.RootPart.PhysActor?.link(rpa);
+            float compoundMass = rpa.Mass;
+            float startZ = rpa.Position.Z;
+
+            System.Threading.Thread.Sleep(3000);   // let the compound fall on the heartbeat
+
+            float endZ = rpa.Position.Z;
+            float childBodyZ = c1.RootPart.PhysActor != null ? c1.RootPart.PhysActor.Position.Z : float.NaN;
+            MainConsole.Instance.Output($"{LogHeader} [linktest] singleMass={singleMass:0.0}  compoundMass={compoundMass:0.0}  (expect ~3x = {singleMass * 3f:0.0})");
+            MainConsole.Instance.Output($"{LogHeader} [linktest] root Z {startZ:0.00} -> {endZ:0.00}  ({(endZ < startZ - 1f ? "FELL as one compound" : "did NOT fall")});  welded child's own body Z stayed {childBodyZ:0.00} (no independent sim = welded)");
+            bool massOk = singleMass > 0f && System.Math.Abs(compoundMass - singleMass * 3f) < singleMass * 0.1f;
+            MainConsole.Instance.Output($"{LogHeader} [linktest] {((massOk && endZ < startZ - 1f) ? "PASS" : "CHECK")}: compound mass=sum AND fell as one. (Viewer: Ctrl+L a real linkset for the visual.)");
+
+            _scene.DeleteSceneObject(root, false);
+            _scene.DeleteSceneObject(c1, false);
+            _scene.DeleteSceneObject(c2, false);
         }
 
         // Build one basic prim with a CANONICAL PrimitiveBaseShape (a real viewer/OAR prim's values,

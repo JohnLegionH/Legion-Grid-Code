@@ -521,6 +521,33 @@ is textbook-correct and BulletSim creeps; settle-time follows) + all 3 edge case
 coincident terrain-hit dedupe, avatar-to-avatar MATCH). The one deliberate divergence from BulletSim
 (slope friction) is the one where BulletSim is physically wrong; everything else matches BulletSim exactly.
 
+## M7 — linksets (compound body)
+
+A linkset = root + children linked as one object; made physical it moves as ONE rigid body (children
+welded, not simulated independently). OpenSim's handoff: each prim is added as its own PhysicsActor
+(per-part `AddPrimShape`), then `child.PhysActor.link(root.PhysActor)` is called per child
+(`SceneObjectGroup.cs:3294/3322`, guarded by `root.IsPhysical`); `delink()` on unlink. These link/delink
+hooks were no-ops in `JoltPrim`.
+
+- **Task 1 - the compound body.** `child.link(root)` welds the child into the ROOT's body: the root builds
+  a Jolt **StaticCompoundShape** = [root shape @ identity + each child shape @ its root-relative offset],
+  recreates its body on that compound, and drops each child's independent body. Offsets are composed in the
+  ROOT BODY frame (`BodyOrientationOf`, so cylinder axis-corrections carry). Mass = the SUM of the parts
+  (Jolt's compound MassProperties: total Volume x density), and COM/inertia are distributed - a physical
+  linkset TIPS like a real rigid body (viewer-confirmed: 4 linked prims dropped, fell as one and toppled),
+  not stiffly about the root. `RebuildCompound` runs on every link/unlink.
+- **StaticCompound (not Mutable), deliberately:** the backend `CreateCompoundShape` already used it and it
+  is markedly faster to query (raycast/overlap run at script rate); it stores per-child UserData (the M4
+  `ChildUserData`/`ResolveChildUserData` path = Task 3's `llDetectedLinkNumber` foundation); and link/unlink
+  is an infrequent user action, so a full rebuild beats a mutable compound's slower queries - with no Task 2
+  rework (unlink just rebuilds).
+- Proven: harness [32b] (dynamic compound: mass = 3x a single box, falls + rests as one); `jolt linktest`
+  (in-sim: compound mass ~= 3x single, root falls as one, welded child's own body inert); viewer (linked
+  prims fall as one, tip over, kick/push as one - no fly-apart / jitter / detach).
+
+Task 2 (live link/unlink rebuild) and Task 3 (per-child collision identity via `CompoundChild.UserData`)
+build on this.
+
 ## Terrain collision: heightfield now, terrain-mesh in reserve (M6.5)
 
 We collide against the region terrain with a Jolt **`HeightFieldShape`** (cooked from the region
