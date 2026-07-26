@@ -96,6 +96,7 @@
   <ItemGroup>
     <Compile Include="LegionJoltScene.cs" />
     <Compile Include="JoltPrim.cs" />
+    <Compile Include="JoltCharacter.cs" />
     <Compile Include="Properties\AssemblyInfo.cs" />
   </ItemGroup>
 

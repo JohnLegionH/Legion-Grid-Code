@@ -44,6 +44,10 @@ namespace OpenSim.Region.PhysicsModules.LegionJolt
         internal static readonly ILog m_log = LogManager.GetLogger(MethodBase.GetCurrentMethod().DeclaringType);
         internal const string LogHeader = "[LEGION JOLT]";
 
+        // Gate for JoltCharacter's [charjump] path trace; toggled by `jolt charframe` and kept in sync with
+        // the [charframe] window by Simulate. Static so the per-avatar actor can read it without a back-ref.
+        internal static bool CharJumpTrace;
+
         private bool m_Enabled = false;
         private IConfigSource m_Config;
 
@@ -78,6 +82,11 @@ namespace OpenSim.Region.PhysicsModules.LegionJolt
         // Step-drain target for physical (M6.4) actors. Guarded because Add/RemovePrim can arrive off
         // the heartbeat thread (the backend permits concurrent Create/Remove with Step).
         private readonly Dictionary<uint, JoltPrim> _prims = new Dictionary<uint, JoltPrim>();
+
+        // M6.5: the logged-in avatars, keyed by their CharacterId handle (the value the character drain
+        // echoes back). Keyed by handle rather than LocalID so the drain mapping is independent of when
+        // ScenePresence assigns LocalID after AddAvatar returns.
+        private readonly Dictionary<uint, JoltCharacter> _avatars = new Dictionary<uint, JoltCharacter>();
 
         // M6.3 Task 2 proof bookkeeping: the console-rezzed test prims (so `jolt rayprims` can state
         // expected hits and `jolt clearprims` can delete them through the real scene-delete path).
@@ -117,6 +126,7 @@ namespace OpenSim.Region.PhysicsModules.LegionJolt
         }
         private readonly List<DropTrack> _drops = new List<DropTrack>();
         private long _logStepsUntil = -1;   // window: log per-frame dt/ActiveBodyCount/liveZ after a drop
+        private long _charFrameUntil = -1;  // window: log per-frame avatar Z/support/vZ ([charframe] toggle)
 
         // Caller-owned step buffers (M1 contract: nothing allocates per frame). Empty world drains
         // nothing; sized modestly for the skeleton and revisited when real actors arrive (M6.4).
@@ -180,6 +190,13 @@ namespace OpenSim.Region.PhysicsModules.LegionJolt
             var settings = PhysicsBackendSettings.Default;
             settings.MaxBodies = ComputeMaxBodies(sizeX, sizeY);   // decision #3: 65536 / 256 m, scaled by area
 
+            // Sub-step the RIGID-BODY solver 6x inside _system.Update (M6.5 finding #3). At OpenSim's ~11 fps
+            // (0.0908 s/frame) a single integration lets a fast prim move ~1.5 m and tunnel through the terrain
+            // heightfield (discrete narrowphase; per-body LinearCast/CCD does NOT catch the heightfield - see
+            // the harness). CollisionSteps slices the SOLVER only, NOT the character step (which runs once per
+            // Step, before Update), so dropped prims rest WITHOUT disturbing the avatar's known-good 1-step path.
+            settings.CollisionSteps = 6;
+
             _backend = new LegionJoltBackend();
             _backend.Initialize(settings);
 
@@ -219,7 +236,7 @@ namespace OpenSim.Region.PhysicsModules.LegionJolt
             {
                 _consoleRegistered = true;
                 MainConsole.Instance.Commands.AddCommand("Physics", false, "jolt",
-                    "jolt terraintest | terrainslope | terrainhill | hilltest | probe <x> <y> | rezprims | rayprims | rezmesh | rezmeshn <count> | raymesh | droptest | dropmesh | dropstatus | heights <x> <y> | clearprims",
+                    "jolt terraintest | terrainslope | terrainhill | hilltest | probe <x> <y> | rezprims | rayprims | rezmesh | rezmeshn <count> | raymesh | droptest | dropmesh | dropstatus | avatarstatus | charframe [secs] | heights <x> <y> | clearprims",
                     "Legion Jolt proofs (M6.2 terrain / M6.3 prims): raycast the cooked collision surfaces and report hits.",
                     HandleJoltConsole);
             }
@@ -429,6 +446,23 @@ namespace OpenSim.Region.PhysicsModules.LegionJolt
                 return;
             }
 
+            if (cmd.Length >= 2 && cmd[1] == "avatarstatus")
+            {
+                AvatarStatus();
+                return;
+            }
+
+            if (cmd.Length >= 2 && cmd[1] == "charframe")
+            {
+                // Toggle the per-frame avatar trace for a window (default ~20 s at 11 fps). Also enables the
+                // [charjump] path trace in JoltCharacter for the same window so a jump attempt is captured.
+                int secs = (cmd.Length >= 3 && int.TryParse(cmd[2], out int s)) ? s : 20;
+                _charFrameUntil = _stepCount + (long)Math.Ceiling(secs / 0.0908);
+                CharJumpTrace = true;   // JoltCharacter reads this to emit its [charjump] path trace
+                MainConsole.Instance.Output($"{LogHeader} [charframe]+[charjump] on for ~{secs}s (until step {_charFrameUntil}). Walk/jump now; trace goes to the log at Debug.");
+                return;
+            }
+
             if (cmd.Length >= 4 && cmd[1] == "heights"
                 && float.TryParse(cmd[2], out float hx) && float.TryParse(cmd[3], out float hy))
             {
@@ -465,7 +499,7 @@ namespace OpenSim.Region.PhysicsModules.LegionJolt
                 return;
             }
 
-            MainConsole.Instance.Output("Usage: jolt terraintest | terrainslope | terrainhill | hilltest | probe <x> <y> | rezprims | rayprims | rezmesh | rezmeshn <count> | raymesh | droptest | dropmesh | dropstatus | heights <x> <y> | clearprims");
+            MainConsole.Instance.Output("Usage: jolt terraintest | terrainslope | terrainhill | hilltest | probe <x> <y> | rezprims | rayprims | rezmesh | rezmeshn <count> | raymesh | droptest | dropmesh | dropstatus | avatarstatus | charframe [secs] | heights <x> <y> | clearprims");
         }
 
         // Build one basic prim with a CANONICAL PrimitiveBaseShape (a real viewer/OAR prim's values,
@@ -772,6 +806,46 @@ namespace OpenSim.Region.PhysicsModules.LegionJolt
             MainConsole.Instance.Output($"  PASS/row: fell=Y, rested=Y, JustDeactivated=1 (exactly once), dErr~0, mass>0. Re-run droptest+dropstatus -> det dZ ~ 0 (determinism).");
         }
 
+        // Report each logged-in avatar's CharacterVirtual state - position, IsSupported, ground normal/body,
+        // capsule dims - and assert it spawned ON the terrain (supported, not sinking, capsule centre ~
+        // terrainZ + StandHalf at the spawn XY), not at NaN or underground. The console gate behind John's
+        // walk: run it right after login, and again after he walks somewhere to confirm position tracks and
+        // IsSupported stays true on the flat.
+        private void AvatarStatus()
+        {
+            System.Collections.Generic.List<JoltCharacter> avs;
+            lock (_avatars)
+                avs = new System.Collections.Generic.List<JoltCharacter>(_avatars.Values);
+
+            if (avs.Count == 0) { MainConsole.Instance.Output($"{LogHeader} no avatars in the physics scene - log in first, then re-run."); return; }
+
+            MainConsole.Instance.Output($"{LogHeader} avatar status ({avs.Count} in scene, step {_stepCount}):");
+            foreach (JoltCharacter a in avs)
+            {
+                Vector3 p = a.Position;
+                bool nan = float.IsNaN(p.X) || float.IsNaN(p.Y) || float.IsNaN(p.Z);
+
+                float terrainZ = float.NaN;
+                if (!nan && _backend.RayCast(new SVector3(p.X, p.Y, 5000f), new SVector3(0f, 0f, -1f), 10000f, QueryFilter.Terrain, out RayHit th))
+                    terrainZ = th.Point.Z;
+                float expectedCentre = terrainZ + a.StandHalf + a.FeetOffset;
+                float dZ = p.Z - expectedCentre;
+
+                string groundBody = a.GroundBody.IsValid ? $"body({a.GroundBody.Value})" : "terrain/none";
+                string verdict = nan ? "FAIL: NaN position"
+                    : a.Flying ? "flying (gravity off - ground checks N/A)"
+                    : (a.IsSupported && !float.IsNaN(dZ) && MathF.Abs(dZ) < 0.5f) ? "PASS: supported, seated on terrain"
+                    : !a.IsSupported ? "off: not supported (in the air / falling)"
+                    : "OFF: supported but not at terrain height (check dZ)";
+
+                MainConsole.Instance.Output($"  id={a.LocalID,-6} '{a.Name}' pos=({p.X:0.00},{p.Y:0.00},{p.Z:0.000}) speed={a.Velocity.Length():0.000} m/s flying={(a.Flying ? "Y" : "N")}");
+                MainConsole.Instance.Output($"        supported={(a.IsSupported ? "Y" : "N")} sliding={(a.IsSliding ? "Y" : "N")} groundNormal=({a.GroundNormal.X:0.00},{a.GroundNormal.Y:0.00},{a.GroundNormal.Z:0.00}) groundBody={groundBody}");
+                MainConsole.Instance.Output($"        capsule: halfHeight={a.CapsuleHalfHeight:0.000} radius={a.CapsuleRadius:0.000} standHalf={a.StandHalf:0.000} feetOffset={a.FeetOffset:0.000}");
+                MainConsole.Instance.Output($"        terrainZ={terrainZ:0.000} expectedCentreZ={expectedCentre:0.000} dZ={dZ:0.000}  [{verdict}]");
+            }
+            MainConsole.Instance.Output($"  PASS = supported=Y, not NaN, |dZ|<0.5 (capsule centre ~ terrain + standHalf). After walking: pos tracks, supported stays Y on flat terrain.");
+        }
+
         // The canonical triangular-prism PrimitiveBaseShape (EquilateralTriangle + Straight) used by the
         // mesh proof - shared by the real rez and the inline decision-point check.
         private static PrimitiveBaseShape GetPrismPbs()
@@ -840,10 +914,63 @@ namespace OpenSim.Region.PhysicsModules.LegionJolt
         // PhysicsScene - M6.1 stubs (accept-and-ignore so a populated region still boots)
         // ---------------------------------------------------------------------
 
+        // M6.5: the avatar finally gets a physics body - a Jolt CharacterVirtual. ScenePresence calls the
+        // localID overload (via the feetOffset one); overriding it here means we have the avatar's LocalID
+        // up front, so the CharacterVirtual + its M4.5 query marker carry the right identity. The abstract
+        // no-localID overload delegates so any caller of the base contract still works.
         public override PhysicsActor AddAvatar(string avName, Vector3 position, Vector3 velocity, Vector3 size, bool isFlying)
-            => PhysicsActor.Null; // M6.5
+            => CreateAvatar(0, avName, position, velocity, size, 0f, isFlying);
 
-        public override void RemoveAvatar(PhysicsActor actor) { /* M6.5 */ }
+        public override PhysicsActor AddAvatar(uint localID, string avName, Vector3 position, Vector3 velocity, Vector3 size, bool isFlying)
+            => CreateAvatar(localID, avName, position, velocity, size, 0f, isFlying);
+
+        // The overload ScenePresence actually calls carries the avatar's feetOffset - the gap between the
+        // capsule centre and the visual feet. Override it (rather than let the base drop it) so the spawn
+        // seat can put the FEET on the surface, not the capsule centre.
+        public override PhysicsActor AddAvatar(uint localID, string avName, Vector3 position, Vector3 size, float feetOffset, bool isFlying)
+            => CreateAvatar(localID, avName, position, Vector3.Zero, size, feetOffset, isFlying);
+
+        private PhysicsActor CreateAvatar(uint localID, string avName, Vector3 position, Vector3 velocity, Vector3 size, float feetOffset, bool isFlying)
+        {
+            if (_backend == null)
+                return PhysicsActor.Null;
+
+            // Spawn ON the terrain. Raycast straight down at the login XY against the heightfield and seat
+            // the capsule so its FEET rest on the surface. This is the fix for the historical "avatar spawns
+            // underground" symptom on every prior boot: it happened because the avatar had NO physics body
+            // to place it; now it does. If the ray misses (e.g. login off-region), fall back to the incoming Z.
+            //
+            // Seat Z (avatar root = capsule centre) = groundZ + StandHalf + feetOffset: OpenSim's avatar
+            // root is the body centre, and the visual feet sit StandHalf + feetOffset below it. Omitting
+            // feetOffset (M6.5 Task 1) sank the avatar by exactly that gap, so the feet clipped INTO terrain.
+            float standHalf = JoltCharacter.StandHalfFor(size);
+            float groundZ = position.Z - standHalf - feetOffset;
+            if (_backend.RayCast(new SVector3(position.X, position.Y, 5000f), new SVector3(0f, 0f, -1f), 10000f, QueryFilter.Terrain, out RayHit th))
+                groundZ = th.Point.Z;
+            // +1 cm so StickToFloor settles from just above rather than starting in penetration (which would
+            // resolve as a shove on frame 1).
+            var spawn = new Vector3(position.X, position.Y, groundZ + standHalf + feetOffset + 0.01f);
+
+            var jc = new JoltCharacter(this, _backend, localID, avName, spawn, size, feetOffset, isFlying);
+            if (velocity != Vector3.Zero)
+                jc.SetMomentum(velocity);
+
+            lock (_avatars)
+                _avatars[jc.CharacterHandle.Value] = jc;
+
+            m_log.Info($"{LogHeader} avatar '{avName}' id={localID} spawned at ({position.X:0},{position.Y:0}) terrainZ={groundZ:0.00} centreZ={spawn.Z:0.000} standHalf={standHalf:0.000} feetOffset={feetOffset:0.000} flying={isFlying}.");
+            return jc;
+        }
+
+        public override void RemoveAvatar(PhysicsActor actor)
+        {
+            if (actor is not JoltCharacter jc)
+                return;
+            lock (_avatars)
+                _avatars.Remove(jc.CharacterHandle.Value);
+            jc.Destroy();   // RemoveCharacter also tears down the M4.5 query marker
+            m_log.Info($"{LogHeader} avatar '{jc.Name}' id={jc.LocalID} removed.");
+        }
 
         public override void RemovePrim(PhysicsActor prim)
         {
@@ -1117,6 +1244,65 @@ namespace OpenSim.Region.PhysicsModules.LegionJolt
             if (_backend == null)
                 return 1f;
 
+            // [dtproof] Log the ACTUAL timeStep for the first few frames. OpenSim's Scene.FrameTime is in
+            // SECONDS (0.0909, OpenSimDefaults.ini) and flows here unscaled via UpdatePhysics((float)elapsed)
+            // -> Simulate -> Step -> _system.Update. So this MUST print ~0.0909. A value near 90 would mean a
+            // ms->s units bug upstream (it does not exist in this path - proof left in for the record).
+            if (_stepCount < 5)
+                m_log.Info($"{LogHeader} [dtproof] frame {_stepCount}: Simulate timeStep={timeStep:0.000000} s (expect ~0.0909)");
+
+            // ONE backend Step per frame at OpenSim's ~11 fps cadence (Scene.FrameTime 0.0909 s). The
+            // character is stepped exactly once per frame - the known-good path (M6.5 Task 1: stood + ran
+            // smooth). Fast-body tunnelling through the terrain (M6.5 finding #3) is handled NOT by sub-
+            // stepping the whole Simulate (that 6x'd the character/drain/terse pipeline and was a live
+            // PERFORMANCE regression - bounce/jitter), but by CollisionSteps=6 set at Initialize: Jolt sub-
+            // steps the RIGID-BODY solver INSIDE _system.Update without re-running the character step, so a
+            // dropped prim integrates in solver sub-slices and rests, while the avatar stays at 1 step/frame.
+            StepOnce(timeStep);
+
+            // [charframe] live trace (toggle: `jolt charframe`): per-frame avatar Z / support / vertical
+            // velocity so a re-walk PROVES the bounce is gone (or shows it in the numbers if it is not).
+            if (_stepCount <= _charFrameUntil)
+            {
+                List<JoltCharacter> avs;
+                lock (_avatars) avs = new List<JoltCharacter>(_avatars.Values);
+                foreach (JoltCharacter a in avs)
+                {
+                    // Identify the ground body by its UserData: 0 = TERRAIN (expected), == the avatar's own
+                    // LocalID = its M4.5 query marker (a bug), any other id = a prim/box. The terrain body
+                    // IS a registered body, so "has a ground body" alone does NOT mean the marker.
+                    string ground = "none";
+                    if (a.GroundBody.IsValid && _backend.TryGetBodyState(a.GroundBody, out BodyState gb))
+                        ground = gb.UserData == 0 ? "TERRAIN"
+                               : gb.UserData == a.LocalID ? $"OWN-MARKER({gb.UserData})"
+                               : $"prim({gb.UserData})";
+                    // Terrain surface directly under the avatar (raycast) vs where the feet actually are -
+                    // negative & shrinking feetAboveTerrain = sinking THROUGH the collision surface.
+                    Vector3 p = a.Position;
+                    float terrZ = float.NaN;
+                    if (_backend.RayCast(new SVector3(p.X, p.Y, p.Z + 50f), new SVector3(0f, 0f, -1f), 300f, QueryFilter.Terrain, out RayHit th))
+                        terrZ = th.Point.Z;
+                    // FIXED-POINT terrain probe at the region centre - INDEPENDENT of the avatar's position.
+                    // If this descends while the avatar stands still, the terrain surface is genuinely moving
+                    // (terrain bug). If it holds constant but the avatar's own terrainZ descends, the avatar is
+                    // drifting horizontally onto lower ground (a slide, not a sinking terrain).
+                    float fixZ = float.NaN;
+                    float cx = _regionSizeX * 0.5f, cy = _regionSizeY * 0.5f;
+                    if (_backend.RayCast(new SVector3(cx, cy, 5000f), new SVector3(0f, 0f, -1f), 10000f, QueryFilter.Terrain, out RayHit fh))
+                        fixZ = fh.Point.Z;
+                    m_log.Debug($"{LogHeader} [charframe] step={_stepCount} id={a.LocalID} XY=({p.X:0.00},{p.Y:0.00}) Z={p.Z:0.000} " +
+                                $"sup={(a.IsSupported ? "Y" : "N")} sliding={(a.IsSliding ? "Y" : "N")} vZ={a.Velocity.Z:0.000} flying={(a.Flying ? "Y" : "N")} ground={ground} " +
+                                $"terrainZ@avatar={terrZ:0.000} terrainZ@centre({cx:0},{cy:0})={fixZ:0.000} feetAboveTerrain={p.Z - a.StandHalf - a.FeetOffset - terrZ:0.000}");
+                }
+            }
+            else if (CharJumpTrace)
+                CharJumpTrace = false;   // window elapsed -> stop the [charjump] trace too
+            return 1f;
+        }
+
+        // One backend Step + drain (bodies -> prims, characters -> avatars) + the [dropframe] diagnostic.
+        private void StepOnce(float timeStep)
+        {
             // Step, then DRAIN: the backend fills _bodyBuf with a BodyState per ACTIVE body (moving prims)
             // plus one final JustDeactivated state per body that slept this step. For each, push the new
             // transform/velocity into the matching actor (by UserData = LocalID) and fire its terse update
@@ -1154,7 +1340,20 @@ namespace OpenSim.Region.PhysicsModules.LegionJolt
                 if (_drops.Count > 0)
                     UpdateDropTelemetry(in bs);
             }
-            return 1f;
+
+            // Character drain (M6.5): the avatar equivalent of the body drain above. The backend stepped
+            // every CharacterVirtual BEFORE _system.Update and filled _charBuf with each one's post-step
+            // position + ground state; push it into the matching JoltCharacter (by CharacterId handle) so
+            // ScenePresence sees the new transform and the viewer gets a smooth per-frame terse update.
+            int cn = r.CharacterUpdateCount;
+            for (int i = 0; i < cn; i++)
+            {
+                CharacterState cs = _charBuf[i];
+                JoltCharacter a;
+                lock (_avatars)
+                    _avatars.TryGetValue(cs.Character.Value, out a);
+                a?.ApplyCharacterState(in cs);
+            }
         }
 
         public override void SetTerrain(float[] heightMap)
@@ -1197,7 +1396,11 @@ namespace OpenSim.Region.PhysicsModules.LegionJolt
                 _backend.ReleaseShape(_terrainShape);
             _terrainShape = newShape;
 
-            m_log.Info($"{LogHeader} terrain set: {sx}x{sy} region -> {m}x{m} heightfield (spans {m - 1} m/side).");
+            // Step-stamp + a couple of height samples so a [charframe] session can see whether SetTerrain
+            // is re-firing during a walk (it should NOT - TerrainModule only ticks it every ~5 s when the
+            // heightmap is tainted) and whether the heights it re-cooks are drifting downward.
+            m_log.Info($"{LogHeader} terrain set: step={_stepCount} {sx}x{sy} region -> {m}x{m} heightfield " +
+                       $"(spans {m - 1} m/side; sample[centre]={heightMap[(sy / 2) * sx + (sx / 2)]:0.000} sample[0]={heightMap[0]:0.000}).");
         }
 
         public override void SetWaterLevel(float baseheight)

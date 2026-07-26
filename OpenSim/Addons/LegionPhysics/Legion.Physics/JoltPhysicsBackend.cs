@@ -1111,6 +1111,12 @@ namespace Legion.Physics.Jolt
                 MaxSlopeAngle = desc.MaxSlopeAngle,
                 Mass = desc.Mass,
                 MaxStrength = MathF.Max(0f, desc.PushStrength) * PushStrengthBaseNewtons,
+                // NOTE: PredictiveContactDistance / PenetrationRecoverySpeed are left at Jolt's defaults
+                // (0.1 / 1.0). An M6.5 "feet-dip polish" that raised PredictiveContactDistance to 0.15 was
+                // REVERTED: on the cone's incline the early look-ahead lifted the capsule off the ground
+                // (visible hover) and fought penetration recovery frame-to-frame (a walking hop/bob). The
+                // clean-hold walk (defaults) is "mostly SL-like" with only a MINOR feet-dip on transitions,
+                // which is preferable to hover+hop. Do not raise the look-ahead without a slope walk-test.
             };
 
             lock (_characterGate)
@@ -1404,25 +1410,36 @@ namespace Legion.Physics.Jolt
             {
                 ch.UpdateGroundVelocity(); // refresh GroundVelocity from the (possibly moving) ground body
                 GroundState gs = ch.GroundState;
+                bool onWalkable = gs == GroundState.OnGround;   // OnGround = slope within MaxSlopeAngle
                 float vz = ch.LinearVelocity.Z;
 
-                // On solid ground and not moving up: adopt the ground's vertical velocity (moving
+                // On walkable ground and not moving up: adopt the ground's vertical velocity (moving
                 // platform) rather than the accumulated fall speed.
-                if (gs == GroundState.OnGround && vz <= 0f)
+                if (onWalkable && vz <= 0f)
                     vz = ch.GroundVelocity.Z;
 
-                // Jump only from solid ground.
-                if (rec.JumpRequested && gs == GroundState.OnGround)
+                // Jump only from walkable ground.
+                if (rec.JumpRequested && onWalkable)
                     vz = rec.JumpSpeed;
 
-                // Gravity integrates every frame (canonical pattern). On steep ground this keeps pulling
-                // the character down the slope, which ExtendedUpdate resolves into a slide.
-                vz += gz * dt;
+                // Ground hold / friction (delta #5, "the M6 movement model"): a character SUPPORTED on a
+                // WALKABLE slope must NOT slide - SL avatars stand still on inclines within MaxSlopeAngle.
+                // We hold by NOT accumulating gravity while firmly on walkable ground (and not jumping):
+                // with no downward velocity, ExtendedUpdate's collide-and-slide has nothing to redirect
+                // down the slope. Gravity resumes the instant the character is airborne (InAir) or on
+                // ground too steep to hold (OnSteepGround) - so ledges still drop and over-steep slopes
+                // still slide (IsSliding). This replaces the frictionless "gravity every frame" that let a
+                // no-input avatar creep down the cone (M6.5): the harness only tested FLAT ground, so the
+                // downslope component never showed until a sloped live spawn exposed it.
+                bool heldByGround = onWalkable && !rec.JumpRequested;
+                if (!heldByGround)
+                    vz += gz * dt;
 
                 // Horizontal = intent, plus the ground's horizontal velocity so we ride a platform that
-                // is being pushed sideways.
+                // is being pushed sideways. With no input this is zero on static ground - no residual
+                // slide velocity carries over frame to frame.
                 Vector3 horiz = new Vector3(desired.X, desired.Y, 0f);
-                if (gs == GroundState.OnGround)
+                if (onWalkable)
                     horiz += new Vector3(ch.GroundVelocity.X, ch.GroundVelocity.Y, 0f);
 
                 newVel = new Vector3(horiz.X, horiz.Y, vz);

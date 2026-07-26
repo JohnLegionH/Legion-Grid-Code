@@ -404,6 +404,18 @@ internal static class Program
 
             backend.RemoveCharacter(avatar);
 
+            // ---- 24. STAND ON A DYNAMIC BOX (M6.5 stand-on-box repro): the avatar should stand on a
+            //         DYNAMIC rigid body the same way it rides the [20] kinematic platform. Diagnoses the
+            //         live "resistance then fall through" John hit. A HEAVY box (~3375 kg) can't be shoved
+            //         by the 80 kg character, so a sink-through here is a GROUND-DETECTION gap (c), not a
+            //         push (b). The per-step log is the honest instrument (like [dropframe]).
+            Console.WriteLine("\n[24] Stands on a DYNAMIC box (resistance-then-fall-through repro)");
+            RunStandOnDynamicBox(backend);
+
+            Console.WriteLine("\n[24b] Character SINK isolation: CollisionSteps + ground-body identity");
+            RunCharacterGroundIdentity(6, 58f);           // standing, live-like config
+            RunCharacterGroundIdentity(6, 58f, 1.5f);     // WALKING on flat terrain (John's action)
+
             // ============ MILESTONE 3.5 - AVATAR AS COLLISION CITIZEN ============
             // Avatar contacts are reported via the CharacterVirtual's OWN contact events (not an inner
             // body). Side A of every avatar report is the avatar (Invalid BodyId, UserData = avatar id).
@@ -852,6 +864,269 @@ internal static class Program
         b.RemoveBody(plat);
         b.ReleaseShape(platShape);
         return (charDx, boxDx, rode);
+    }
+
+    // Faithful repro of John's live `jolt droptest` + walk-onto: a 2x2x2 m (8000 kg) box DROPPED from
+    // height so it settles AND SLEEPS on flat terrain, then the character (a) dropped straight on top,
+    // and (b) walked horizontally into it. Run at BOTH the harness dt (1/60) and the LIVE dt (0.0908 s,
+    // OpenSim's 11 fps physics) with the LIVE avatar capsule, because the live-vs-harness gap is exactly
+    // the timestep: CharacterVirtual.ExtendedUpdate takes ONE collide-and-slide per Step, so a 5.4x larger
+    // dt means 5.4x deeper penetration per step and is the prime suspect for "resistance then fall through".
+    private static void RunStandOnDynamicBox(ILegionPhysicsBackend b)
+    {
+        // Live avatar capsule from AvatarBoxSize (0.45, 0.6, 1.9): radius 0.225, half-height 0.725.
+        StandOnBoxAtDt(b, 1f / 60f, "harness 1/60", 0.725f, 0.225f);
+        StandOnBoxAtDt(b, 0.0908f, "LIVE 0.0908 (11fps)", 0.725f, 0.225f);
+        DropTunnelVsSubstep(b);
+    }
+
+    // The root cause of the live stand-on-box failure and the fix, side by side: a box DROPPED from height
+    // and integrated in ONE 0.0908 s step (OpenSim's 11 fps) tunnels through the terrain; the SAME drop
+    // integrated in 6 sub-slices of ~0.0151 s (what LegionJoltScene.Simulate now does) rests on the surface.
+    private static void DropTunnelVsSubstep(ILegionPhysicsBackend b)
+    {
+        ShapeId flat = b.CreateHeightFieldShape(FlatField(), N, N, new Vector3(S, S, S));
+        b.SetTerrain(flat, Vector3.Zero);
+        var bb = new BodyState[8]; var cc = new CharacterState[2]; var ct = new ContactReport[16];
+        ShapeId boxShape = b.CreateBoxShape(new Vector3(1f, 1f, 1f));
+
+        float DropAndSettle(float frameDt, int subSteps)
+        {
+            var bd = BodyDesc.Default;
+            bd.Shape = boxShape; bd.Position = new Vector3(70f, 70f, 16f);
+            bd.MotionType = BodyMotionType.Dynamic; bd.Layer = PhysicsLayer.Dynamic; bd.StartActive = true;
+            BodyId box = b.CreateBody(bd); b.ActivateBody(box);
+            float sub = frameDt / subSteps;
+            for (int f = 0; f < 150; f++) for (int s = 0; s < subSteps; s++) b.Step(sub, bb, cc, ct);
+            b.TryGetBodyState(box, out BodyState st);
+            float z = st.Position.Z;
+            b.RemoveBody(box);
+            return z;
+        }
+
+        float raw = DropAndSettle(0.0908f, 1);       // the bug: one big step
+        float fixedZ = DropAndSettle(0.0908f, 6);    // 6 sub-slices per 0.0908 s frame
+        Console.WriteLine($"      --- drop-tunnel vs sub-step (box rest z should be ~1.0) ---");
+        Console.WriteLine($"      raw 0.0908 x1  -> box z = {raw:0.000}  (tunnels through terrain if << 0)");
+        Console.WriteLine($"      0.0908 /6 sub  -> box z = {fixedZ:0.000}  (rests on terrain)");
+
+        // TARGETED alternative: CCD (LinearCast) on the DROPPED box, ONE step of 0.0908 (no sub-stepping).
+        var cbd = BodyDesc.Default;
+        cbd.Shape = boxShape; cbd.Position = new Vector3(70f, 70f, 16f);
+        cbd.MotionType = BodyMotionType.Dynamic; cbd.Layer = PhysicsLayer.Dynamic; cbd.StartActive = true;
+        cbd.UseCcd = true;   // <-- the decouple: fast body gets continuous collision, world stays 1 step/frame
+        BodyId cbox = b.CreateBody(cbd); b.ActivateBody(cbox);
+        for (int f = 0; f < 150; f++) b.Step(0.0908f, bb, cc, ct);
+        b.TryGetBodyState(cbox, out BodyState cst);
+        float ccdZ = cst.Position.Z; b.RemoveBody(cbox);
+        Console.WriteLine($"      CCD 0.0908 x1  -> box z = {ccdZ:0.000}  (rests WITHOUT sub-stepping)");
+        Check(raw < -5f, $"repro: single 0.0908 step tunnels a NON-CCD dropped box through terrain (z {raw:0.000})");
+
+        // DECOUPLED fix candidate: raise the backend's CollisionSteps. Jolt subdivides the RIGID-BODY solve
+        // into N sub-steps INSIDE _system.Update, WITHOUT re-running StepCharacter (the character is stepped
+        // once per Step, before Update). So bodies get anti-tunnelling while the character stays at 1 step/
+        // frame - the known-good avatar behaviour. Fresh backend so CollisionSteps is applied at Init.
+        var settings = PhysicsBackendSettings.Default;
+        settings.CollisionSteps = 6;
+        var cbk = new JoltPhysicsBackend();
+        cbk.Initialize(settings);
+        ShapeId cflat = cbk.CreateHeightFieldShape(FlatField(), N, N, new Vector3(S, S, S));
+        cbk.SetTerrain(cflat, Vector3.Zero);
+        ShapeId csBox = cbk.CreateBoxShape(new Vector3(1f, 1f, 1f));
+        var csd = BodyDesc.Default;
+        csd.Shape = csBox; csd.Position = new Vector3(70f, 70f, 16f);
+        csd.MotionType = BodyMotionType.Dynamic; csd.Layer = PhysicsLayer.Dynamic; csd.StartActive = true;
+        BodyId csbox = cbk.CreateBody(csd); cbk.ActivateBody(csbox);
+        var bb2 = new BodyState[8]; var cc2 = new CharacterState[2]; var ct2 = new ContactReport[16];
+        for (int f = 0; f < 150; f++) cbk.Step(0.0908f, bb2, cc2, ct2);   // ONE 0.0908 Step per frame
+        cbk.TryGetBodyState(csbox, out BodyState csst);
+        float csZ = csst.Position.Z;
+        Console.WriteLine($"      CollisionSteps=6, 0.0908 x1 -> box z = {csZ:0.000}  (rests, character still 1 step/frame)");
+        Check(MathF.Abs(csZ - 1.0f) < 0.15f, $"DECOUPLED fix: CollisionSteps=6 rests the box at 1 step/frame (z {csZ:0.000}) - bodies sub-step, character does not");
+
+        b.ReleaseShape(boxShape);
+
+        // --- Does the LIVE sub-step STRUCTURE bounce a standing character? Mimic Simulate exactly:
+        //     movement set ONCE per frame, world stepped in 6 slices; vs the old 1-step-per-frame. ---
+        Console.WriteLine("      --- standing character: 1-step/frame vs 6-substep/frame (bounce check) ---");
+        (float min1, float max1) = StandBounce(b, 0.0908f, 1);
+        (float min6, float max6) = StandBounce(b, 0.0908f, 6);
+        Console.WriteLine($"      1-step/frame : charZ range [{min1:0.000}, {max1:0.000}] amplitude {max1 - min1:0.000}");
+        Console.WriteLine($"      6-substep/fr : charZ range [{min6:0.000}, {max6:0.000}] amplitude {max6 - min6:0.000}");
+        Check(max6 - min6 < 0.05f, $"6-substep standing character is stable, not bouncing (amplitude {max6 - min6:0.000})");
+
+        // Jump at the LIVE dt, ONE step per frame (the reverted regime): does jump=true leave the ground?
+        {
+            ShapeId jflat = b.CreateHeightFieldShape(FlatField(), N, N, new Vector3(S, S, S));
+            b.SetTerrain(jflat, Vector3.Zero);
+            var jbb = new BodyState[8]; var jcc = new CharacterState[2]; var jct = new ContactReport[16];
+            var jcd = CharacterDesc.Default; jcd.CapsuleHalfHeight = 0.725f; jcd.CapsuleRadius = 0.225f;
+            jcd.Position = new Vector3(55f, 55f, 0.96f); jcd.UserData = 9300u;
+            CharacterId jc = b.CreateCharacter(jcd);
+            for (int f = 0; f < 20; f++) { b.SetCharacterMovement(jc, Vector3.Zero, false, false); b.Step(0.0908f, jbb, jcc, jct); }
+            b.SetCharacterMovement(jc, Vector3.Zero, true, false);   // jump this frame
+            b.Step(0.0908f, jbb, jcc, jct);
+            b.TryGetCharacterState(jc, out CharacterState jumped);
+            float peak = jumped.Position.Z;
+            for (int f = 0; f < 20; f++) { b.SetCharacterMovement(jc, Vector3.Zero, false, false); b.Step(0.0908f, jbb, jcc, jct); b.TryGetCharacterState(jc, out CharacterState s); if (s.Position.Z > peak) peak = s.Position.Z; }
+            Console.WriteLine($"      jump @0.0908 x1: takeoff vZ={jumped.LinearVelocity.Z:0.00}, peak z={peak:0.000} (rest 0.950)");
+            Check(peak > 0.950f + 0.3f, $"jump leaves the ground at live dt 1-step/frame (peak {peak:0.000})");
+            b.RemoveCharacter(jc);
+        }
+    }
+
+    // Isolate the live SINK: does CollisionSteps affect a standing character, and WHAT body is its ground
+    // (UserData 0 = terrain, = char's own UserData = its M4.5 marker, = a prim id = a box)? Fresh backend
+    // per CollisionSteps; terrain raised to ~58 to match the live region height in case coordinates matter.
+    private static void RunCharacterGroundIdentity(int collisionSteps, float terrainH)
+        => RunCharacterGroundIdentity(collisionSteps, terrainH, 0f);
+
+    private static void RunCharacterGroundIdentity(int collisionSteps, float terrainH, float walkSpeed)
+    {
+        var settings = PhysicsBackendSettings.Default;
+        settings.CollisionSteps = collisionSteps;
+        var bk = new JoltPhysicsBackend();
+        bk.Initialize(settings);
+        var field = new float[N * N];
+        for (int i = 0; i < field.Length; i++) field[i] = terrainH;
+        ShapeId ter = bk.CreateHeightFieldShape(field, N, N, new Vector3(S, S, S));
+        bk.SetTerrain(ter, Vector3.Zero);
+
+        var bb = new BodyState[8]; var cc = new CharacterState[2]; var ct = new ContactReport[16];
+        const uint CHAR_UD = 7777u;
+        float standHalf = 0.725f + 0.225f;
+        var cd = CharacterDesc.Default; cd.CapsuleHalfHeight = 0.725f; cd.CapsuleRadius = 0.225f;
+        cd.Position = new Vector3(90f, 90f, terrainH + standHalf + 0.01f); cd.UserData = CHAR_UD;
+        CharacterId c = bk.CreateCharacter(cd);
+
+        Console.WriteLine($"      --- CollisionSteps={collisionSteps}, terrainH={terrainH}, walkSpeed={walkSpeed} (char UserData={CHAR_UD}) ---");
+        var desired = new Vector3(walkSpeed, 0f, 0f);
+        float z0 = 0, zN = 0;
+        for (int f = 0; f < 120; f++)
+        {
+            bk.SetCharacterMovement(c, desired, false, false);
+            bk.Step(0.0908f, bb, cc, ct);
+            bk.TryGetCharacterState(c, out CharacterState cs);
+            if (f == 0) z0 = cs.Position.Z;
+            zN = cs.Position.Z;
+            if (f == 0 || f == 40 || f == 80 || f == 119)
+            {
+                uint gud = 999999; string what = "none";
+                if (cs.GroundBody.IsValid && bk.TryGetBodyState(cs.GroundBody, out BodyState gb))
+                {
+                    gud = gb.UserData;
+                    what = gud == 0 ? "TERRAIN" : gud == CHAR_UD ? "OWN-MARKER!" : $"body({gud})";
+                }
+                Console.WriteLine($"        f{f,3} Z={cs.Position.Z:0.000} sup={(cs.IsSupported ? "Y" : "N")} vZ={cs.LinearVelocity.Z:0.000} groundUserData={gud} => {what}");
+            }
+        }
+        float drift = zN - z0;
+        Console.WriteLine($"        DRIFT over 120 frames = {drift:0.000} m ({(MathF.Abs(drift) < 0.02f ? "STABLE" : "SINKING")})");
+        bk.RemoveCharacter(c);
+    }
+
+    // Stand a character on flat terrain and report its Z range over 60 frames. subSteps>1 mimics the live
+    // Simulate loop: SetCharacterMovement is called ONCE per frame, the world is stepped in subSteps slices.
+    private static (float min, float max) StandBounce(ILegionPhysicsBackend b, float frameDt, int subSteps)
+    {
+        ShapeId flat = b.CreateHeightFieldShape(FlatField(), N, N, new Vector3(S, S, S));
+        b.SetTerrain(flat, Vector3.Zero);
+        var bb = new BodyState[8]; var cc = new CharacterState[2]; var ct = new ContactReport[16];
+        var cd = CharacterDesc.Default; cd.CapsuleHalfHeight = 0.725f; cd.CapsuleRadius = 0.225f;
+        float standHalf = 0.725f + 0.225f;
+        cd.Position = new Vector3(50f, 50f, standHalf + 0.01f);   // the live seat
+        cd.UserData = 9200u;
+        CharacterId c = b.CreateCharacter(cd);
+        float sub = frameDt / subSteps;
+        float min = float.MaxValue, max = float.MinValue;
+        bool logged = false;
+        for (int f = 0; f < 60; f++)
+        {
+            b.SetCharacterMovement(c, Vector3.Zero, false, false);   // ONCE per frame (as live does)
+            for (int s = 0; s < subSteps; s++)
+            {
+                b.Step(sub, bb, cc, ct);
+                b.TryGetCharacterState(c, out CharacterState cs);
+                if (f >= 5) { min = MathF.Min(min, cs.Position.Z); max = MathF.Max(max, cs.Position.Z); }
+                if (subSteps > 1 && f < 3 && !logged)
+                    Console.WriteLine($"        [charframe] f{f} s{s} Z={cs.Position.Z:0.0000} sup={(cs.IsSupported ? "Y" : "N")} vZ={cs.LinearVelocity.Z:0.000} footAboveTerrain={cs.Position.Z - standHalf:0.0000}");
+            }
+        }
+        Console.WriteLine($"        (dt={frameDt}/{subSteps})");
+        b.RemoveCharacter(c);
+        return (min, max);
+    }
+
+    private static void StandOnBoxAtDt(ILegionPhysicsBackend b, float dt, string label, float capHalf, float capRadius)
+    {
+        Console.WriteLine($"      --- dt={label}, capsule half={capHalf:0.000} r={capRadius:0.000} ---");
+        ShapeId flat = b.CreateHeightFieldShape(FlatField(), N, N, new Vector3(S, S, S));
+        b.SetTerrain(flat, Vector3.Zero);
+
+        const float bx = 90f, by = 90f;
+        ShapeId boxShape = b.CreateBoxShape(new Vector3(1f, 1f, 1f)); // HALF-extents -> 2x2x2 m, 8000 kg
+        var bd = BodyDesc.Default;
+        bd.Shape = boxShape;
+        bd.Position = new Vector3(bx, by, 1.0f);   // placed ALREADY AT REST (bottom on terrain) - isolates
+        bd.MotionType = BodyMotionType.Dynamic;    // the CHARACTER's behaviour from the drop-tunnel confound
+        bd.Layer = PhysicsLayer.Dynamic;
+        bd.StartActive = true;
+        BodyId box = b.CreateBody(bd);
+        b.ActivateBody(box);
+
+        var bb = new BodyState[16]; var cc = new CharacterState[4]; var ct = new ContactReport[64];
+        StepResult sr = default;
+        for (int i = 0; i < 60; i++) sr = b.Step(dt, bb, cc, ct);   // brief settle (already resting)
+        b.TryGetBodyState(box, out BodyState boxRest);
+        bool boxAsleep = (boxRest.Flags & BodyStateFlags.Active) == 0;
+        float boxTop = boxRest.Position.Z + 1f;
+        float standHalf = capHalf + capRadius;
+        Console.WriteLine($"      box settled: centreZ={boxRest.Position.Z:0.000} top={boxTop:0.000} asleep={boxAsleep} (ActiveBodies={sr.ActiveBodyCount})");
+
+        // --- (a) drop straight onto the box top ---
+        var cd = CharacterDesc.Default; cd.CapsuleHalfHeight = capHalf; cd.CapsuleRadius = capRadius;
+        cd.Position = new Vector3(bx, by, boxTop + standHalf + 0.10f);
+        cd.UserData = 9100u;
+        CharacterId c = b.CreateCharacter(cd);
+        for (int i = 0; i < 180; i++) { b.SetCharacterMovement(c, Vector3.Zero, false, false); b.Step(dt, bb, cc, ct); }
+        b.TryGetCharacterState(c, out CharacterState dropFin);
+        b.TryGetBodyState(box, out BodyState boxNow);
+        float expectedStandZ = (boxNow.Position.Z + 1f) + standHalf;
+        bool sankA = dropFin.Position.Z < (boxNow.Position.Z + 1f) - 0.1f;
+        bool stoodDropped = dropFin.IsSupported && dropFin.GroundBody.IsValid && MathF.Abs(dropFin.Position.Z - expectedStandZ) < 0.3f;
+        Console.WriteLine($"      (a) dropped-on-top: charZ={dropFin.Position.Z:0.000} exp={expectedStandZ:0.000} supported={dropFin.IsSupported} groundBody={(dropFin.GroundBody.IsValid ? "box" : "none/terrain")} sank={sankA}");
+        Check(stoodDropped && !sankA, $"(a,{label}) stands when dropped ON the dynamic box (z {dropFin.Position.Z:0.000} ~ {expectedStandZ:0.000})");
+        b.RemoveCharacter(c);
+
+        // --- (b) walk horizontally into the box from the ground (John's action) ---
+        var cd2 = CharacterDesc.Default; cd2.CapsuleHalfHeight = capHalf; cd2.CapsuleRadius = capRadius;
+        cd2.Position = new Vector3(bx - 3.0f, by, standHalf);
+        cd2.UserData = 9101u;
+        CharacterId c2 = b.CreateCharacter(cd2);
+        Console.WriteLine("      (b) walk +X into the box:  step | charX  | charZ  | sup | groundBody   | boxX   | boxActive");
+        for (int i = 0; i < 300; i++)
+        {
+            b.SetCharacterMovement(c2, new Vector3(1.5f, 0f, 0f), false, false);
+            b.Step(dt, bb, cc, ct);
+            if (i < 2 || i % 40 == 39)
+            {
+                b.TryGetCharacterState(c2, out CharacterState cs);
+                b.TryGetBodyState(box, out BodyState bs);
+                string gb = cs.GroundBody.IsValid ? $"body({cs.GroundBody.Value})" : "none/terrain";
+                bool act = (bs.Flags & BodyStateFlags.Active) != 0;
+                Console.WriteLine($"                                 {i + 1,4} | {cs.Position.X,6:0.000} | {cs.Position.Z,6:0.000} |  {(cs.IsSupported ? "Y" : "N")}  | {gb,-12} | {bs.Position.X,6:0.000} | {(act ? "Y" : "N")}");
+            }
+        }
+        b.TryGetCharacterState(c2, out CharacterState walkFin);
+        b.TryGetBodyState(box, out BodyState boxFin);
+        float boxFrontX = boxFin.Position.X - 1f;
+        bool tunnelled = walkFin.Position.X > boxFrontX - capRadius + 0.25f;
+        Console.WriteLine($"      (b) walked-into: charX={walkFin.Position.X:0.000} boxFrontX={boxFrontX:0.000} charZ={walkFin.Position.Z:0.000} supported={walkFin.IsSupported} groundBody={(walkFin.GroundBody.IsValid ? "box" : "none/terrain")} tunnelled={tunnelled}");
+        Check(!tunnelled, $"(b,{label}) blocked by the box, did NOT tunnel through it (charX {walkFin.Position.X:0.000} vs frontX {boxFrontX:0.000})");
+
+        b.RemoveCharacter(c2);
+        b.RemoveBody(box);
+        b.ReleaseShape(boxShape);
     }
 
     // Character walks +X into a light dynamic box: should push it and not tunnel through.

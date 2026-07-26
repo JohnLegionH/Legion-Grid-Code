@@ -306,8 +306,67 @@ are not silently "corrected" later — they are deliberate, not incidental.
   - *Characters are not lock-free like bodies (M3 #2).* `CharacterVirtual` create/remove/set/step are
     serialised to the step thread via a gate. The taint-free "call from any thread" property is
     **bodies-only**; this asymmetry is accepted.
-  - *`CharacterDesc.Friction` is unused (M3 #5).* `CharacterVirtual` has no body-style friction; an
-    avatar's ground friction is the M6 movement model's accel/decel business, not a backend knob.
+  - *`CharacterDesc.Friction` is unused (M3 #5) — ground-HOLD resolved in M6.5, coefficient still unused.*
+    `CharacterVirtual` has no body-style friction. The ground-holding half of delta #5 is now done in the
+    M6 movement model (`StepCharacter`): a character supported on WALKABLE ground (`GroundState.OnGround`,
+    slope ≤ `MaxSlopeAngle`) and not jumping does **not** accumulate gravity, so a no-input avatar cannot
+    creep down a walkable slope (the M6.5 "sliding down the cone" bug — the harness only tested FLAT ground
+    so it never surfaced). Gravity resumes when airborne or on `OnSteepGround`, so ledges drop and
+    over-steep slopes still slide (`IsSliding`). The `Friction` *coefficient* itself remains unused — the
+    hold is a binary walkable/steep decision from `GroundState`, not a tunable friction force.
+
+## M6.5 Task 1 — the avatar (live CharacterVirtual)
+
+`AddAvatar` now returns a real `JoltCharacter` (a `CharacterVirtual`, not a solver body) seated ON the
+terrain, movement-driven by ScenePresence (`TargetVelocity`/`Flying`/`AvatarJump`) and drained back each
+frame (`[charframe]`). It holds on walkable slopes, slides on steep, rides platforms, is a collision
+citizen (M3.5) and query-visible via the M4.5 marker. Deltas recorded here so they are not re-litigated:
+
+- **#5 RESOLVED — GroundState ground-hold IS the M6 movement model.** Walkable (`OnGround`) → hold (no
+  gravity accumulation); steep (`OnSteepGround`) → slide (`IsSliding`); jump → release (the jump frame has
+  `JumpRequested`, so the hold is off and the impulse rises). It is a **binary** walkable/steep decision
+  from `GroundState`, NOT the `Friction` coefficient — SL has no tunable slope-grip.
+
+- **Jump is animation-gated for VISIBILITY, not broken.** `[charjump]` confirmed the physics fires
+  (`AvatarJump fired` → `TAKEOFF`, `vZ>0`, Z rises). Without a jump animation the avatar reads as static,
+  exactly as a default SL avatar does without an AO. Do **not** re-chase jump as a physics bug.
+
+- **Feet-dip polish REVERTED — `CreateCharacter` stays at Jolt defaults (`PredictiveContactDistance` 0.1,
+  `PenetrationRecoverySpeed` 1.0).** Raising the look-ahead to 0.15 hovered the capsule off the ground and
+  fought recovery frame-to-frame on inclines (a walking hop). The minor feet-dip on step/slope transitions
+  is ACCEPTED as cosmetic. Do not re-attempt without a way to *measure* slope-feel (the harness tests flat
+  ground and cannot see hover/hop).
+
+- **The diagnostic arc (the "underground" saga).** The apparent sink was the avatar **sliding down the
+  cone** on a frictionless walkable slope (delta #5) — the character rode the descending terrain correctly
+  (`feetAboveTerrain` constant ~0.005). It was **NOT** a dt units bug (`[dtproof]` = 0.0909 s), NOT the
+  M4.5 marker (ground was `TERRAIN`, UserData 0), NOT the terrain moving (`terrainZ@centre` constant,
+  `SetTerrain` fires ~5 s not per-frame), NOT a sub-step desync (harness: sub-stepped character amplitude
+  0.000). Settled by `[charframe]`: `terrainZ@centre` constant while `XY` drifted with no input. Preserve.
+
+## Terrain collision: heightfield now, terrain-mesh in reserve (M6.5)
+
+We collide against the region terrain with a Jolt **`HeightFieldShape`** (cooked from the region
+heightmap). At OpenSim's ~11 fps physics cadence (`Scene.FrameTime` ≈ 0.0908 s) a single Jolt
+integration lets a fast body move ~1.5 m/frame, which the heightfield's **discrete narrowphase** can miss
+— a dropped prim tunnels straight through (M6.5 finding #3). We fix that cheaply with
+**`CollisionSteps = 6`** (Jolt sub-steps the rigid-body solver inside `_system.Update`, without
+re-running the character step), keeping the avatar on the known-good 1-step-per-frame path. A global
+`Simulate` sub-step was tried first and **reverted** — it 6×'d the whole character/drain/terse pipeline
+and was a live *performance* regression (avatar bounce/jitter), not a physics one.
+
+Evidence the heightfield **narrowphase has limits**: per-body CCD (`MotionQuality.LinearCast`) does **not**
+catch the heightfield in the harness — a `LinearCast` box still tunnels — so CCD is not a usable escape
+hatch for fast movers here. This is fine for gravity-driven prims (`CollisionSteps` handles them), but
+could bite genuinely fast bodies later (vehicles, projectiles/`llCastRay`-speed objects).
+
+**Reserve fix — terrain MESH collider.** Per Balpien Hammerer: InWorldz abandoned direct heightfield use
+(PhysX 2.x heightfield support "was weird") and instead **baked a terrain mesh from the heightmap** for
+collision; stock OpenSim (ubODE / BulletSim) uses heightfields directly. If heightfield collision shows
+further problems, the escape hatch is to bake a `MeshShape` (or per-region tiled meshes) from the same
+(N+1) height field and collide against that instead — a triangle-mesh narrowphase behaves differently for
+fast bodies. Kept in reserve, not implemented: the heightfield + `CollisionSteps=6` is cheaper and proven
+for the current (gravity-driven) workload.
 
 ## Build notes
 
