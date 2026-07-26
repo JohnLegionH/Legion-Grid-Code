@@ -237,7 +237,7 @@ namespace OpenSim.Region.PhysicsModules.LegionJolt
             {
                 _consoleRegistered = true;
                 MainConsole.Instance.Commands.AddCommand("Physics", false, "jolt",
-                    "jolt terraintest | terrainslope | terrainhill | hilltest | probe <x> <y> | rezprims | rayprims | rezmesh | rezmeshn <count> | raymesh | droptest | dropmesh | dropstatus | avatarstatus | charframe [secs] | sitstatus | sittest | unsit | sittarget | heights <x> <y> | clearprims",
+                    "jolt terraintest | terrainslope | terrainhill | hilltest | probe <x> <y> | rezprims | rayprims | rezmesh | rezmeshn <count> | raymesh | droptest | dropmesh | dropstatus | avatarstatus | charframe [secs] | sitstatus | sittest | unsit | sittarget | sensortest | heights <x> <y> | clearprims",
                     "Legion Jolt proofs (M6.2 terrain / M6.3 prims): raycast the cooked collision surfaces and report hits.",
                     HandleJoltConsole);
             }
@@ -488,6 +488,12 @@ namespace OpenSim.Region.PhysicsModules.LegionJolt
                 return;
             }
 
+            if (cmd.Length >= 2 && cmd[1] == "sensortest")
+            {
+                SensorTest();
+                return;
+            }
+
             if (cmd.Length >= 4 && cmd[1] == "heights"
                 && float.TryParse(cmd[2], out float hx) && float.TryParse(cmd[3], out float hy))
             {
@@ -524,7 +530,7 @@ namespace OpenSim.Region.PhysicsModules.LegionJolt
                 return;
             }
 
-            MainConsole.Instance.Output("Usage: jolt terraintest | terrainslope | terrainhill | hilltest | probe <x> <y> | rezprims | rayprims | rezmesh | rezmeshn <count> | raymesh | droptest | dropmesh | dropstatus | avatarstatus | charframe [secs] | sitstatus | sittest | unsit | sittarget | heights <x> <y> | clearprims");
+            MainConsole.Instance.Output("Usage: jolt terraintest | terrainslope | terrainhill | hilltest | probe <x> <y> | rezprims | rayprims | rezmesh | rezmeshn <count> | raymesh | droptest | dropmesh | dropstatus | avatarstatus | charframe [secs] | sitstatus | sittest | unsit | sittarget | sensortest | heights <x> <y> | clearprims");
         }
 
         // Build one basic prim with a CANONICAL PrimitiveBaseShape (a real viewer/OAR prim's values,
@@ -1037,6 +1043,46 @@ namespace OpenSim.Region.PhysicsModules.LegionJolt
             MainConsole.Instance.Output($"  [{(offsetOk ? "PASS: seated at SitTargetPosition + SL sit offset, in the prim's LOCAL frame (X/Y offset+rotation composed; Z = OpenSim's standard sit offset, not a capsule leak)" : "CHECK: seated local pos does not match the SL-composed expected - see numbers above")}]");
             SitStatus();
             MainConsole.Instance.Output($"  -> `jolt unsit` to re-engage (character recreates at the release pos). A MOVING prim carries this offset via parenting.");
+        }
+
+        // M6.7 Task 1 - the M4.5 marker payoff. IMPORTANT REFRAME: OpenSim's llSensor is SCENE-GRAPH, not
+        // physics - SensorRepeat.doAgentSensor/doObjectSensor iterate the ScenePresence / Entities lists and
+        // compute distance/arc directly (and explicitly handle SEATED avatars), so llSensor never touches the
+        // engine and finds avatars with or without a marker. The M4.5 kinematic query-marker matters for the
+        // PHYSICS query path (llCastRay / OverlapSphere with the Avatar filter). This console is the first
+        // LIVE test of that: a physics agent-overlap must find the logged-in avatar's marker, by UserData
+        // (#30: avatar presence carries UserData, not a solver BodyId), and be range-correct.
+        private void SensorTest()
+        {
+            ScenePresence sp = FirstRootAvatar();
+            if (sp == null) { MainConsole.Instance.Output($"{LogHeader} no logged-in avatar - log in first."); return; }
+            Vector3 p = sp.AbsolutePosition;
+
+            MainConsole.Instance.Output($"{LogHeader} M4.5 marker payoff - physics agent-query vs the live avatar '{sp.Name}' (LocalId={sp.LocalId}):");
+            MainConsole.Instance.Output($"  (OpenSim llSensor is scene-graph and does NOT use this; the marker is what makes llCastRay/overlap agent-queries find an avatar.)");
+
+            var hits = new BodyId[32];
+            int nNear = _backend.OverlapSphere(new SVector3(p.X, p.Y, p.Z), 5f, QueryFilter.Avatar, hits);
+            bool nearFound = false; uint nearUd = 0;
+            for (int i = 0; i < nNear; i++)
+                if (_backend.TryGetBodyState(hits[i], out BodyState bs) && bs.UserData == sp.LocalId) { nearFound = true; nearUd = bs.UserData; }
+
+            int nFar = _backend.OverlapSphere(new SVector3(p.X + 100f, p.Y + 100f, p.Z), 5f, QueryFilter.Avatar, hits);
+            bool farFound = false;
+            for (int i = 0; i < nFar; i++)
+                if (_backend.TryGetBodyState(hits[i], out BodyState bs) && bs.UserData == sp.LocalId) farFound = true;
+
+            bool seated = sp.IsSatOnObject;
+            MainConsole.Instance.Output($"  NEAR overlap (sphere r=5 at avatar): {nNear} agent-layer hit(s); avatar marker (UserData={sp.LocalId}) found = {(nearFound ? "Y" : "N")}{(nearFound ? $" (resolved id={nearUd})" : "")}");
+            MainConsole.Instance.Output($"  FAR  overlap (sphere r=5, +100 m):   {nFar} agent-layer hit(s); avatar marker found = {(farFound ? "Y" : "N")}");
+            MainConsole.Instance.Output($"  avatar seated = {(seated ? "Y" : "N")}  (SEATED => the M4.5 marker is destroyed with the character, so a PHYSICS agent-query cannot find it; OpenSim's scene-graph llSensor still finds seated avatars.)");
+
+            string verdict = (nearFound && !farFound)
+                ? "PASS: M4.5 marker is query-visible LIVE via the physics Avatar filter - avatar found in range, identity by UserData, not found out of range."
+                : seated ? "note: avatar is SEATED -> no marker -> physics agent-query can't find it (expected). `jolt unsit` and re-run to see the marker."
+                : "FAIL: the physics agent-query did NOT find the avatar marker in range - the M4.5 marker is not query-visible live (regression from the clean-room proof).";
+            MainConsole.Instance.Output($"  [{verdict}]");
+            MainConsole.Instance.Output($"  llSensor(AGENT) itself: works out-of-box (scene-graph) for WALKING and SEATED avatars - no physics wiring needed. This test validates the marker for the llCastRay/overlap path (Task 2).");
         }
 
         // The canonical triangular-prism PrimitiveBaseShape (EquilateralTriangle + Straight) used by the

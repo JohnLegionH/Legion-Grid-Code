@@ -1,5 +1,35 @@
 # Legion Physics Backend — design notes
 
+## Standing constraints (M6.7+)
+
+- **Portability: LegionJolt must run unchanged in BOTH Legion AND Tranquillity** (the Mike/NGC
+  OpenSim-derived tree). Discipline: the region module uses ONLY the STANDARD OpenSim physics surface —
+  `PhysicsScene` / `PhysicsActor` / `ScenePresence` / `SceneObjectPart` / `SceneObjectGroup` — never a
+  Legion-only extension or hook. The `Legion.Physics` backend is already OpenSim-agnostic (no OpenSim
+  types at all); keep it that way. Decision: ASSUME PORTABLE (shared OpenSim contract), VERIFY AT DEPLOY
+  — no audit now, but FLAG any fix that would need a Legion-specific hook so it can be reworked to the
+  standard surface before it lands.
+- **Phlox is the script engine.** Legion runs InWorldz/Halcyon **Phlox** (`DefaultScriptEngine =
+  "InWorldz.Phlox"`), so script-facing physics (`llSensor`, `llCastRay`, `llSitTarget`, collision
+  events) is validated on Phlox, not XEngine/YEngine — we do not certify on an engine John will never
+  run.
+- **Phlox runtime closure (beyond the base OpenSim `bin/` set)** — what a Phlox-enabled scratch OR
+  linux-x64 production deploy must carry, and NuGet-only (not in the OpenSim `bin/`):
+  - **SQLite** (script-state persistence): `Microsoft.Data.Sqlite` 10.0.7 + `SQLitePCLRaw.core` /
+    `.provider.e_sqlite3` / `.batteries_v2` 2.1.11 + the **native** `e_sqlite3` (per-RID:
+    `runtimes/win-x64|linux-x64/native/e_sqlite3`).
+  - **Scheduler / compiler**: `C5` **3.0.0.0**, `Antlr4.Runtime.Standard` 4.13.1, `Antlr4.StringTemplate`
+    4.0.7, `protobuf-net` + `protobuf-net.Core` 3.0.0.
+  These are LAZY deps (only throw when the scheduler/persistence path first fires), so a Phlox deploy
+  must be validated by RUNNING a script + persistence, not just booting.
+- **⚠ Source-tree C5 inconsistency (flag for the production deploy).** In the current tree the Phlox
+  binaries disagree on C5: `InWorldz.Phlox.dll` (a stale build) references **C5 3.0.0.0** while the newer
+  `Phlox.ScriptEngine.dll` and `bin/C5.dll` are **C5 1.1.0.0** — so a Phlox boot from this `bin/` crashes
+  (`Could not load C5, Version=3.0.0.0`). The scratch fix ships C5 **3.0.0.0** (satisfies the stale
+  `InWorldz.Phlox`; C5 is not strong-named and API-stable, so `Phlox.ScriptEngine` loads it by name). The
+  PROPER fix is to rebuild `InWorldz.Phlox` against the tree's current C5 so all Phlox binaries agree —
+  needed before Phlox+Jolt ship together.
+
 ## Layering
 
 ```
