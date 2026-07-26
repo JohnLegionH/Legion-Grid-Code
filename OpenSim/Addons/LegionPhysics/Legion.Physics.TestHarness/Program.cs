@@ -419,6 +419,9 @@ internal static class Program
             Console.WriteLine("\n[24c] Sit/unsit cycle (M6.6): remove-on-sit / recreate-on-unsit, no leak over N cycles");
             RunSitUnsitCycle(backend);
 
+            Console.WriteLine("\n[24d] RayCast vs RayCastAll surface normal (M6.7 Task 2 - llCastRay RC_GET_NORMAL)");
+            RunRayCastNormal(backend);
+
             // ============ MILESTONE 3.5 - AVATAR AS COLLISION CITIZEN ============
             // Avatar contacts are reported via the CharacterVirtual's OWN contact events (not an inner
             // body). Side A of every avatar report is the avatar (Invalid BodyId, UserData = avatar id).
@@ -1007,6 +1010,44 @@ internal static class Program
             if (!cycleOk) clean = false;
         }
         Check(clean, "sit/unsit x6: every create -> 1 supported character, every remove -> 0 (no leak, always re-engages)");
+    }
+
+    // M6.7 Task 2: llCastRay RC_GET_NORMAL comes from RayHit.Normal. Single RayCast normals were proven at
+    // 6.3 (jolt probe); RayCastAll (the multi-hit path llCastRay/RaycastWorld uses) was never checked for
+    // the normal. Cast straight DOWN at flat terrain both ways and compare - a zero from RayCastAll is the
+    // Phlox "zero normal" bug.
+    private static void RunRayCastNormal(ILegionPhysicsBackend b)
+    {
+        ShapeId flat = b.CreateHeightFieldShape(FlatField(), N, N, new Vector3(S, S, S));
+        b.SetTerrain(flat, Vector3.Zero);
+
+        var origin = new Vector3(90f, 90f, 50f);
+        var down = new Vector3(0f, 0f, -1f);
+
+        // A DYNAMIC box resting on the terrain, so the down-ray crosses box-top then terrain (like John's
+        // leftover boxes). Filter Static|Dynamic|Terrain = what the 4-arg RaycastWorld (Phlox) uses.
+        ShapeId boxShape = b.CreateBoxShape(new Vector3(1f, 1f, 1f));
+        var bd = BodyDesc.Default; bd.Shape = boxShape; bd.Position = new Vector3(90f, 90f, 1f);
+        bd.MotionType = BodyMotionType.Dynamic; bd.Layer = PhysicsLayer.Dynamic; bd.StartActive = true; bd.UserData = 4242u;
+        BodyId box = b.CreateBody(bd); b.ActivateBody(box);
+        var bb = new BodyState[4]; var cc = new CharacterState[1]; var ct = new ContactReport[4];
+        for (int i = 0; i < 60; i++) b.Step(1f / 60f, bb, cc, ct);  // settle box
+
+        bool single = b.RayCast(origin, down, 100f, QueryFilter.Terrain, out RayHit sh);
+        var many = new RayHit[8];
+        int nAll = b.RayCastAll(origin, down, 100f, QueryFilter.Terrain | QueryFilter.Static | QueryFilter.Dynamic, many);
+
+        Console.WriteLine($"      single RayCast (Terrain): hit={single} normal=({sh.Normal.X:0.00},{sh.Normal.Y:0.00},{sh.Normal.Z:0.00}) pointZ={sh.Point.Z:0.000}");
+        Console.WriteLine($"      RayCastAll (Terrain|Static|Dynamic): {nAll} hit(s):");
+        for (int i = 0; i < nAll; i++)
+            Console.WriteLine($"        [{i}] UserData={many[i].UserData} dist={many[i].Distance:0.000} pointZ={many[i].Point.Z:0.000} normal=({many[i].Normal.X:0.00},{many[i].Normal.Y:0.00},{many[i].Normal.Z:0.00})");
+
+        bool anyZeroNormal = false;
+        for (int i = 0; i < nAll; i++) if (many[i].Normal.LengthSquared() < 0.01f) anyZeroNormal = true;
+        Check(single && sh.Normal.Z > 0.9f, $"single RayCast terrain normal ~ +Z (got {sh.Normal.Z:0.00})");
+        Check(nAll > 0 && !anyZeroNormal, $"RayCastAll: every hit has a non-zero normal (llCastRay RC_GET_NORMAL) - {nAll} hits, anyZero={anyZeroNormal}");
+
+        b.RemoveBody(box); b.ReleaseShape(boxShape);
     }
 
     private static void RunCharacterGroundIdentity(int collisionSteps, float terrainH)

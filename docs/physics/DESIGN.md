@@ -403,6 +403,42 @@ no new physics mechanism was needed:
   expected `0.65 != standHalf 0.95` so a capsule leak could not masquerade as the SL offset). Leg-vs-seat
   fit (short avatar with no sit animation) is the sit-animation/content layer, not physics.
 
+## M6.7 — the query family on Phlox (llSensor, llCastRay), SL-exact
+
+The query family lands on **Phlox** (Legion's engine), routed to the backend query layer, and matched
+to SL's documented flag semantics. Proven live in-viewer (John).
+
+- **llCastRay routing — Phlox calls the 4-arg *filterless* `RaycastWorld`, XEngine calls the 5-arg.**
+  `LSLSystemAPI.llCastRay` -> `World.PhysicsScene.RaycastWorld(start, dir, dist, count)` (no
+  `RayFilterFlags`); OpenSim's own `LSL_Api.llCastRay` -> the 5-arg `RaycastWorld(..., RayFilterFlags)`.
+  Both are STANDARD OpenSim `PhysicsScene` surface (Tranquillity-portable). We **override BOTH** and route
+  each to `CastAll` -> `backend.RayCastAll` (`AllHitSorted`, distance-ordered): the 4-arg with
+  `QueryFilter.Default` (Terrain|Static|Dynamic|Avatar - Phlox does its own reject-filtering script-side),
+  the 5-arg via `ToQueryFilter(RayFilterFlags)`. **M6.7 regression cause:** only the 5-arg had been
+  overridden, so under Phlox every cast fell through to the base (empty list) = 0 hits. `ContactResult`
+  fields (`ConsumerID`=`SceneObjectPart.LocalId`, 0=terrain; `Pos`; `Normal`; `Depth`) set from `RayHit`.
+  Proven: terrain hit + REAL normal `<0.129,0.163,0.978>`; `RC_REJECT_LAND` excludes land; `RC_REJECT_AGENTS`
+  DEFAULT detects the avatar (SL-correct), set-flag drops it; multi-hit = distance-ordered real keys.
+
+- **Two different agent queries, by design (do not conflate).** Phlox `llSensor` is **scene-graph**
+  (`SenseEntities`) - it finds a **seated** avatar (whose character is gone, M6.6). The **physics**
+  agent-query (`llCastRay`-at-avatar, overlap) uses the **M4.5 marker** body - which exists only while the
+  avatar is a live `CharacterVirtual` (**walking only**; seated => marker gone, same as the character).
+  So "llSensor finds the seated rider but llCastRay does not" is CORRECT, not a miss. Marker identity via
+  `#30 UserData` (marker carries the avatar `LocalId`, so a physics hit resolves to the agent).
+
+- **The Phlox llCastRay `RC_*` constant bug is NOT ours - and is general.** Phlox's `llCastRay` hardcoded
+  its own `RC_*` constants (`LSLSystemAPI.cs`) *disagreeing* with Phlox's SL-correct `DefaultConstants.cs`,
+  so option keys + `dataFlags`/reject bitmasks scripts send were mis-parsed: the normal was dropped (zeroed),
+  link-num ignored, reject flags mangled (all hits dropped). Fixed in a **separate, standalone commit
+  `28b61f9d1b`** (that file only). It is a **pre-existing Phlox port bug, engine-independent** - it breaks
+  `llCastRay` flags for *every* Phlox script regardless of physics backend - and is **worth upstreaming to
+  Legion production + Tranquillity**. Ruled out the tempting "two `ContactResult`/`SharedBase` copies =
+  marshaling scramble" hypothesis by hard evidence: one `SharedBase v0.9.3.0` (identical assembly identity,
+  `PublicKeyToken=null`, all three of module/Phlox/boot-bin), one DLL; the reflection-probe loader exception
+  was an isolated-`LoadFile` artifact (missing `System.Runtime`/`OpenMetaverseTypes` in the probe context),
+  not a runtime duplicate.
+
 ## Terrain collision: heightfield now, terrain-mesh in reserve (M6.5)
 
 We collide against the region terrain with a Jolt **`HeightFieldShape`** (cooked from the region

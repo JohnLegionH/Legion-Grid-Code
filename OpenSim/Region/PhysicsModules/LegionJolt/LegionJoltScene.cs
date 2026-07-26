@@ -237,7 +237,7 @@ namespace OpenSim.Region.PhysicsModules.LegionJolt
             {
                 _consoleRegistered = true;
                 MainConsole.Instance.Commands.AddCommand("Physics", false, "jolt",
-                    "jolt terraintest | terrainslope | terrainhill | hilltest | probe <x> <y> | rezprims | rayprims | rezmesh | rezmeshn <count> | raymesh | droptest | dropmesh | dropstatus | avatarstatus | charframe [secs] | sitstatus | sittest | unsit | sittarget | sensortest | heights <x> <y> | clearprims",
+                    "jolt terraintest | terrainslope | terrainhill | hilltest | probe <x> <y> | rezprims | rayprims | rezmesh | rezmeshn <count> | raymesh | droptest | dropmesh | dropstatus | avatarstatus | charframe [secs] | sitstatus | sittest | unsit | sittarget | sensortest | raytest | heights <x> <y> | clearprims",
                     "Legion Jolt proofs (M6.2 terrain / M6.3 prims): raycast the cooked collision surfaces and report hits.",
                     HandleJoltConsole);
             }
@@ -494,6 +494,12 @@ namespace OpenSim.Region.PhysicsModules.LegionJolt
                 return;
             }
 
+            if (cmd.Length >= 2 && cmd[1] == "raytest")
+            {
+                RayTest();
+                return;
+            }
+
             if (cmd.Length >= 4 && cmd[1] == "heights"
                 && float.TryParse(cmd[2], out float hx) && float.TryParse(cmd[3], out float hy))
             {
@@ -530,7 +536,7 @@ namespace OpenSim.Region.PhysicsModules.LegionJolt
                 return;
             }
 
-            MainConsole.Instance.Output("Usage: jolt terraintest | terrainslope | terrainhill | hilltest | probe <x> <y> | rezprims | rayprims | rezmesh | rezmeshn <count> | raymesh | droptest | dropmesh | dropstatus | avatarstatus | charframe [secs] | sitstatus | sittest | unsit | sittarget | sensortest | heights <x> <y> | clearprims");
+            MainConsole.Instance.Output("Usage: jolt terraintest | terrainslope | terrainhill | hilltest | probe <x> <y> | rezprims | rayprims | rezmesh | rezmeshn <count> | raymesh | droptest | dropmesh | dropstatus | avatarstatus | charframe [secs] | sitstatus | sittest | unsit | sittarget | sensortest | raytest | heights <x> <y> | clearprims");
         }
 
         // Build one basic prim with a CANONICAL PrimitiveBaseShape (a real viewer/OAR prim's values,
@@ -1085,6 +1091,46 @@ namespace OpenSim.Region.PhysicsModules.LegionJolt
             MainConsole.Instance.Output($"  llSensor(AGENT) itself: works out-of-box (scene-graph) for WALKING and SEATED avatars - no physics wiring needed. This test validates the marker for the llCastRay/overlap path (Task 2).");
         }
 
+        // M6.7 Task 2 - llCastRay through the real ray path. Casts a ray straight DOWN through the logged-in
+        // avatar with the Avatar|Terrain filter and expects, in DISTANCE order: [0] the avatar's M4.5 marker
+        // (near), [1] the terrain (far). Proves in one shot: llCastRay(AGENT) hits the avatar via the marker
+        // (identity by UserData), a terrain hit, and multi-hit distance ordering. This is the SAME RayCastAll
+        // path llCastRay takes (Scene.RayCastFiltered -> RaycastWorld -> backend.RayCastAll).
+        private void RayTest()
+        {
+            ScenePresence sp = FirstRootAvatar();
+            if (sp == null) { MainConsole.Instance.Output($"{LogHeader} no logged-in avatar - log in first."); return; }
+            Vector3 p = sp.AbsolutePosition;
+
+            var origin = new SVector3(p.X, p.Y, p.Z + 3f);          // 3 m above the avatar centre
+            var dir = new SVector3(0f, 0f, -1f);
+            QueryFilter qf = QueryFilter.Avatar | QueryFilter.Terrain;
+            var hits = new RayHit[8];
+            int n = _backend.RayCastAll(origin, dir, 200f, qf, hits);
+
+            MainConsole.Instance.Output($"{LogHeader} llCastRay path test - ray DOWN through '{sp.Name}' (filter=Avatar|Terrain), {n} hit(s) in distance order:");
+            bool avatarHit = false, terrainHit = false, ordered = true;
+            float last = -1f;
+            for (int i = 0; i < n; i++)
+            {
+                string what = hits[i].UserData == sp.LocalId ? "AVATAR-MARKER" : hits[i].UserData == 0 ? "TERRAIN" : $"prim({hits[i].UserData})";
+                MainConsole.Instance.Output($"  [{i}] dist={hits[i].Distance:0.000} UserData={hits[i].UserData} => {what} pos=({hits[i].Point.X:0.00},{hits[i].Point.Y:0.00},{hits[i].Point.Z:0.000}) normal=({hits[i].Normal.X:0.00},{hits[i].Normal.Y:0.00},{hits[i].Normal.Z:0.00})");
+                if (hits[i].UserData == sp.LocalId) avatarHit = true;
+                if (hits[i].UserData == 0) terrainHit = true;
+                if (hits[i].Distance < last) ordered = false;
+                last = hits[i].Distance;
+            }
+
+            bool seated = sp.IsSatOnObject;
+            string verdict = (avatarHit && ordered)
+                ? "PASS: the physics ray HITS the walking avatar via the M4.5 marker (identity by UserData), terrain hit, multi-hit sorted by distance."
+                : seated ? "note: SEATED -> the M4.5 marker is gone, so this RAW physics ray misses the avatar. That is CORRECT and SL-exact: llCastRay itself STILL hits a seated avatar via OpenSim's AvatarIntersection(skipPhys) fallback (it handles agents WITHOUT a physics body). `jolt unsit` + re-run to see the marker hit."
+                : "FAIL: the agent ray did not hit the walking avatar marker.";
+            MainConsole.Instance.Output($"  terrainHit={(terrainHit ? "Y" : "N")} avatarHit={(avatarHit ? "Y" : "N")} distanceOrdered={(ordered ? "Y" : "N")}");
+            MainConsole.Instance.Output($"  [{verdict}]");
+            MainConsole.Instance.Output($"  llCastRay is SL-exact: WALKING avatars come from this physics marker (agent->Avatar filter); SEATED avatars are added by OpenSim's AvatarIntersection(skipPhys) - so each avatar is detected exactly ONCE (no duplicate). RayFilterFlags map: agent->Avatar, physical->Dynamic, nonphysical->Static, land->Terrain, LSLPhantom(phantom|volumedtc)->Sensor.");
+        }
+
         // The canonical triangular-prism PrimitiveBaseShape (EquilateralTriangle + Straight) used by the
         // mesh proof - shared by the real rez and the inline decision-point check.
         private static PrimitiveBaseShape GetPrismPbs()
@@ -1434,14 +1480,24 @@ namespace OpenSim.Region.PhysicsModules.LegionJolt
 
         public override bool SupportsRaycastWorldFiltered() => true;
 
+        // TWO llCastRay entry points route here, and BOTH must be overridden or llCastRay returns 0:
+        //  - the 5-arg (RayFilterFlags) overload is what OpenSim's XEngine/YEngine LSL_Api.llCastRay calls
+        //    (it maps RC_* -> RayFilterFlags, then we -> QueryFilter);
+        //  - the 4-arg (no filter) overload is what PHLOX's own llCastRay calls (Halcyon port) - it does the
+        //    reject-physical/agent/land TYPE filtering on the returned list itself, so we hand it ALL solid
+        //    layers + avatars (QueryFilter.Default = Terrain|Static|Dynamic|Avatar; phantom/Sensor excluded,
+        //    which Phlox neither requests nor filters). M6.7 regression: only the 5-arg was overridden, so
+        //    under Phlox every cast fell through to the base (empty list) = 0 hits.
+        public override List<ContactResult> RaycastWorld(Vector3 position, Vector3 direction, float length, int Count)
+            => CastAll(position, direction, length, Count, QueryFilter.Default);
+
         public override object RaycastWorld(Vector3 position, Vector3 direction, float length, int Count, RayFilterFlags filter)
+            => CastAll(position, direction, length, Count, ToQueryFilter(filter));
+
+        private List<ContactResult> CastAll(Vector3 position, Vector3 direction, float length, int Count, QueryFilter qf)
         {
             var results = new List<ContactResult>();
-            if (_backend == null)
-                return results;
-
-            QueryFilter qf = ToQueryFilter(filter);
-            if (qf == QueryFilter.None)
+            if (_backend == null || qf == QueryFilter.None || length <= 0f)
                 return results;
 
             Vector3 dn = direction;
@@ -1454,15 +1510,16 @@ namespace OpenSim.Region.PhysicsModules.LegionJolt
             int n = _backend.RayCastAll(origin, dir, length, qf, hits);
             for (int i = 0; i < n; i++)
             {
-                results.Add(new ContactResult
+                var cr = new ContactResult
                 {
-                    ConsumerID = hits[i].UserData,           // SceneObjectPart.LocalId
+                    ConsumerID = hits[i].UserData,           // SceneObjectPart.LocalId (0 = terrain)
                     Pos = new Vector3(hits[i].Point.X, hits[i].Point.Y, hits[i].Point.Z),
                     Normal = new Vector3(hits[i].Normal.X, hits[i].Normal.Y, hits[i].Normal.Z),
                     Depth = hits[i].Distance,
-                });
+                };
+                results.Add(cr);
             }
-            return results;   // boxed as object; llCastRay casts back to List<ContactResult>
+            return results;
         }
 
         // llCastRay's reject-type flags -> our layer filter. water has no body; phantom/volumedetect
