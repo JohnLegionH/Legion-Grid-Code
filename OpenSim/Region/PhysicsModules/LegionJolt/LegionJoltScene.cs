@@ -221,6 +221,13 @@ namespace OpenSim.Region.PhysicsModules.LegionJolt
 
         public void RegionLoaded(Scene scene)
         {
+            // M6.8 parity harness: an engine-agnostic A/B driver registered under ANY physics engine, so
+            // the SAME console command runs under BulletSim and Jolt for a clean comparison. It MUST be set
+            // up BEFORE the m_Enabled gate (under physics = BulletSim this module is loaded/scanned but is
+            // NOT the physics engine, so m_Enabled is false and the rest of RegionLoaded early-returns). The
+            // harness drives ONLY the standard Scene/SceneObjectGroup/PhysicsActor surface - no Jolt backend.
+            RegisterParityConsole(scene);
+
             if (!m_Enabled)
                 return;
 
@@ -1533,6 +1540,278 @@ namespace OpenSim.Region.PhysicsModules.LegionJolt
             if ((f & RayFilterFlags.agent) != 0) q |= QueryFilter.Avatar;
             if ((f & (RayFilterFlags.phantom | RayFilterFlags.volumedtc)) != 0) q |= QueryFilter.Sensor;
             return q;
+        }
+
+        // ===================================================================================
+        // M6.8 A/B PARITY HARNESS - engine-agnostic. Registered under BOTH BulletSim and Jolt (see
+        // RegionLoaded), drives ONLY the standard OpenSim Scene/SceneObjectGroup/PhysicsActor surface
+        // (the SAME rez path as `jolt rezprims`: EstateOwner -> new SceneObjectGroup -> AddNewSceneObject
+        // -> ScriptSetPhysicsStatus -> DeleteSceneObject). Identical code runs on either engine by only
+        // changing [Startup] physics=, which is what makes the A/B comparison valid. `parity core` writes
+        // a capture file parity-<EngineType>.txt so the two boots can be diffed into a delta table.
+        // Hosted in this module (rather than a new assembly) to stay within the module+backend guardrail;
+        // it uses no Jolt-specific state, so it is valid while BulletSim is the physics engine.
+        // ===================================================================================
+        private static bool s_parityRegistered;
+        private static Scene s_parityScene;
+
+        private void RegisterParityConsole(Scene scene)
+        {
+            if (scene != null) s_parityScene = scene;   // one region in the scratch standalone; last-wins
+            if (MainConsole.Instance == null || s_parityRegistered) return;
+            s_parityRegistered = true;
+            MainConsole.Instance.Commands.AddCommand("Physics", false, "parity",
+                "parity drop | core",
+                "M6.8 engine-agnostic A/B parity harness. Drops a box + a mesher-forced prism through the STANDARD "
+                + "physics surface and reports rest position / settle frames / mass, so BulletSim and Jolt can be "
+                + "compared by booting each with physics= and running the same command. 'core' also writes parity-<engine>.txt.",
+                HandleParityConsole);
+        }
+
+        private void HandleParityConsole(string module, string[] cmd)
+        {
+            Scene scene = s_parityScene;
+            if (scene == null) { MainConsole.Instance.Output("[parity] no scene loaded yet."); return; }
+            string sub = cmd.Length >= 2 ? cmd[1].ToLowerInvariant() : "core";
+            switch (sub)
+            {
+                case "terrain": ParityTerrainLog(scene); break;
+                case "ramp": ParityRampTest(scene); break;
+                case "drop": ParityRunCore(scene, false); break;
+                case "core": ParityRunCore(scene, true); break;
+                default: MainConsole.Instance.Output("Usage: parity terrain (gradient proof) | ramp (steep-slope slide test) | drop | core (writes parity-<engine>.txt)"); break;
+            }
+        }
+
+        // Scenarios 1 + 2 (+ 8 mass): drop identical shapes from a controlled height (terrain + 15 m, so
+        // the FALL is identical on both engines regardless of terrain). Dropped at BOTH the slope point
+        // (128,128 - the cone from avatar testing) AND the flattest terrain we can find, so a slope-friction
+        // divergence is separated from a general drop bug. Each row reports rest pos, settle frames/ms,
+        // engine-assigned mass, the OpenSim-facing friction, and the local terrain slope at the drop XY.
+        private void ParityRunCore(Scene scene, bool toFile)
+        {
+            string engine = scene.PhysicsScene != null ? scene.PhysicsScene.EngineType : "unknown";
+            var sb = new System.Text.StringBuilder();
+            sb.AppendLine($"# M6.8 parity CORE  engine={engine}  region={scene.RegionInfo.RegionName}");
+
+            // Data-driven drop points: SLOPE drop on the steepest flank found (NOT the cone apex, whose
+            // centred gradient is ~0 - a peak, not a slope), FLAT drop on the genuinely flattest cell
+            // (min max-neighbour-delta - a flat has all neighbours equal; a peak's are all lower).
+            FindTerrainExtremes(scene, out float fx, out float fy, out float fSlope, out float sx, out float sy, out float sSlope);
+            sb.AppendLine($"# steepest <{sx:0},{sy:0}> slope={sSlope:0.00}deg   flattest <{fx:0},{fy:0}> slope={fSlope:0.00}deg");
+            sb.AppendLine("# scenario\trest\tsettleFrames\tsettleMs\tmass\tfriction\tslopeDeg\tdrop");
+
+            ParityDropOne(scene, sb, "slope.box",   "box",   sx, sy);   // steepest flank - real slope test
+            ParityDropOne(scene, sb, "slope.prism", "prism", sx, sy);
+            ParityDropOne(scene, sb, "flat.box",    "box",   fx, fy);   // flattest - isolating baseline (~0 drift expected)
+            ParityDropOne(scene, sb, "flat.prism",  "prism", fx, fy);
+
+            string outText = sb.ToString();
+            MainConsole.Instance.Output(outText);
+            if (toFile)
+            {
+                string path = $"parity-{engine}.txt";
+                try { System.IO.File.WriteAllText(path, outText); MainConsole.Instance.Output($"[parity] wrote {System.IO.Path.GetFullPath(path)}"); }
+                catch (Exception e) { MainConsole.Instance.Output($"[parity] file write FAILED: {e.Message}"); }
+            }
+        }
+
+        private void ParityDropOne(Scene scene, System.Text.StringBuilder sb, string label, string kind, float dropX, float dropY)
+        {
+            SceneObjectGroup sog = null;
+            try
+            {
+                float terrainZ = TerrainH(scene, dropX, dropY);
+                float slopeDeg = SlopeDegAt(scene, dropX, dropY);
+                var dropPos = new Vector3(dropX, dropY, terrainZ + 15f);   // controlled 15 m fall on both engines
+                var size = new Vector3(0.5f, 0.5f, 0.5f);
+
+                PrimitiveBaseShape pbs = PrimitiveBaseShape.CreateBox();
+                if (kind == "prism") pbs.ProfileShape = ProfileShape.EquilateralTriangle;   // forces the mesher (no mesh asset)
+
+                UUID owner = scene.RegionInfo.EstateSettings.EstateOwner;
+                sog = new SceneObjectGroup(owner, dropPos, Quaternion.Identity, pbs);
+                sog.RootPart.Scale = size;
+                scene.AddNewSceneObject(sog, false);          // ephemeral (attachToBackup:false), physics-wired
+                sog.ScriptSetPhysicsStatus(true);             // OpenSim's real physics toggle -> dynamic body
+
+                // Physics is applied on the heartbeat; wait for the actor to exist.
+                PhysicsActor pa = null;
+                for (int i = 0; i < 40 && pa == null; i++) { pa = sog.RootPart.PhysActor; if (pa == null) System.Threading.Thread.Sleep(50); }
+                if (pa == null) { sb.AppendLine($"{label}\tERROR: no PhysicsActor (physics not applied)"); return; }
+
+                float mass = pa.Mass;
+                float friction = pa.Friction;
+                uint startFrame = scene.Frame;
+                var wall = System.Diagnostics.Stopwatch.StartNew();
+
+                // Rest = linear speed below threshold for 8 consecutive samples (~0.4 s), or timeout (~30 s,
+                // long enough for BulletSim's 23 s slope slide).
+                int stable = 0; Vector3 restPos = pa.Position;
+                for (int i = 0; i < 600; i++)
+                {
+                    System.Threading.Thread.Sleep(50);
+                    restPos = pa.Position;
+                    if (pa.Velocity.Length() < 0.02f) { if (++stable >= 8) break; } else stable = 0;
+                }
+                wall.Stop();
+                uint frames = scene.Frame - startFrame;
+
+                sb.AppendLine($"{label}\t<{restPos.X:0.000},{restPos.Y:0.000},{restPos.Z:0.000}>\t{frames}\t"
+                    + $"{wall.ElapsedMilliseconds}\t{mass:0.0000}\t{friction:0.000}\t{slopeDeg:0.00}\t"
+                    + $"<{dropPos.X:0.0},{dropPos.Y:0.0},{dropPos.Z:0.0}>");
+            }
+            catch (Exception e)
+            {
+                sb.AppendLine($"{label}\tEXCEPTION: {e.Message}");
+            }
+            finally
+            {
+                if (sog != null) { try { scene.DeleteSceneObject(sog, false); } catch { } }
+            }
+        }
+
+        // Engine-agnostic terrain height (ITerrainChannel), clamped to region bounds.
+        private static float TerrainH(Scene scene, float x, float y)
+        {
+            int rx = (int)scene.RegionInfo.RegionSizeX, ry = (int)scene.RegionInfo.RegionSizeY;
+            int ix = Math.Clamp((int)x, 0, rx - 1), iy = Math.Clamp((int)y, 0, ry - 1);
+            return (float)scene.Heightmap[ix, iy];
+        }
+
+        // Local terrain slope in degrees from the height gradient over a 4 m span at (x,y).
+        private static float SlopeDegAt(Scene scene, float x, float y)
+        {
+            float dx = TerrainH(scene, x + 2, y) - TerrainH(scene, x - 2, y);
+            float dy = TerrainH(scene, x, y + 2) - TerrainH(scene, x, y - 2);
+            float grad = (float)Math.Sqrt(dx * dx + dy * dy) / 4f;
+            return (float)(Math.Atan(grad) * 180.0 / Math.PI);
+        }
+
+        // Max absolute height difference to the 4 neighbours at +/-2 m. This is the FLATNESS metric that
+        // the centred-gradient slope cannot give: at a symmetric peak (the cone apex) the centred gradient
+        // is ~0 (opposite neighbours cancel) yet the point is NOT flat - its neighbours are all LOWER, so
+        // maxNbDelta > 0. A genuinely flat cell has maxNbDelta ~ 0. Use this to find flat, slope to find steep.
+        private static float MaxNbDeltaAt(Scene scene, float x, float y)
+        {
+            float h = TerrainH(scene, x, y);
+            float d = 0f;
+            d = Math.Max(d, Math.Abs(TerrainH(scene, x + 2, y) - h));
+            d = Math.Max(d, Math.Abs(TerrainH(scene, x - 2, y) - h));
+            d = Math.Max(d, Math.Abs(TerrainH(scene, x, y + 2) - h));
+            d = Math.Max(d, Math.Abs(TerrainH(scene, x, y - 2) - h));
+            return d;
+        }
+
+        // Scan a coarse grid for the FLATTEST cell (min maxNbDelta - genuinely level, not a peak) and the
+        // STEEPEST cell (max slope - a cone flank). The two are different XY, giving a real slope-vs-flat pair.
+        private void FindTerrainExtremes(Scene scene, out float fx, out float fy, out float fSlope,
+                                         out float sx, out float sy, out float sSlope)
+        {
+            fx = fy = sx = sy = 0f; fSlope = 0f; sSlope = 0f;
+            float bestFlat = float.MaxValue, bestSteep = -1f;
+            int rx = (int)scene.RegionInfo.RegionSizeX, ry = (int)scene.RegionInfo.RegionSizeY;
+            for (int x = 16; x < rx - 16; x += 8)
+                for (int y = 16; y < ry - 16; y += 8)
+                {
+                    float flat = MaxNbDeltaAt(scene, x, y);
+                    float s = SlopeDegAt(scene, x, y);
+                    if (flat < bestFlat) { bestFlat = flat; fx = x; fy = y; fSlope = s; }
+                    if (s > bestSteep) { bestSteep = s; sx = x; sy = y; sSlope = s; }
+                }
+        }
+
+        // Gradient PROOF: log height / slope / maxNbDelta at fixed test points plus the scanned extremes,
+        // so we can verify the slope calc reports non-zero angles on the flanks and ~0 at a genuinely flat
+        // spot BEFORE trusting any drop data. The apex (128,128) is expected to read ~0 slope (it is a peak).
+        private void ParityTerrainLog(Scene scene)
+        {
+            var sb = new System.Text.StringBuilder();
+            sb.AppendLine("[parity terrain] gradient proof - H / slopeDeg / maxNbDelta(m):");
+            var pts = new (float x, float y)[] { (128,128),(128,140),(140,128),(128,160),(160,128),(100,100),(64,64),(200,200),(32,32),(224,224) };
+            foreach (var (x, y) in pts)
+                sb.AppendLine($"  <{x:0},{y:0}>\tH={TerrainH(scene,x,y):0.00}\tslope={SlopeDegAt(scene,x,y):0.00}deg\tmaxNbDelta={MaxNbDeltaAt(scene,x,y):0.000}");
+            FindTerrainExtremes(scene, out float fx, out float fy, out float fSlope, out float sx, out float sy, out float sSlope);
+            sb.AppendLine($"  => STEEPEST <{sx:0},{sy:0}> slope={sSlope:0.00}deg   FLATTEST <{fx:0},{fy:0}> slope={fSlope:0.00}deg maxNbDelta={MaxNbDeltaAt(scene,fx,fy):0.000}");
+            sb.AppendLine("  (apex 128,128 reads ~0 slope because it is a PEAK, not flat - the flank points must read non-zero)");
+            MainConsole.Instance.Output(sb.ToString());
+        }
+
+        // Steep-slope SANITY (finding 2): the region's steepest terrain is only ~11 deg, below the ~31 deg
+        // (atan 0.6) friction threshold, so we cannot test slide-when-it-should on terrain. Instead drop a
+        // box onto a STATIC ramp prim tilted to several angles (no terrain modification). A friction-0.6 box
+        // should STAY at <=30 deg and SLIDE above ~31 deg. If Jolt does that, it is friction-modelling
+        // correctly (not pinning boxes), which locks the "Jolt is more correct than BulletSim on slopes" call.
+        private void ParityRampTest(Scene scene)
+        {
+            string engine = scene.PhysicsScene != null ? scene.PhysicsScene.EngineType : "unknown";
+            FindTerrainExtremes(scene, out float fx, out float fy, out _, out _, out _, out _);
+            float groundZ = TerrainH(scene, fx, fy);
+            var sb = new System.Text.StringBuilder();
+            sb.AppendLine($"[parity ramp] engine={engine}  at flat <{fx:0},{fy:0}> groundZ={groundZ:0.0}");
+            sb.AppendLine("# box placed AT REST (flush, tilted to match, zero initial velocity) on a static tilted ramp prim.");
+            sb.AppendLine("# Isolates friction from drop-impact. All surfaces friction 0.6 -> textbook: STAY/settle at 20/30");
+            sb.AppendLine("# (tan<0.6), SLIDE (never rests) at 35/45 (tan>0.6). CREEPING at <=30 would be a Jolt friction bug.");
+            sb.AppendLine("# angleDeg\tslide\tpeakVel\tfinalVel\tcameToRest\tverdict\tvelTrace(1s steps)");
+            foreach (float ang in new float[] { 20f, 30f, 35f, 45f })
+                ParityRampAtRest(scene, sb, ang, fx, fy, groundZ);
+            MainConsole.Instance.Output(sb.ToString());
+        }
+
+        // Place a box AT REST (bottom face flush on the tilted ramp, matching tilt, zero velocity) and trace
+        // its velocity. A friction-correct box holds (or briefly settles then rests) below ~31 deg and slides
+        // continuously above it. Continuous motion below 31 deg = a real friction bug; a brief settle that
+        // reaches v~0 = fine. This isolates the impact-slide seen when DROPPING onto the ramp.
+        private void ParityRampAtRest(Scene scene, System.Text.StringBuilder sb, float angleDeg, float fx, float fy, float groundZ)
+        {
+            SceneObjectGroup ramp = null, box = null;
+            try
+            {
+                float th = (float)(angleDeg * Math.PI / 180.0);
+                float sinT = (float)Math.Sin(th), cosT = (float)Math.Cos(th);
+                UUID owner = scene.RegionInfo.EstateSettings.EstateOwner;
+                var rot = Quaternion.CreateFromAxisAngle(Vector3.UnitY, th);   // tilt about Y -> downhill along X
+                var rampPos = new Vector3(fx, fy, groundZ + 4f);
+
+                ramp = new SceneObjectGroup(owner, rampPos, rot, PrimitiveBaseShape.CreateBox());
+                ramp.RootPart.Scale = new Vector3(8f, 4f, 0.4f);      // static plate (never physical)
+                scene.AddNewSceneObject(ramp, false);
+
+                // Box flush on the ramp top face: ramp centre + faceNormal*(0.2 half-plate + 0.25 half-box).
+                var normal = new Vector3(sinT, 0f, cosT);
+                box = new SceneObjectGroup(owner, rampPos + normal * 0.45f, rot, PrimitiveBaseShape.CreateBox());
+                box.RootPart.Scale = new Vector3(0.5f, 0.5f, 0.5f);
+                scene.AddNewSceneObject(box, false);
+                box.ScriptSetPhysicsStatus(true);
+
+                PhysicsActor pa = null;
+                for (int i = 0; i < 40 && pa == null; i++) { pa = box.RootPart.PhysActor; if (pa == null) System.Threading.Thread.Sleep(50); }
+                if (pa == null) { sb.AppendLine($"{angleDeg:0}\tERROR: no PhysActor"); return; }
+                pa.Velocity = Vector3.Zero;   // at-rest start - no drop impact
+
+                Vector3 start = pa.Position;
+                float peak = 0f;
+                var trace = new System.Text.StringBuilder();
+                for (int i = 0; i < 200; i++)   // ~10 s
+                {
+                    System.Threading.Thread.Sleep(50);
+                    float v = pa.Velocity.Length();
+                    if (v > peak) peak = v;
+                    if (i % 20 == 0) trace.Append($" {i / 20}s:{v:0.00}");
+                }
+                float finalV = pa.Velocity.Length();
+                Vector3 end = pa.Position;
+                float slide = (float)Math.Sqrt((end.X - start.X) * (end.X - start.X) + (end.Y - start.Y) * (end.Y - start.Y) + (end.Z - start.Z) * (end.Z - start.Z));
+                bool cameToRest = finalV < 0.02f;
+                string verdict = !cameToRest ? "SLIDING" : (slide < 0.3f ? "STAYED" : "settled-then-REST");
+                sb.AppendLine($"{angleDeg:0}\t{slide:0.00}m\t{peak:0.00}\t{finalV:0.000}\t{cameToRest}\t{verdict}\t(tan={Math.Tan(th):0.00}){trace}");
+            }
+            catch (Exception e) { sb.AppendLine($"{angleDeg:0}\tEXCEPTION: {e.Message}"); }
+            finally
+            {
+                if (box != null) { try { scene.DeleteSceneObject(box, false); } catch { } }
+                if (ramp != null) { try { scene.DeleteSceneObject(ramp, false); } catch { } }
+            }
         }
 
         public override float Simulate(float timeStep)

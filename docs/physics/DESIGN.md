@@ -439,6 +439,51 @@ to SL's documented flag semantics. Proven live in-viewer (John).
   was an isolated-`LoadFile` artifact (missing `System.Runtime`/`OpenMetaverseTypes` in the probe context),
   not a runtime duplicate.
 
+## M6.8 — A/B parity vs BulletSim (CORE: drop/rest, mass, friction)
+
+The capstone: prove Jolt behaves like the engine Legion's content was tuned against (BulletSim). Two
+engines cannot co-exist in one boot (physics selection is the global `[Startup] physics=`; both engines
+self-select on it, no per-region override), so parity runs as **two sequential boots** in the scratch
+dir (flip `physics=`, run the same driver, diff). The driver is an **engine-agnostic** console command
+(`parity`, registered in this module BEFORE the `m_Enabled` gate so it exists under BulletSim too) that
+drives ONLY the standard `Scene`/`SceneObjectGroup`/`PhysicsActor` surface - identical code on either
+engine, which is what makes the comparison valid. Default rule: **match BulletSim** (content's reference)
+UNLESS BulletSim is clearly wrong.
+
+- **MASS - MATCHED (was 100x off).** Jolt computed mass = Volume x `BodyDesc.Default.Density`(1000) = 125 kg
+  for a 0.5^3 box; BulletSim = 1.25 kg. Root: OpenSim stores `SceneObjectPart.Density` in *simulator*
+  units (default 1000) and BulletSim scales it to *physical* density by `BSParam.DensityScaleFactor = 0.01`
+  (mass = `Density x 0.01 x Volume`, BSPrim.cs:1613). `JoltPrim` ignored the SOP density entirely. FIX:
+  `JoltPrim.Density` now forwards `SOP.Density x 0.01` to the backend's new `SetBodyDensity` (recomputes
+  mass = shapeVolume x physicalDensity via `MassProperties.ScaleToMass`), and `JoltPrim.Mass` reads it back
+  through the new `GetBodyMass` (was hardcoded 0 - also closes the M6.4 "mass behavioural-proof-only" gap).
+  Result: box **1.2500**, prism **0.4059** - identical to BulletSim by the same formula. `llGetMass`/forces
+  /vehicles now see BulletSim's numbers.
+
+- **FRICTION / SLIDE - JUSTIFIED DIVERGENCE, Jolt is MORE correct (do NOT match BulletSim).** A box dropped
+  on an 11.3 deg terrain flank: BulletSim slid ~32 m to the region edge and never rested in 34 s; Jolt
+  stayed within 2 cm and settled in 2.2 s. 11.3 deg is well below the Coulomb threshold `atan(0.6)=31 deg`
+  (all surfaces - terrain, box, ramp - carry friction 0.6: JoltPhysicsBackend.cs:1547 / :744), so a box
+  should NOT slide there. Confirmed with an **at-rest ramp test** (box placed flush, tilted, zero initial
+  velocity on a static ramp - isolates friction from drop-impact): Jolt STAYS at 20/30 deg (tan<0.6),
+  SLIDES then RESTS above 31 deg - exact textbook Coulomb friction; BulletSim slides 6.7 m at 30 deg *from
+  rest* and never settles at 35/45 deg (still 1.3-1.7 m/s at 10 s) - broken friction / terrain-creep,
+  impact-independent. So Jolt's clean settle is an **UPGRADE**, not a regression: content that merely
+  tolerated BulletSim's drift settles correctly on Jolt. The earlier drop-slide seen on a tilted prim ramp
+  (1-5 m) was drop-**impact** (a box dropped onto a steep face gets a horizontal impulse a resting box does
+  not); the at-rest box holds perfectly. Kept Jolt's behavior deliberately, with the ramp evidence above.
+  (`parity ramp` reproduces the at-rest test; `parity terrain` proves the slope calc - the drop point
+  128,128 is the cone APEX, ~0 gradient by definition, so drops target the scanned steepest flank / flattest
+  cell instead.)
+
+- **SETTLE TIME - keep Jolt.** Jolt 2.2 s vs BulletSim 34 s is the creep artifact (BulletSim was still
+  sliding, not settling), not a real parity gap - a symptom of the friction defect above.
+
+Standard-surface note (Tranquillity portability): the parity driver, mass-getter and density-forward all
+use only the standard `PhysicsActor`/`PhysicsScene` contract (`Density`, `Mass`, `RaycastWorld`), so they
+carry to any OpenSim-derived grid. Edge cases (llCastRay NULL_KEY on land, coincident terrain hits, avatar-
+to-avatar default) are the next M6.8 increment.
+
 ## Terrain collision: heightfield now, terrain-mesh in reserve (M6.5)
 
 We collide against the region terrain with a Jolt **`HeightFieldShape`** (cooked from the region
