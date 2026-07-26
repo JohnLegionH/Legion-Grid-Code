@@ -957,6 +957,41 @@ namespace Legion.Physics.Jolt
             finally { bli.UnlockWrite(lockWrite); }
         }
 
+        // Read the recorded body mass (set at creation to explicit Mass or ComputeMass = Volume x Density,
+        // and updated by SetBodyMass). Read-only - does not touch the simulation. Used for A/B mass parity.
+        public float GetBodyMass(BodyId body)
+        {
+            return TryResolve(body, out JoltBodyRecord rec, out _) ? rec.Mass : 0f;
+        }
+
+        // Recompute the dynamic mass from the shape's geometric volume and a PHYSICAL density (kg/m^3),
+        // then apply it via the same mass-property scaling path as SetBodyMass. Used so the module can
+        // honour SceneObjectPart.Density (x DensityScaleFactor) for BulletSim mass parity.
+        public void SetBodyDensity(BodyId body, float physicalDensity)
+        {
+            if (physicalDensity <= 0f || !TryResolve(body, out JoltBodyRecord rec, out BodyID jid))
+                return;
+            BodyLockInterface bli = _system!.BodyLockInterface;
+            bli.LockWrite(jid, out BodyLockWrite lockWrite);
+            try
+            {
+                if (lockWrite.Succeeded)
+                {
+                    Body b = lockWrite.Body;
+                    float mass = MathF.Max(b.Shape.Volume * physicalDensity, 1e-3f);
+                    rec.Mass = mass;
+                    if (rec.MotionType == BodyMotionType.Dynamic)
+                    {
+                        MassProperties mp = b.Shape.MassProperties;
+                        mp.ScaleToMass(mass);
+                        MotionProperties motion = b.MotionProperties;
+                        motion.SetMassProperties(motion.AllowedDOFs, mp);
+                    }
+                }
+            }
+            finally { bli.UnlockWrite(lockWrite); }
+        }
+
         public void SetBodyFriction(BodyId body, float friction)
         {
             if (TryResolve(body, out _, out BodyID jid))

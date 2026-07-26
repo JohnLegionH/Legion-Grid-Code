@@ -33,6 +33,13 @@ namespace OpenSim.Region.PhysicsModules.LegionJolt
         private Vector3 _velocity;              // last drained linear velocity (the SOP reads this for terse updates)
         private Vector3 _rotationalVelocity;    // last drained angular velocity
 
+        // SceneObjectPart.Density (simulator units, default 1000) x DensityScaleFactor = PHYSICAL density
+        // (kg/m^3). The same 0.01 conversion BulletSim's BSParam.DensityScaleFactor applies; forwarding it
+        // makes Jolt's mass match BulletSim (a 0.5^3 box: 0.125 x 10 = 1.25 kg, not 0.125 x 1000 = 125). 0
+        // until AddToPhysics sets pa.Density.
+        private const float DensityScaleFactor = 0.01f;
+        private float _simDensity;
+
         private ShapeId _shape = ShapeId.Invalid;   // one handle-ref held for the prim's life
         private BodyId _body = BodyId.Invalid;
 
@@ -91,6 +98,8 @@ namespace OpenSim.Region.PhysicsModules.LegionJolt
                 desc.Layer = PhysicsLayer.Dynamic;
                 desc.MotionType = BodyMotionType.Dynamic;
                 desc.Mass = 0f;                        // <=0 -> backend computes Volume*Density
+                if (_simDensity > 0f)                  // honour the SOP density (BulletSim mass parity, M6.8)
+                    desc.Density = _simDensity * DensityScaleFactor;
                 desc.StartActive = true;               // wake so it falls immediately on going physical
             }
             else
@@ -249,7 +258,23 @@ namespace OpenSim.Region.PhysicsModules.LegionJolt
                 _backend.ReleaseShape(old);
         }
 
-        public override float Mass => 0f;              // reported to OpenSim; the real dynamic mass lives in Jolt
+        // The real dynamic mass lives in Jolt (computed Volume x Density at body creation). Read it back
+        // so OpenSim/llGetMass and the A/B parity harness see Jolt's assigned mass (M6.8, closes 6.4 gap).
+        public override float Mass => _body.IsValid ? _backend.GetBodyMass(_body) : 0f;
+
+        // OpenSim sets pa.Density = SceneObjectPart.Density in AddToPhysics (default 1000). Store it and
+        // forward the PHYSICAL density (x DensityScaleFactor) so Jolt's mass matches BulletSim. A live
+        // physical body recomputes immediately; a not-yet-physical prim applies it at CreateBodyInternal.
+        public override float Density
+        {
+            get => _simDensity > 0f ? _simDensity : BodyDesc.Default.Density;
+            set
+            {
+                _simDensity = value;
+                if (_body.IsValid && _isPhysical)
+                    _backend.SetBodyDensity(_body, value * DensityScaleFactor);
+            }
+        }
         public override bool Stopped => true;
 
         public override Vector3 GeometricCenter => _position;

@@ -514,6 +514,11 @@ namespace Legion.Physics
         void SetBodyAngularVelocity(BodyId body, Vector3 velocity);
 
         void SetBodyMass(BodyId body, float mass);
+        /// <summary>Read the body's assigned mass (explicit, or shape Volume x Density). 0 if unknown/static.</summary>
+        float GetBodyMass(BodyId body);
+        /// <summary>Recompute + apply the dynamic mass as (shape geometric Volume x physicalDensity kg/m^3).
+        /// Lets the module honour a prim's SceneObjectPart.Density instead of the BodyDesc default.</summary>
+        void SetBodyDensity(BodyId body, float physicalDensity);
         void SetBodyFriction(BodyId body, float friction);
         void SetBodyRestitution(BodyId body, float restitution);
         void SetBodyDamping(BodyId body, float linear, float angular);
