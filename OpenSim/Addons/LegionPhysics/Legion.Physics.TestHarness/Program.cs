@@ -416,6 +416,9 @@ internal static class Program
             RunCharacterGroundIdentity(6, 58f);           // standing, live-like config
             RunCharacterGroundIdentity(6, 58f, 1.5f);     // WALKING on flat terrain (John's action)
 
+            Console.WriteLine("\n[24c] Sit/unsit cycle (M6.6): remove-on-sit / recreate-on-unsit, no leak over N cycles");
+            RunSitUnsitCycle(backend);
+
             // ============ MILESTONE 3.5 - AVATAR AS COLLISION CITIZEN ============
             // Avatar contacts are reported via the CharacterVirtual's OWN contact events (not an inner
             // body). Side A of every avatar report is the avatar (Invalid BodyId, UserData = avatar id).
@@ -978,6 +981,34 @@ internal static class Program
     // Isolate the live SINK: does CollisionSteps affect a standing character, and WHAT body is its ground
     // (UserData 0 = terrain, = char's own UserData = its M4.5 marker, = a prim id = a box)? Fresh backend
     // per CollisionSteps; terrain raised to ~58 to match the live region height in case coordinates matter.
+    // M6.6 sit/unsit is character REMOVE (sit) / RECREATE (unsit). Prove the cycle leaves no residue over
+    // many cycles: each create -> exactly 1 live character drained; each remove -> 0; and a fresh create
+    // after a remove always re-engages (a stuck-seated leak would show as a growing/non-zero count).
+    private static void RunSitUnsitCycle(ILegionPhysicsBackend b)
+    {
+        ShapeId flat = b.CreateHeightFieldShape(FlatField(), N, N, new Vector3(S, S, S));
+        b.SetTerrain(flat, Vector3.Zero);
+        var bb = new BodyState[8]; var cc = new CharacterState[4]; var ct = new ContactReport[16];
+        float standHalf = 0.45f + 0.30f;
+        bool clean = true;
+        for (int cycle = 0; cycle < 6; cycle++)
+        {
+            var cd = CharacterDesc.Default;                 // "unsit" -> recreate the walking character
+            cd.Position = new Vector3(100f, 100f, standHalf + 0.01f);
+            cd.UserData = 5000u + (uint)cycle;
+            CharacterId c = b.CreateCharacter(cd);
+            StepResult afterCreate = default;
+            for (int s = 0; s < 15; s++) afterCreate = b.Step(1f / 60f, bb, cc, ct);   // settle onto terrain
+            b.TryGetCharacterState(c, out CharacterState cs);
+            b.RemoveCharacter(c);                            // "sit" -> remove the character
+            StepResult afterRemove = b.Step(1f / 60f, bb, cc, ct);
+            bool cycleOk = afterCreate.CharacterUpdateCount == 1 && afterRemove.CharacterUpdateCount == 0 && cs.IsSupported;
+            Console.WriteLine($"        cycle {cycle}: create->live={afterCreate.CharacterUpdateCount} supported={cs.IsSupported}, remove->live={afterRemove.CharacterUpdateCount}  {(cycleOk ? "ok" : "LEAK")}");
+            if (!cycleOk) clean = false;
+        }
+        Check(clean, "sit/unsit x6: every create -> 1 supported character, every remove -> 0 (no leak, always re-engages)");
+    }
+
     private static void RunCharacterGroundIdentity(int collisionSteps, float terrainH)
         => RunCharacterGroundIdentity(collisionSteps, terrainH, 0f);
 

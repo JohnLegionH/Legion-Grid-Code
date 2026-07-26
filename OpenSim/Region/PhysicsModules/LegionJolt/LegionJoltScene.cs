@@ -87,6 +87,7 @@ namespace OpenSim.Region.PhysicsModules.LegionJolt
         // echoes back). Keyed by handle rather than LocalID so the drain mapping is independent of when
         // ScenePresence assigns LocalID after AddAvatar returns.
         private readonly Dictionary<uint, JoltCharacter> _avatars = new Dictionary<uint, JoltCharacter>();
+        private uint _sitPrimId;   // M6.6: the prim `jolt sittest` rezzed to sit on, so `jolt unsit` can clean it up
 
         // M6.3 Task 2 proof bookkeeping: the console-rezzed test prims (so `jolt rayprims` can state
         // expected hits and `jolt clearprims` can delete them through the real scene-delete path).
@@ -236,7 +237,7 @@ namespace OpenSim.Region.PhysicsModules.LegionJolt
             {
                 _consoleRegistered = true;
                 MainConsole.Instance.Commands.AddCommand("Physics", false, "jolt",
-                    "jolt terraintest | terrainslope | terrainhill | hilltest | probe <x> <y> | rezprims | rayprims | rezmesh | rezmeshn <count> | raymesh | droptest | dropmesh | dropstatus | avatarstatus | charframe [secs] | heights <x> <y> | clearprims",
+                    "jolt terraintest | terrainslope | terrainhill | hilltest | probe <x> <y> | rezprims | rayprims | rezmesh | rezmeshn <count> | raymesh | droptest | dropmesh | dropstatus | avatarstatus | charframe [secs] | sitstatus | sittest | unsit | heights <x> <y> | clearprims",
                     "Legion Jolt proofs (M6.2 terrain / M6.3 prims): raycast the cooked collision surfaces and report hits.",
                     HandleJoltConsole);
             }
@@ -463,6 +464,24 @@ namespace OpenSim.Region.PhysicsModules.LegionJolt
                 return;
             }
 
+            if (cmd.Length >= 2 && cmd[1] == "sitstatus")
+            {
+                SitStatus();
+                return;
+            }
+
+            if (cmd.Length >= 2 && cmd[1] == "sittest")
+            {
+                SitTest();
+                return;
+            }
+
+            if (cmd.Length >= 2 && cmd[1] == "unsit")
+            {
+                Unsit();
+                return;
+            }
+
             if (cmd.Length >= 4 && cmd[1] == "heights"
                 && float.TryParse(cmd[2], out float hx) && float.TryParse(cmd[3], out float hy))
             {
@@ -499,7 +518,7 @@ namespace OpenSim.Region.PhysicsModules.LegionJolt
                 return;
             }
 
-            MainConsole.Instance.Output("Usage: jolt terraintest | terrainslope | terrainhill | hilltest | probe <x> <y> | rezprims | rayprims | rezmesh | rezmeshn <count> | raymesh | droptest | dropmesh | dropstatus | avatarstatus | charframe [secs] | heights <x> <y> | clearprims");
+            MainConsole.Instance.Output("Usage: jolt terraintest | terrainslope | terrainhill | hilltest | probe <x> <y> | rezprims | rayprims | rezmesh | rezmeshn <count> | raymesh | droptest | dropmesh | dropstatus | avatarstatus | charframe [secs] | sitstatus | sittest | unsit | heights <x> <y> | clearprims");
         }
 
         // Build one basic prim with a CANONICAL PrimitiveBaseShape (a real viewer/OAR prim's values,
@@ -844,6 +863,112 @@ namespace OpenSim.Region.PhysicsModules.LegionJolt
                 MainConsole.Instance.Output($"        terrainZ={terrainZ:0.000} expectedCentreZ={expectedCentre:0.000} dZ={dZ:0.000}  [{verdict}]");
             }
             MainConsole.Instance.Output($"  PASS = supported=Y, not NaN, |dZ|<0.5 (capsule centre ~ terrain + standHalf). After walking: pos tracks, supported stays Y on flat terrain.");
+        }
+
+        // ---------------------------------------------------------------------
+        // M6.6 sit / unsit. The physics core is the CHARACTER LIFECYCLE: OpenSim SITS by REMOVING the
+        // physics actor (ScenePresence.RemoveFromPhysicalScene -> RemoveAvatar -> the CharacterVirtual +
+        // its M4.5 marker are destroyed) and STANDS by re-adding it (AddToPhysicalScene -> AddAvatar -> a
+        // fresh character at the release position). So "suspend" == the character is GONE (no gravity, no
+        // ground-detection, no movement integration), and "re-engage" == the 6.5 walking model rebuilt.
+        // A moving seat is ridden via OpenSim scene-graph parenting (the seated avatar's world position
+        // tracks the prim), independent of physics. These consoles OBSERVE and DRIVE that transition.
+        // ---------------------------------------------------------------------
+
+        private ScenePresence FirstRootAvatar()
+        {
+            if (_scene == null) return null;
+            foreach (ScenePresence sp in _scene.GetScenePresences())
+                if (!sp.IsChildAgent) return sp;
+            return null;
+        }
+
+        // Report each root avatar's SIT state (parented to a prim) vs its PHYSICS presence (a live
+        // JoltCharacter). Invariant: seated => NO character (suspended); walking => character present.
+        private void SitStatus()
+        {
+            if (_scene == null) { MainConsole.Instance.Output($"{LogHeader} no scene."); return; }
+
+            var byId = new System.Collections.Generic.Dictionary<uint, JoltCharacter>();
+            lock (_avatars)
+                foreach (JoltCharacter a in _avatars.Values) byId[a.LocalID] = a;
+
+            int roots = 0;
+            MainConsole.Instance.Output($"{LogHeader} sit status (step {_stepCount}, {byId.Count} physics character(s) live):");
+            foreach (ScenePresence sp in _scene.GetScenePresences())
+            {
+                if (sp.IsChildAgent) continue;
+                roots++;
+                bool seated = sp.IsSatOnObject;
+                bool hasChar = byId.TryGetValue(sp.LocalId, out JoltCharacter jc);
+                Vector3 p = sp.AbsolutePosition;
+
+                string verdict = seated
+                    ? (hasChar ? "FAIL: SEATED but a physics character is still alive (suspend did not take)"
+                               : "PASS: SEATED -> character removed (no gravity / ground-detection / movement)")
+                    : (hasChar ? "PASS: WALKING -> character present (6.5 model live)"
+                               : "note: not seated and no character (not yet physical / mid-transition)");
+
+                MainConsole.Instance.Output($"  id={sp.LocalId,-6} '{sp.Name}' seated={(seated ? "Y" : "N")} parentId={sp.ParentID} pos=({p.X:0.00},{p.Y:0.00},{p.Z:0.000}) hasCharacter={(hasChar ? "Y" : "N")}");
+                if (hasChar)
+                    MainConsole.Instance.Output($"        character: Z={jc.Position.Z:0.000} supported={(jc.IsSupported ? "Y" : "N")} sliding={(jc.IsSliding ? "Y" : "N")} vZ={jc.Velocity.Z:0.000}");
+                MainConsole.Instance.Output($"        [{verdict}]");
+            }
+            if (roots == 0)
+                MainConsole.Instance.Output($"  no root avatars in the region - log in first.");
+            else
+                MainConsole.Instance.Output($"  SEATED avatars have no physics body, so they CANNOT fall/slide - position is driven by the prim (scene-graph). Stand -> character re-created at release pos.");
+        }
+
+        // Drive the REAL sit path: rez a static prim in front of the logged-in avatar and sit it there via
+        // ScenePresence.HandleAgentRequestSit (the same entry the viewer uses). Then report sitstatus so the
+        // SEATED -> character-removed transition is visible. `jolt unsit` stands back up + cleans the prim.
+        private void SitTest()
+        {
+            ScenePresence sp = FirstRootAvatar();
+            if (sp == null) { MainConsole.Instance.Output($"{LogHeader} no logged-in avatar - log in first."); return; }
+            if (sp.IsSatOnObject) { MainConsole.Instance.Output($"{LogHeader} '{sp.Name}' is already seated - `jolt unsit` first."); return; }
+
+            Vector3 pos = sp.AbsolutePosition + new Vector3(1.5f, 0f, 0f);   // 1.5 m to the avatar's +X
+            if (_backend.RayCast(new SVector3(pos.X, pos.Y, 5000f), new SVector3(0f, 0f, -1f), 10000f, QueryFilter.Terrain, out RayHit th))
+                pos.Z = th.Point.Z + 0.5f;   // box half-height 0.5 -> resting on terrain
+
+            SceneObjectGroup seat = RezTestPrim("box", pos, new Vector3(1f, 1f, 1f));
+            if (seat == null) { MainConsole.Instance.Output($"{LogHeader} failed to rez the sit prim."); return; }
+            _sitPrimId = seat.RootPart.LocalId;
+            MainConsole.Instance.Output($"{LogHeader} rezzed sit prim id={seat.RootPart.LocalId} at ({pos.X:0},{pos.Y:0},{pos.Z:0.0}); sitting '{sp.Name}' on it via the real sit path...");
+
+            sp.HandleAgentRequestSit(sp.ControllingClient, sp.UUID, seat.UUID, Vector3.Zero);
+            SitStatus();
+            MainConsole.Instance.Output($"  -> expect SEATED=Y, hasCharacter=N. Then `jolt unsit` to re-engage (repeat sittest/unsit to check for a state leak).");
+        }
+
+        // Stand the logged-in avatar up (real StandUp path) and clean up the sittest prim.
+        private void Unsit()
+        {
+            ScenePresence sp = FirstRootAvatar();
+            if (sp == null) { MainConsole.Instance.Output($"{LogHeader} no logged-in avatar."); return; }
+            if (!sp.IsSatOnObject)
+                MainConsole.Instance.Output($"{LogHeader} '{sp.Name}' is not seated.");
+            else
+            {
+                sp.StandUp();
+                MainConsole.Instance.Output($"{LogHeader} stood '{sp.Name}' up (real StandUp path).");
+            }
+
+            if (_sitPrimId != 0)
+            {
+                foreach (var tp in _testPrims)
+                    if (tp.LocalId == _sitPrimId)
+                    {
+                        SceneObjectGroup sog = _scene?.GetSceneObjectGroup(tp.Sog);
+                        if (sog != null) _scene.DeleteSceneObject(sog, false);
+                        break;
+                    }
+                _sitPrimId = 0;
+            }
+            SitStatus();
+            MainConsole.Instance.Output($"  -> expect SEATED=N, hasCharacter=Y (re-engaged). `jolt avatarstatus` to confirm supported + not sliding.");
         }
 
         // The canonical triangular-prism PrimitiveBaseShape (EquilateralTriangle + Straight) used by the
