@@ -124,6 +124,11 @@ namespace Legion.Physics.Jolt
         // will use, so the reported impulse matches what actually gets applied.
         private const float MinVelocityForRestitution = 1.0f;
 
+        // RayCastAll coincident-hit collapse: the heightfield's two triangles meeting at the ray XY report
+        // two hits at the same point on the same body. Two hits within this radius (1 mm), on the SAME body,
+        // collapse to one - matching BulletSim's single terrain hit without touching legitimate multi-hit.
+        private const float CoincidentEpsilonSq = 1e-6f;
+
         // Minimum heightfield sample count per side. joltc 2.18.6 silently mis-cooks n<3 (asserts
         // compiled out); the M6 terrain feed passes region-derived (N+1) odd counts (257, 513, ...),
         // which the M1 "257 result" proved cook faithfully. 4 is a defensive floor above the 3 hard limit.
@@ -1619,13 +1624,24 @@ namespace Legion.Physics.Jolt
             _system.NarrowPhaseQuery.CastRay(
                 ray, new RayCastSettings(), CollisionCollectorType.AllHitSorted, results, null, FilterFor(filter), null, null);
 
-            int n = Math.Min(results.Count, hits.Length);
-            for (int i = 0; i < n; i++)
+            // Collapse COINCIDENT duplicates: the heightfield's two triangles meeting at the ray XY report
+            // two hits at the SAME point on the SAME body - which BulletSim (closest-hit) never produces and
+            // scripts counting llCastRay hits do not expect. Drop a hit only when it is the same body AND the
+            // same point (within CoincidentEpsilon) as the previous KEPT hit, so a stack of prims (different
+            // bodies / different points) or terrain-then-prim (different bodies) is preserved in full,
+            // distance-ordered. Results are distance-sorted, so any coincident pair is adjacent.
+            int n = 0;
+            uint prevBodyId = 0;
+            Vector3 prevPoint = default;
+            bool havePrev = false;
+            for (int i = 0; i < results.Count && n < hits.Length; i++)
             {
                 RayCastResult r = results[i];
                 Vector3 point = origin + rayDir * r.Fraction;
+                if (havePrev && r.BodyID.ID == prevBodyId && Vector3.DistanceSquared(prevPoint, point) < CoincidentEpsilonSq)
+                    continue;
                 _joltToRecord.TryGetValue(r.BodyID.ID, out JoltBodyRecord? rec);
-                hits[i] = new RayHit
+                hits[n++] = new RayHit
                 {
                     Body = rec != null ? new BodyId(rec.Handle) : BodyId.Invalid,
                     UserData = rec != null ? rec.UserData : 0u,
@@ -1634,6 +1650,9 @@ namespace Legion.Physics.Jolt
                     Normal = SurfaceNormalOf(r.BodyID, r.subShapeID2, point),
                     Distance = maxDistance * r.Fraction,
                 };
+                prevBodyId = r.BodyID.ID;
+                prevPoint = point;
+                havePrev = true;
             }
             return n;
         }

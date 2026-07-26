@@ -647,6 +647,26 @@ internal static class Program
             Check(nAll == 3 && rhits[0].UserData == 7101u && rhits[1].UserData == 7102u && rhits[2].UserData == 7103u, "top->bottom order, no dupes (7101,7102,7103)");
             backend.RemoveBody(qb1); backend.RemoveBody(qb2); backend.RemoveBody(qb3);
 
+            // [34b] Coincident terrain-hit collapse (M6.8 edge 2, matches BulletSim's single terrain hit).
+            // A vertical ray at a heightfield QUAD CENTRE (k+0.5, k+0.5) lands exactly on the shared triangle
+            // diagonal, so Jolt's RayCastAll reports two hits at the SAME point on the SAME (terrain) body.
+            // The dedupe must collapse them to ONE - without touching the 3-box multi-hit above.
+            // [34b] Coincident terrain-hit collapse (M6.8 edge 2, matches BulletSim's single terrain hit).
+            // On a SLOPED heightfield the two triangles of adjacent quads are non-coplanar, so a vertical ray
+            // crossing a shared grid edge (integer X here) reports TWO hits at the same point on the same
+            // (terrain) body. The dedupe collapses them to ONE. (Verified: with the collapse disabled this
+            // exact ray returns 2.) A flat field is coplanar and never doubles - the slope is required.
+            float[] slopeF = new float[N * N];
+            for (int yy = 0; yy < N; yy++) for (int xx = 0; xx < N; xx++) slopeF[yy * N + xx] = xx * 0.2f;
+            ShapeId slopeShape = backend.CreateHeightFieldShape(slopeF, N, N, new Vector3(S, S, S));
+            backend.SetTerrain(slopeShape, Vector3.Zero);
+            var tHits = new RayHit[8];
+            int nT = backend.RayCastAll(new Vector3(90f, 90.5f, 80f), new Vector3(0, 0, -1), 100f, QueryFilter.All, tHits);
+            Console.WriteLine($"      grid-edge terrain hits={nT}{(nT > 0 ? $" ud{tHits[0].UserData} z{tHits[0].Point.Z:0.0}" : "")}");
+            Check(nT == 1, $"coincident terrain double-triangle collapsed to 1 (got {nT})");
+            Check(nT >= 1 && tHits[0].UserData == 0u, "surviving terrain hit is the terrain (UserData 0)");
+            backend.SetTerrain(flat, Vector3.Zero);   // restore flat terrain for the following tests
+
             // ---- 35. QUERYFILTER RESTRICTION per layer (the exclusion tests). ----
             Console.WriteLine("\n[35] QueryFilter restriction: exclude by layer");
             BodyId sBox = MakeStaticAt(backend, qbox, new Vector3(74f, 74f, 10f), 7201u, PhysicsLayer.Static, BodyMotionType.Static);

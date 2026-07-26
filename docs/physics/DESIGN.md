@@ -481,8 +481,31 @@ UNLESS BulletSim is clearly wrong.
 
 Standard-surface note (Tranquillity portability): the parity driver, mass-getter and density-forward all
 use only the standard `PhysicsActor`/`PhysicsScene` contract (`Density`, `Mass`, `RaycastWorld`), so they
-carry to any OpenSim-derived grid. Edge cases (llCastRay NULL_KEY on land, coincident terrain hits, avatar-
-to-avatar default) are the next M6.8 increment.
+carry to any OpenSim-derived grid.
+
+### M6.8 edge cases (deferred llCastRay / avatar-collision details)
+
+- **llCastRay NULL_KEY on land - MATCH, no fix.** BulletSim's terrain body has LocalID 0
+  (`BSScene.TERRAIN_ID = 0`, "OpenSim senses terrain with a localID of zero"), so a terrain raycast hit
+  returns `ConsumerID = 0`; Jolt's heightfield body has `UserData = 0` -> same. Both -> NULL_KEY, the shared
+  OpenSim "terrain has no key" convention. Identical.
+
+- **Coincident terrain hits - DEDUPED to match BulletSim's single hit.** BulletSim's `RayTest2` is
+  closest-hit (ONE hit, ignores count); Jolt's `RayCastAll` returns all hits. On a SLOPED heightfield a
+  vertical ray crossing a shared grid edge strikes the two non-coplanar quad triangles at the SAME point on
+  the SAME (terrain) body -> two coincident hits, which scripts counting `llCastRay` hits do not expect. Fix
+  in the BACKEND `RayCastAll` (so `jolt raytest`, the module, and every caller stay consistent; the module
+  boundary keeps the standard `ContactResult`): drop a hit only when it is the same body AND within 1 mm of
+  the previous KEPT hit. Legitimate multi-hit is untouched - a ray through stacked prims (different
+  bodies/points) or terrain-then-prim (different bodies) still returns every hit, distance-ordered. Proven
+  in harness [34b]: with the collapse disabled the grid-edge ray returns 2, enabled returns 1; [34] still
+  returns all 3 stacked boxes. A flat field is coplanar and never doubles - the slope is what exposes it.
+
+- **Depth semantics (note, not a fix).** BulletSim puts the ray FRACTION (0-1) in `ContactResult.Depth`;
+  Jolt puts the true distance. Not script-visible (Phlox sorts by Depth but does not return it; both are
+  monotonic in distance, so ordering is identical either way).
+
+Avatar-to-avatar collision default is the last edge case.
 
 ## Terrain collision: heightfield now, terrain-mesh in reserve (M6.5)
 
