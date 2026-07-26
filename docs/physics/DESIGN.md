@@ -505,7 +505,21 @@ carry to any OpenSim-derived grid.
   Jolt puts the true distance. Not script-visible (Phlox sorts by Depth but does not return it; both are
   monotonic in distance, so ordering is identical either way).
 
-Avatar-to-avatar collision default is the last edge case.
+- **Avatar-to-avatar collision default - MATCH, no fix.** BulletSim's `AvatarToAvatarCollisionsByDefault`
+  defaults to **true** (BSParam.cs:658); `BSCharacter` then sets `collisionType = CollisionType.Avatar` so
+  avatars block each other (a `false` setting uses `PhantomToOthersAvatar` = pass through). Jolt registers
+  EVERY `CharacterVirtual` in a shared `CharacterVsCharacterCollisionSimple` at creation
+  (`SetCharacterVsCharacterCollision`), so avatars collide by default too - harness: a1 walking into a
+  stationary a2 pushes it 2.16 m, `passedThrough=False`. Default behaviour MATCHES. Nuance: BulletSim's is a
+  toggle (settable false -> avatars phantom to each other); Jolt always collides characters with no such
+  switch - a minor CONFIG-parity gap, not a default-behaviour gap (grids run the default true). Seated
+  avatars are removed from the physical scene by OpenSim on BOTH engines (M6.6 remove-on-sit), so they never
+  collision-participate as avatars either way - moot, MATCHED.
+
+**M6.8 COMPLETE:** CORE (mass matched via density-forward; friction/slide a justified divergence where Jolt
+is textbook-correct and BulletSim creeps; settle-time follows) + all 3 edge cases (NULL_KEY on land MATCH,
+coincident terrain-hit dedupe, avatar-to-avatar MATCH). The one deliberate divergence from BulletSim
+(slope friction) is the one where BulletSim is physically wrong; everything else matches BulletSim exactly.
 
 ## Terrain collision: heightfield now, terrain-mesh in reserve (M6.5)
 
