@@ -344,6 +344,35 @@ citizen (M3.5) and query-visible via the M4.5 marker. Deltas recorded here so th
   `SetTerrain` fires ~5 s not per-frame), NOT a sub-step desync (harness: sub-stepped character amplitude
   0.000). Settled by `[charframe]`: `terrainZ@centre` constant while `XY` drifted with no input. Preserve.
 
+## M6.6 — sit / unsit (the character lifecycle, and llSitTarget is not physics)
+
+Sitting is a CHARACTER-LIFECYCLE transition, and it falls out of the 6.5 wiring + OpenSim's own model —
+no new physics mechanism was needed:
+
+- **Task 1 — sit suspends / unsit re-engages = REMOVE / RECREATE.** OpenSim sits by
+  `ScenePresence.RemoveFromPhysicalScene` -> `RemoveAvatar` (the `CharacterVirtual` **and** its M4.5 marker
+  are destroyed) and stands by `AddToPhysicalScene` -> `AddAvatar` (a fresh 6.5 character at the release
+  pos). So "suspend" == the character is GONE (a seated avatar cannot fall or slide by construction - no
+  character, no gravity/ground/movement; its position is driven by the prim via `ParentID`/scene-graph),
+  and "re-engage" == the walking model rebuilt (incoming velocity zero -> no fling). Same remove/recreate
+  pattern as the 6.4 `IsPhysical` toggle. Confirmed the scene does not override `PhysicsScene.SitAvatar`
+  (base returns 0), so the remove/add sit path is the one in force. Harness [24c]: 6x sit/unsit cycles,
+  each create -> 1 supported character, each remove -> 0 (no leak, always re-engages).
+
+- **Moving / dynamic seat rides FREE via parenting.** While seated the character is gone, so a physical
+  seat just simulates as a normal 6.4 dynamic body and its per-frame position drain moves the SOG, which
+  the parented avatar tracks. Two proven systems composed (dynamic body + scene-graph parenting), no code.
+
+- **Task 2 — llSitTarget offset/rotation is OpenSim ScenePresence math, NOT physics.**
+  `HandleAgentSit` (`LegacySitOffsets`) seats the avatar at `SitTargetPosition` composed into the prim's
+  local frame, plus a vertical `SIT_TARGET_ADJUSTMENT` of **+0.35 m** (`(0,0,0.4)` minus a `0.05` up-offset
+  for an identity sit orientation - `ScenePresence.cs:185`). That +0.35 is the STANDARD SL sit offset
+  (furniture creators expect it), is engine-INDEPENDENT (BulletSim / ubODE seat identically - the character
+  is removed on sit, so there is no capsule term), and is NOT a Jolt bug. The `jolt sittarget` console
+  gates all three axes against the SL-composed expected local position (chose `sitTargetPos.Z=0.30` ->
+  expected `0.65 != standHalf 0.95` so a capsule leak could not masquerade as the SL offset). Leg-vs-seat
+  fit (short avatar with no sit animation) is the sit-animation/content layer, not physics.
+
 ## Terrain collision: heightfield now, terrain-mesh in reserve (M6.5)
 
 We collide against the region terrain with a Jolt **`HeightFieldShape`** (cooked from the region

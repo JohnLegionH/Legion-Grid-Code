@@ -237,7 +237,7 @@ namespace OpenSim.Region.PhysicsModules.LegionJolt
             {
                 _consoleRegistered = true;
                 MainConsole.Instance.Commands.AddCommand("Physics", false, "jolt",
-                    "jolt terraintest | terrainslope | terrainhill | hilltest | probe <x> <y> | rezprims | rayprims | rezmesh | rezmeshn <count> | raymesh | droptest | dropmesh | dropstatus | avatarstatus | charframe [secs] | sitstatus | sittest | unsit | heights <x> <y> | clearprims",
+                    "jolt terraintest | terrainslope | terrainhill | hilltest | probe <x> <y> | rezprims | rayprims | rezmesh | rezmeshn <count> | raymesh | droptest | dropmesh | dropstatus | avatarstatus | charframe [secs] | sitstatus | sittest | unsit | sittarget | heights <x> <y> | clearprims",
                     "Legion Jolt proofs (M6.2 terrain / M6.3 prims): raycast the cooked collision surfaces and report hits.",
                     HandleJoltConsole);
             }
@@ -482,6 +482,12 @@ namespace OpenSim.Region.PhysicsModules.LegionJolt
                 return;
             }
 
+            if (cmd.Length >= 2 && cmd[1] == "sittarget")
+            {
+                SitTarget();
+                return;
+            }
+
             if (cmd.Length >= 4 && cmd[1] == "heights"
                 && float.TryParse(cmd[2], out float hx) && float.TryParse(cmd[3], out float hy))
             {
@@ -518,7 +524,7 @@ namespace OpenSim.Region.PhysicsModules.LegionJolt
                 return;
             }
 
-            MainConsole.Instance.Output("Usage: jolt terraintest | terrainslope | terrainhill | hilltest | probe <x> <y> | rezprims | rayprims | rezmesh | rezmeshn <count> | raymesh | droptest | dropmesh | dropstatus | avatarstatus | charframe [secs] | sitstatus | sittest | unsit | heights <x> <y> | clearprims");
+            MainConsole.Instance.Output("Usage: jolt terraintest | terrainslope | terrainhill | hilltest | probe <x> <y> | rezprims | rayprims | rezmesh | rezmeshn <count> | raymesh | droptest | dropmesh | dropstatus | avatarstatus | charframe [secs] | sitstatus | sittest | unsit | sittarget | heights <x> <y> | clearprims");
         }
 
         // Build one basic prim with a CANONICAL PrimitiveBaseShape (a real viewer/OAR prim's values,
@@ -969,6 +975,68 @@ namespace OpenSim.Region.PhysicsModules.LegionJolt
             }
             SitStatus();
             MainConsole.Instance.Output($"  -> expect SEATED=N, hasCharacter=Y (re-engaged). `jolt avatarstatus` to confirm supported + not sliding.");
+        }
+
+        // M6.6 Task 2 - llSitTarget offset/rotation. This is OpenSim's placement math (SendSitResponse/
+        // HandleAgentSit read the prim's SitTargetPosition/Orientation and seat the avatar at that offset in
+        // the PRIM's frame); physics stays out of the way (the character is removed on sit). This console
+        // proves it: rez a prim rotated 90deg yaw, set a sit-target offset, sit, and check the seated avatar
+        // lands at the offset IN THE PRIM'S LOCAL FRAME (so the offset composes with the prim rotation).
+        private void SitTarget()
+        {
+            ScenePresence sp = FirstRootAvatar();
+            if (sp == null) { MainConsole.Instance.Output($"{LogHeader} no logged-in avatar - log in first."); return; }
+            if (sp.IsSatOnObject) { MainConsole.Instance.Output($"{LogHeader} '{sp.Name}' is already seated - `jolt unsit` first."); return; }
+
+            // sit-target offset in the prim's LOCAL frame. Z chosen as 0.30 (NOT 0.60) on purpose: the old
+            // 0.60 composed to 0.95, which coincidentally equals the avatar's standHalf and hid whether the
+            // vertical term was the SL offset or a capsule leak. 0.30 composes to 0.65 != standHalf, so the
+            // gate below distinguishes them.
+            Vector3 offset = new Vector3(1.5f, 0f, 0.30f);
+            Quaternion primRot = Quaternion.CreateFromEulers(0f, 0f, (float)(Math.PI / 2.0));  // 90deg yaw (Z)
+
+            // OpenSim's HandleAgentSit (LegacySitOffsets) composes the seated LOCAL position as
+            //   sitTargetPos - up*0.05 + SIT_TARGET_ADJUSTMENT   (SIT_TARGET_ADJUSTMENT = (0,0,0.4)).
+            // For an identity SitTargetOrientation the up vector is (0,0,1), so the vertical term is
+            // (0.4 - 0.05) = +0.35. This is the STANDARD SL sit offset (furniture creators expect it) and it
+            // lives in ScenePresence - physics-independent, identical for Jolt / BulletSim / ubODE (the
+            // character is removed on sit, so no capsule term is involved).
+            const float SlSitZ = 0.40f - 0.05f;   // SIT_TARGET_ADJUSTMENT.Z - up*0.05, identity orientation
+            Vector3 expectedLocal = offset + new Vector3(0f, 0f, SlSitZ);
+
+            Vector3 pos = sp.AbsolutePosition + new Vector3(2f, 0f, 0f);
+            if (_backend.RayCast(new SVector3(pos.X, pos.Y, 5000f), new SVector3(0f, 0f, -1f), 10000f, QueryFilter.Terrain, out RayHit th))
+                pos.Z = th.Point.Z + 0.5f;
+
+            SceneObjectGroup seat = RezTestPrim("box", pos, new Vector3(1f, 1f, 1f));
+            if (seat == null) { MainConsole.Instance.Output($"{LogHeader} failed to rez the sit-target prim."); return; }
+            seat.UpdateGroupRotationR(primRot);
+            seat.RootPart.SitTargetPosition = offset;
+            seat.RootPart.SitTargetOrientation = Quaternion.Identity;
+            _sitPrimId = seat.RootPart.LocalId;
+
+            Vector3 primWorld = seat.AbsolutePosition;
+            Quaternion primWorldRot = seat.RootPart.GetWorldRotation();
+            Vector3 expectedWorld = primWorld + expectedLocal * primWorldRot;   // composed local, rotated into world
+
+            MainConsole.Instance.Output($"{LogHeader} sit-target test: prim id={seat.RootPart.LocalId} world=({primWorld.X:0.00},{primWorld.Y:0.00},{primWorld.Z:0.00}) yaw=90deg SitTargetPosition(local)=({offset.X:0.00},{offset.Y:0.00},{offset.Z:0.00})");
+            MainConsole.Instance.Output($"  expected LOCAL = sitTarget + SL sit offset (0,0,{SlSitZ:0.00}) = ({expectedLocal.X:0.00},{expectedLocal.Y:0.00},{expectedLocal.Z:0.00}); expected world = ({expectedWorld.X:0.00},{expectedWorld.Y:0.00},{expectedWorld.Z:0.00})");
+
+            sp.HandleAgentRequestSit(sp.ControllingClient, sp.UUID, seat.UUID, Vector3.Zero);
+
+            Vector3 seated = sp.AbsolutePosition;
+            Vector3 localSeated = (seated - primWorld) * Quaternion.Inverse(primWorldRot);   // back to the prim frame
+            // Gate ALL THREE axes against the SL-composed expected local position (X/Y prove offset+rotation
+            // composition; Z proves the vertical term is exactly OpenSim's SL sit offset, not a capsule leak).
+            bool offsetOk = sp.IsSatOnObject
+                && Math.Abs(localSeated.X - expectedLocal.X) < 0.10f
+                && Math.Abs(localSeated.Y - expectedLocal.Y) < 0.10f
+                && Math.Abs(localSeated.Z - expectedLocal.Z) < 0.10f;
+
+            MainConsole.Instance.Output($"  seated world=({seated.X:0.00},{seated.Y:0.00},{seated.Z:0.00}) -> prim-local=({localSeated.X:0.000},{localSeated.Y:0.000},{localSeated.Z:0.000}) vs expected-local=({expectedLocal.X:0.000},{expectedLocal.Y:0.000},{expectedLocal.Z:0.000})");
+            MainConsole.Instance.Output($"  [{(offsetOk ? "PASS: seated at SitTargetPosition + SL sit offset, in the prim's LOCAL frame (X/Y offset+rotation composed; Z = OpenSim's standard sit offset, not a capsule leak)" : "CHECK: seated local pos does not match the SL-composed expected - see numbers above")}]");
+            SitStatus();
+            MainConsole.Instance.Output($"  -> `jolt unsit` to re-engage (character recreates at the release pos). A MOVING prim carries this offset via parenting.");
         }
 
         // The canonical triangular-prism PrimitiveBaseShape (EquilateralTriangle + Straight) used by the
