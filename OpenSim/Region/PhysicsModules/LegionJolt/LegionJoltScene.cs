@@ -244,7 +244,7 @@ namespace OpenSim.Region.PhysicsModules.LegionJolt
             {
                 _consoleRegistered = true;
                 MainConsole.Instance.Commands.AddCommand("Physics", false, "jolt",
-                    "jolt linktest | terraintest | terrainslope | terrainhill | hilltest | probe <x> <y> | rezprims | rayprims | rezmesh | rezmeshn <count> | raymesh | droptest | dropmesh | dropstatus | avatarstatus | charframe [secs] | sitstatus | sittest | unsit | sittarget | sensortest | raytest | heights <x> <y> | clearprims",
+                    "jolt linktest | unlinktest | terraintest | terrainslope | terrainhill | hilltest | probe <x> <y> | rezprims | rayprims | rezmesh | rezmeshn <count> | raymesh | droptest | dropmesh | dropstatus | avatarstatus | charframe [secs] | sitstatus | sittest | unsit | sittarget | sensortest | raytest | heights <x> <y> | clearprims",
                     "Legion Jolt proofs (M6.2 terrain / M6.3 prims): raycast the cooked collision surfaces and report hits.",
                     HandleJoltConsole);
             }
@@ -260,6 +260,7 @@ namespace OpenSim.Region.PhysicsModules.LegionJolt
             if (_backend == null) { MainConsole.Instance.Output($"{LogHeader} no backend."); return; }
 
             if (cmd.Length >= 2 && cmd[1] == "linktest") { JoltLinkTest(); return; }
+            if (cmd.Length >= 2 && cmd[1] == "unlinktest") { JoltUnlinkTest(); return; }
 
             if (cmd.Length >= 2 && cmd[1] == "terraintest")
             {
@@ -545,7 +546,7 @@ namespace OpenSim.Region.PhysicsModules.LegionJolt
                 return;
             }
 
-            MainConsole.Instance.Output("Usage: jolt linktest | terraintest | terrainslope | terrainhill | hilltest | probe <x> <y> | rezprims | rayprims | rezmesh | rezmeshn <count> | raymesh | droptest | dropmesh | dropstatus | avatarstatus | charframe [secs] | sitstatus | sittest | unsit | sittarget | sensortest | raytest | heights <x> <y> | clearprims");
+            MainConsole.Instance.Output("Usage: jolt linktest | unlinktest | terraintest | terrainslope | terrainhill | hilltest | probe <x> <y> | rezprims | rayprims | rezmesh | rezmeshn <count> | raymesh | droptest | dropmesh | dropstatus | avatarstatus | charframe [secs] | sitstatus | sittest | unsit | sittarget | sensortest | raytest | heights <x> <y> | clearprims");
         }
 
         // M7 Task 1 proof: rez a root + 2 children at offsets, make the root physical, then run the OpenSim
@@ -569,6 +570,7 @@ namespace OpenSim.Region.PhysicsModules.LegionJolt
             float singleMass = rpa.Mass;
             c1.RootPart.PhysActor?.link(rpa);   // the OpenSim child.link(root) handoff
             c2.RootPart.PhysActor?.link(rpa);
+            System.Threading.Thread.Sleep(500);   // the compound rebuild is coalesced to the next Simulate
             float compoundMass = rpa.Mass;
             float startZ = rpa.Position.Z;
 
@@ -584,6 +586,63 @@ namespace OpenSim.Region.PhysicsModules.LegionJolt
             _scene.DeleteSceneObject(root, false);
             _scene.DeleteSceneObject(c1, false);
             _scene.DeleteSceneObject(c2, false);
+        }
+
+        // M7 Task 2 proof: build a physical linkset (root + 2 children), then UNLINK the way OpenSim does
+        // (PhysicsScene.RemovePrim(childPa) -> JoltPrim.Destroy -> detach + rebuild) and watch the compound
+        // mass track membership: 3x -> 2x -> 1x (down-to-one reverts to a plain single body, NOT a degenerate
+        // 1-child compound). Then repeated link/unlink cycles: mass must return to exactly `single` each time
+        // (a leaked/stale/double body would drift it up). Console proof of the live rebuild + no-leak.
+        private void JoltUnlinkTest()
+        {
+            float tz = 25f;
+            try { tz = (float)_scene.Heightmap[128, 128]; } catch { }
+            Vector3 rootPos = new Vector3(128f, 128f, tz + 12f);
+            var size = new Vector3(0.5f, 0.5f, 0.5f);
+            SceneObjectGroup root = RezTestPrim("box", rootPos, size);
+            root.ScriptSetPhysicsStatus(true);
+            PhysicsActor rpa = root.RootPart.PhysActor;
+            if (rpa == null) { MainConsole.Instance.Output($"{LogHeader} unlinktest: no root PhysActor."); return; }
+            float single = rpa.Mass;
+
+            // Multi-child + down-to-one: link 2 (3x), unlink each back to the single root body.
+            SceneObjectGroup c1 = RezTestPrim("box", rootPos + new Vector3(0.6f, 0f, 0f), size); c1.ScriptSetPhysicsStatus(true);
+            SceneObjectGroup c2 = RezTestPrim("box", rootPos + new Vector3(0f, 0.6f, 0f), size); c2.ScriptSetPhysicsStatus(true);
+            c1.RootPart.PhysActor?.link(rpa);
+            c2.RootPart.PhysActor?.link(rpa);
+            System.Threading.Thread.Sleep(500);   // rebuild coalesced to the next Simulate
+            float m3 = rpa.Mass;
+            RemovePrim(c1.RootPart.PhysActor); c1.RootPart.PhysActor = null;   // OpenSim's unlink handoff
+            System.Threading.Thread.Sleep(500);
+            float m2 = rpa.Mass;
+            RemovePrim(c2.RootPart.PhysActor); c2.RootPart.PhysActor = null;
+            System.Threading.Thread.Sleep(500);
+            float m1 = rpa.Mass;
+            MainConsole.Instance.Output($"{LogHeader} [unlinktest] single={single:0.0}  linked3={m3:0.0}(~{single * 3f:0.0})  unlink->{m2:0.0}(~{single * 2f:0.0})  unlink->{m1:0.0}(~{single:0.0}=single, down-to-one clean)");
+            _scene.DeleteSceneObject(c1, false); _scene.DeleteSceneObject(c2, false);
+
+            // Repeated link/unlink cycles (fresh child each time): mass returns to `single` every cycle.
+            bool cyclesOk = true; string cyc = "";
+            for (int i = 0; i < 5; i++)
+            {
+                SceneObjectGroup ch = RezTestPrim("box", rootPos + new Vector3(0.6f, 0f, 0f), size);
+                ch.ScriptSetPhysicsStatus(true);
+                ch.RootPart.PhysActor?.link(rpa);
+                System.Threading.Thread.Sleep(350);
+                float up = rpa.Mass;
+                RemovePrim(ch.RootPart.PhysActor); ch.RootPart.PhysActor = null;
+                System.Threading.Thread.Sleep(350);
+                float down = rpa.Mass;
+                _scene.DeleteSceneObject(ch, false);
+                cyc += $" [{up:0.0}/{down:0.0}]";
+                if (System.Math.Abs(up - single * 2f) > single * 0.1f || System.Math.Abs(down - single) > single * 0.1f) cyclesOk = false;
+            }
+            MainConsole.Instance.Output($"{LogHeader} [unlinktest] 5x link/unlink up/down:{cyc}");
+            bool ok = System.Math.Abs(m3 - single * 3f) < single * 0.15f && System.Math.Abs(m2 - single * 2f) < single * 0.15f
+                      && System.Math.Abs(m1 - single) < single * 0.1f && cyclesOk;
+            MainConsole.Instance.Output($"{LogHeader} [unlinktest] {(ok ? "PASS" : "CHECK")}: unlink rebuilds 3x->2x->1x, down-to-one=single body, 5x cycles return to single (no leak/stale/double).");
+
+            _scene.DeleteSceneObject(root, false);
         }
 
         // Build one basic prim with a CANONICAL PrimitiveBaseShape (a real viewer/OAR prim's values,
@@ -1854,6 +1913,29 @@ namespace OpenSim.Region.PhysicsModules.LegionJolt
             }
         }
 
+        // M7 Task 2: linkset roots whose compound needs a (re)build, coalesced and applied once per frame in
+        // Simulate. link()/unlink() add to this instead of rebuilding inline (which hung the boot-load).
+        private readonly HashSet<JoltPrim> _dirtyLinksets = new HashSet<JoltPrim>();
+
+        internal void MarkLinksetDirty(JoltPrim root)
+        {
+            lock (_dirtyLinksets) _dirtyLinksets.Add(root);
+        }
+
+        private void DrainDirtyLinksets()
+        {
+            JoltPrim[] dirty;
+            lock (_dirtyLinksets)
+            {
+                if (_dirtyLinksets.Count == 0) return;
+                dirty = new JoltPrim[_dirtyLinksets.Count];
+                _dirtyLinksets.CopyTo(dirty);
+                _dirtyLinksets.Clear();
+            }
+            foreach (JoltPrim root in dirty)
+                root.RebuildCompoundNow();   // re-entrancy- and destroyed-guarded internally
+        }
+
         public override float Simulate(float timeStep)
         {
             if (_backend == null)
@@ -1865,6 +1947,12 @@ namespace OpenSim.Region.PhysicsModules.LegionJolt
             // ms->s units bug upstream (it does not exist in this path - proof left in for the record).
             if (_stepCount < 5)
                 m_log.Info($"{LogHeader} [dtproof] frame {_stepCount}: Simulate timeStep={timeStep:0.000000} s (expect ~0.0909)");
+
+            // M7 Task 2: (re)build changed linkset compounds ONCE per frame, here on the step thread before
+            // the step. link()/unlink() only mark the root dirty (they no longer rebuild inline); this
+            // coalesces a whole linkset's worth of child-links into a single rebuild - the boot-load of a
+            // persisted physical linkset used to hang because every child's link() churned the live root.
+            DrainDirtyLinksets();
 
             // ONE backend Step per frame at OpenSim's ~11 fps cadence (Scene.FrameTime 0.0909 s). The
             // character is stepped exactly once per frame - the known-good path (M6.5 Task 1: stood + ran

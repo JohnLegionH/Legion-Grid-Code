@@ -545,8 +545,22 @@ hooks were no-ops in `JoltPrim`.
   (in-sim: compound mass ~= 3x single, root falls as one, welded child's own body inert); viewer (linked
   prims fall as one, tip over, kick/push as one - no fly-apart / jitter / detach).
 
-Task 2 (live link/unlink rebuild) and Task 3 (per-child collision identity via `CompoundChild.UserData`)
-build on this.
+- **Task 2 - live link/unlink rebuild + the boot-hang fix.** OpenSim's UNLINK is NOT `delink()`:
+  `DelinkFromGroup` calls `PhysicsScene.RemovePrim(childPa)` (nulls the child's PhysActor, gives it a fresh
+  SOG), so the detach runs through `RemovePrim` -> `JoltPrim.Destroy` -> `UnlinkChild`. Unlink drops mass by
+  the child's share; a linkset down to one member reverts to a plain single body (never a 1-child compound
+  - the backend now guards `CreateCompoundShape` to require >=2, since `StaticCompoundShape.Create()`
+  access-violates below that). **Boot-hang (production-critical reboot bug):** a persisted physical linkset
+  loads all parts at once and OpenSim fires `child.link(root)` per child; rebuilding the compound INLINE per
+  child churned `RemoveBody`/`CreateBody` on the live/active root during the concurrent load and hung the
+  region (repeated root id in the boot log). Fix: **coalesce** - `link()`/`unlink()` only mark the root dirty
+  (`MarkLinksetDirty`); `Simulate` drains dirty roots ONCE per frame (`DrainDirtyLinksets` ->
+  `RebuildCompoundNow`, re-entrancy- and destroyed-guarded) on the step thread before the step. One rebuild
+  per linkset per frame, off the load path, O(N) not O(N^2). Proven: harness [32c] (rebuild cycles - mass
+  tracks membership, no leak/stale across create+release); `jolt unlinktest` (3x -> 2x -> 1x, down-to-one =
+  single body, repeated cycles return to `single`); region confirmed booting clean with persisted objects.
+
+Task 3 (per-child collision identity via `CompoundChild.UserData` / `ResolveChildUserData`) builds on this.
 
 ## Terrain collision: heightfield now, terrain-mesh in reserve (M6.5)
 

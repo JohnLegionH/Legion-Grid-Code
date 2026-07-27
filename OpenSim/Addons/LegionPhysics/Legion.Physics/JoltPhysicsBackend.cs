@@ -555,8 +555,13 @@ namespace Legion.Physics.Jolt
             // order so a raycast/contact hit can name WHICH child prim was struck: Jolt encodes the
             // child index in the LOW SubShapeIDBitsRecursive bits of the hit's SubShapeID (verified),
             // which we decode in ResolveChildUserData.
-            if (children.Length == 0)
-                throw new ArgumentException("compound shape needs at least one child.");
+            // Jolt's StaticCompoundShapeSettings.Create() ACCESS-VIOLATES with fewer than 2 sub-shapes.
+            // A single-member set must use that member's shape directly, not a degenerate compound - which
+            // is exactly what the linkset path does (a compound is only built for root + >=1 child = >=2
+            // sub-shapes; a linkset down to one member reverts to the plain single-prim body). Guard here so
+            // a stray 1-child call is a clear exception, never a native crash.
+            if (children.Length < 2)
+                throw new ArgumentException($"StaticCompoundShape requires >= 2 children (got {children.Length}); use the single member's shape directly.");
 
             var childUserData = new uint[children.Length];
             using var settings = new StaticCompoundShapeSettings();

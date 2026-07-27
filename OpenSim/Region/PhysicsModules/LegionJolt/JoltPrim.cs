@@ -346,64 +346,79 @@ namespace OpenSim.Region.PhysicsModules.LegionJolt
                 CreateBodyInternal();   // restore our own body (we were welded into the root)
         }
 
-        // Root side: add a child to this prim's compound and drop the child's independent body.
+        // Link/unlink only RECORD membership and mark the root dirty - the compound is (re)built ONCE per
+        // frame in RebuildCompoundNow, drained from Simulate. Rebuilding inline per child HUNG the boot-load
+        // of a persisted physical linkset: OpenSim fires child.link(root) for every child as the whole set
+        // loads at once, and each inline rebuild churned RemoveBody/CreateBody on the live/active root while
+        // the load + heartbeat ran concurrently (the repeated root id in the boot log). Deferring coalesces
+        // N child-links into ONE rebuild at a controlled point - off the load path, O(N) not O(N^2).
         internal void LinkChild(JoltPrim child)
         {
             _linkChildren ??= new System.Collections.Generic.List<JoltPrim>();
             if (!_linkChildren.Contains(child))
                 _linkChildren.Add(child);
             child._linkRoot = this;
-            if (child._body.IsValid) { _backend.RemoveBody(child._body); child._body = BodyId.Invalid; }
-            RebuildCompound();
+            _module.MarkLinksetDirty(this);
         }
 
         internal void UnlinkChild(JoltPrim child)
         {
             if (_linkChildren != null) _linkChildren.Remove(child);
-            RebuildCompound();
+            _module.MarkLinksetDirty(this);
         }
 
-        // (Re)build the root's body from its own shape + all welded children at their root-relative offsets.
-        // StaticCompoundShape (fast query + per-child UserData for M7 Task 3 llDetectedLinkNumber). Rebuilt
-        // whole on every link/unlink - infrequent (a user action), so a full rebuild beats a mutable
-        // compound's slower queries. Sub-shape transforms are composed in the ROOT BODY frame, mirroring the
-        // single-body path (BodyOrientationOf carries any cylinder axis-correction), so mass/COM/inertia come
-        // out of Jolt's compound assembly (mass = sum of child Volume x density, proven in harness [32b]).
-        private void RebuildCompound()
+        private bool _rebuilding;
+
+        // (Re)build the root's body from its own shape + all welded children at their root-relative offsets,
+        // ONCE. Called from the module's per-frame dirty-linkset drain (step thread, before the step - safe
+        // body ops, no per-child churn). StaticCompoundShape (fast query + per-child UserData for M7 Task 3).
+        // Sub-shape transforms are composed in the ROOT BODY frame (BodyOrientationOf carries any cylinder
+        // axis-correction); mass/COM/inertia come out of Jolt's compound assembly (mass = sum of child
+        // Volume x density, harness [32b]). Re-entrancy- and destroyed-guarded so it can never loop or touch
+        // a torn-down prim. No children -> revert to the plain single root shape (never a 1-child compound).
+        internal void RebuildCompoundNow()
         {
-            ShapeId oldCompound = _compoundShape;
+            if (_rebuilding || !_shape.IsValid) return;   // guard: no re-entrancy, skip a destroyed root
+            _rebuilding = true;
+            try
+            {
+                ShapeId oldCompound = _compoundShape;
 
-            if (_linkChildren == null || _linkChildren.Count == 0)
-            {
-                _compoundShape = ShapeId.Invalid;   // revert to the single root shape
-            }
-            else
-            {
-                SQuaternion rootBody = BodyOrientationOf(_orientation);
-                SQuaternion invRoot = SQuaternion.Conjugate(rootBody);
-                var kids = new CompoundChild[1 + _linkChildren.Count];
-                kids[0] = new CompoundChild { Shape = _shape, Position = SVector3.Zero, Orientation = SQuaternion.Identity, UserData = LocalID };
-                for (int i = 0; i < _linkChildren.Count; i++)
+                if (_linkChildren == null || _linkChildren.Count == 0)
                 {
-                    JoltPrim c = _linkChildren[i];
-                    var dWorld = new SVector3(c._position.X - _position.X, c._position.Y - _position.Y, c._position.Z - _position.Z);
-                    kids[i + 1] = new CompoundChild
-                    {
-                        Shape = c._shape,
-                        Position = SVector3.Transform(dWorld, invRoot),                                 // world delta -> root frame
-                        Orientation = SQuaternion.Multiply(invRoot, c.BodyOrientationOf(c._orientation)),
-                        UserData = c.LocalID,
-                    };
+                    _compoundShape = ShapeId.Invalid;   // single member -> plain body, not a degenerate compound
                 }
-                _compoundShape = _backend.CreateCompoundShape(kids);
+                else
+                {
+                    // Weld: drop each child's independent body (it lives as a sub-shape of the compound now).
+                    foreach (JoltPrim c in _linkChildren)
+                        if (c._body.IsValid) { _backend.RemoveBody(c._body); c._body = BodyId.Invalid; }
+
+                    SQuaternion rootBody = BodyOrientationOf(_orientation);
+                    SQuaternion invRoot = SQuaternion.Conjugate(rootBody);
+                    var kids = new CompoundChild[1 + _linkChildren.Count];
+                    kids[0] = new CompoundChild { Shape = _shape, Position = SVector3.Zero, Orientation = SQuaternion.Identity, UserData = LocalID };
+                    for (int i = 0; i < _linkChildren.Count; i++)
+                    {
+                        JoltPrim c = _linkChildren[i];
+                        var dWorld = new SVector3(c._position.X - _position.X, c._position.Y - _position.Y, c._position.Z - _position.Z);
+                        kids[i + 1] = new CompoundChild
+                        {
+                            Shape = c._shape,
+                            Position = SVector3.Transform(dWorld, invRoot),                                 // world delta -> root frame
+                            Orientation = SQuaternion.Multiply(invRoot, c.BodyOrientationOf(c._orientation)),
+                            UserData = c.LocalID,
+                        };
+                    }
+                    _compoundShape = _backend.CreateCompoundShape(kids);
+                }
+
+                if (_body.IsValid) { _backend.RemoveBody(_body); _body = BodyId.Invalid; }
+                CreateBodyInternal();
+
+                if (oldCompound.IsValid) _backend.ReleaseShape(oldCompound);
             }
-
-            // Recreate the root body on the new shape (compound or single). Transform + velocity are read
-            // from the cached fields inside CreateBodyInternal.
-            if (_body.IsValid) { _backend.RemoveBody(_body); _body = BodyId.Invalid; }
-            CreateBodyInternal();
-
-            if (oldCompound.IsValid) _backend.ReleaseShape(oldCompound);
+            finally { _rebuilding = false; }
         }
         public override void LockAngularMotion(byte axislocks) { }
 

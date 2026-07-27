@@ -617,6 +617,32 @@ internal static class Program
             Check(MathF.Abs(lmass - lsingle * 3f) < lsingle * 0.05f, $"compound mass = sum of 3 children ({lmass:0.0} ~ {lsingle * 3f:0.0})");
             backend.RemoveBody(lbody); backend.ReleaseShape(lcompound); backend.ReleaseShape(lcb);
 
+            // [32c] Compound REBUILD cycles (M7 Task 2 backend foundation): create a compound, use it, then
+            // release it and rebuild with a DIFFERENT child count - repeatedly. Mass must track the current
+            // member count every cycle (a stale/leaked child would throw the mass off), and nothing crashes.
+            // This is exactly the create-new + release-old the module's link/unlink RebuildCompound does.
+            Console.WriteLine("\n[32c] Compound rebuild cycles: mass tracks member count, stable over cycles");
+            ShapeId rcb = backend.CreateBoxShape(new Vector3(0.5f, 0.5f, 0.5f));
+            float rcSingle;
+            { var d = BodyDesc.Default; d.Shape = rcb; d.MotionType = BodyMotionType.Dynamic; d.Layer = PhysicsLayer.Dynamic; d.Position = new Vector3(140f, 140f, 30f); BodyId b = backend.CreateBody(d); rcSingle = backend.GetBodyMass(b); backend.RemoveBody(b); }
+            bool rcOk = true; string rcSeq = "";
+            for (int cycle = 0; cycle < 6; cycle++)
+            {
+                int childCount = 2 + (cycle % 2);   // 2,3,2,3,... (a linkset compound is always root + >=1 child = >=2 sub-shapes)
+                var ck = new CompoundChild[childCount];
+                for (int i = 0; i < childCount; i++) ck[i] = new CompoundChild { Shape = rcb, Position = new Vector3(i * 1.5f, 0f, 0f), Orientation = System.Numerics.Quaternion.Identity, UserData = (uint)(8200 + i) };
+                ShapeId cs = backend.CreateCompoundShape(ck);
+                var cd = BodyDesc.Default; cd.Shape = cs; cd.MotionType = BodyMotionType.Dynamic; cd.Layer = PhysicsLayer.Dynamic; cd.Position = new Vector3(140f, 140f, 30f);
+                BodyId cbody = backend.CreateBody(cd);
+                float m = backend.GetBodyMass(cbody);
+                rcSeq += $" {childCount}:{m:0}";
+                if (MathF.Abs(m - rcSingle * childCount) > rcSingle * 0.05f) rcOk = false;
+                backend.RemoveBody(cbody); backend.ReleaseShape(cs);
+            }
+            Console.WriteLine($"      single box mass={rcSingle:0.0}; cycles (children:mass):{rcSeq}");
+            Check(rcOk, "compound mass = single x member count on EVERY rebuild cycle (no stale/leak across create+release)");
+            backend.ReleaseShape(rcb);
+
             // ---- 33. SCALED SHAPE: box takes non-uniform scale; sphere non-uniform CLAMPS to uniform. ----
             Console.WriteLine("\n[33] CreateScaledShape: box non-uniform applied; sphere non-uniform clamped; SetBodyShape swap");
             ShapeId baseBox = backend.CreateBoxShape(new Vector3(0.5f, 0.5f, 0.5f));
