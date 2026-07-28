@@ -560,6 +560,43 @@ hooks were no-ops in `JoltPrim`.
   tracks membership, no leak/stale across create+release); `jolt unlinktest` (3x -> 2x -> 1x, down-to-one =
   single body, repeated cycles return to `single`); region confirmed booting clean with persisted objects.
 
+- **Task 2 (cont.) - the DEEPER native boot-hang + the joltc 2.19.1 upgrade.** Weld-at-load killed the
+  O(N^2) *churn*, but a SECOND, distinct boot-hang remained: a region with a persisted physical linkset
+  came up "all water, no linkset" while BulletSim loaded the same DB fine. Pinned it to **native
+  `JPH_PhysicsSystem_Update` spinning at frame 0** (managed stack: `Heartbeat -> Simulate -> StepOnce ->
+  Step -> PhysicsSystem.Update`), 0 contacts, on the freshly-welded compound + terrain. The diagnostic
+  journey mattered: it was **not reproducible in isolation** - a byte-faithful harness repro ([32h]-[32k]:
+  real 257x257 heightfield from the DB, exact child offsets/tilt/density/velocity, the 4-active-bodies ->
+  remove -> weld sequence, `CollisionSteps=6`, live 0.0909 dt) **settles in 1 ms**. Live instrumentation
+  proved the compound going into Update is finite/clean and the terrain field is clean (min0/max25); a
+  ground-truth body dump showed the native system holds **exactly `BodiesCount = 2` {terrain, compound}** -
+  no leftover parts, no avatar/marker, layers identical to the harness. Every constructible Jolt input
+  matched, yet only the full process hung -> a **native-state bug in Jolt's compound-vs-heightfield path**,
+  not our code. **Fixed upstream in native `JoltPhysics.Native 1.0.4`.** We bump **`JoltPhysicsSharp`
+  2.18.6 -> 2.19.1** (pulls native 1.0.3 -> 1.0.4); live boot now welds, steps 8 ms with 3 terrain
+  contacts, settles + sleeps, and a real viewer restart with the linkset persisted comes up clean (John,
+  eyes-on). **2.19.1 is the net8.0 ceiling** - 2.20.0+ ships net9/net10 only, which would drag the whole
+  grid off net8; both physics csprojs are pinned to 2.19.1 / 1.0.4 in lockstep (the module csproj copies
+  both DLLs to the OpenSim bin).
+- **2.19.x API adaptations.** The bump broke three surfaces (all backend-local): `Double3` -> `RVector3` in
+  the `CharacterVirtual` contact-callback delegates; `HeightFieldShapeSettings(float[])` -> `(float*)` (pin
+  with `fixed`, `<AllowUnsafeBlocks>`); and a **shape-query regression** worth calling out - `CollideShape`/
+  `CastShape` now read the COM transform **column-major**, where System.Numerics builds row-major and
+  2.18.6's wrapper transposed internally. An un-transposed transform collapses the query shape to ~origin
+  (it hits terrain, never the target), which surfaced as OverlapSphere/OverlapBox/ShapeCast returning
+  0/garbage. Fix: **`Matrix4x4.Transpose(com)`** (transposing a row-major matrix is the equivalent
+  column-major transform for ANY rotation, so exact - not identity-only) plus explicit
+  `CollideShapeSettings`/`ShapeCastSettings` (the no-settings overloads now pass a zeroed
+  `CollisionTolerance=0` struct that degenerates GJK/EPA). **RayCast is unaffected** (no matrix, no settings
+  - it stayed green throughout). Proven by the full harness back to 0 fails.
+- **M6.8 parity re-validated on 2.19.1** (a native bump could silently move contact/friction/mass): box
+  mass 1000 kg / sphere 523.6 kg with `dv = impulse/mass` exact, friction 30deg stable (drift 0) / 60deg
+  slides (drift 1.80), drops/rest + determinism bit-for-bit, compound mass = sum. Nothing shifted.
+- **`physglitch` safety guard kept** (production robustness, independent of the native fix): `ApplyStepState`
+  drops a body update whose position is non-finite or |pos| > 1e5 m instead of pushing it into OpenSim's
+  terse-update path - a NaN/out-of-region transform there attempts a region CROSSING (no neighbour) and
+  spins the heartbeat ~5 s/body. Cheap insurance against any future solver glitch reaching the scene graph.
+
 Task 3 (per-child collision identity via `CompoundChild.UserData` / `ResolveChildUserData`) builds on this.
 
 ## Terrain collision: heightfield now, terrain-mesh in reserve (M6.5)

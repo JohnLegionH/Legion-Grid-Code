@@ -1924,6 +1924,10 @@ namespace OpenSim.Region.PhysicsModules.LegionJolt
 
         private void DrainDirtyLinksets()
         {
+            // WELD AT LOAD: rebuild dirty linkset roots at the TOP of Simulate, BEFORE StepOnce - so a
+            // persisted linkset's child parts are welded into the compound (their individual bodies removed)
+            // BEFORE they ever step. This matches BulletSim's model (one compound body from the start); the
+            // children never exist as separate physics-active overlapping bodies that penetrate + fling.
             JoltPrim[] dirty;
             lock (_dirtyLinksets)
             {
@@ -1933,20 +1937,13 @@ namespace OpenSim.Region.PhysicsModules.LegionJolt
                 _dirtyLinksets.Clear();
             }
             foreach (JoltPrim root in dirty)
-                root.RebuildCompoundNow();   // re-entrancy- and destroyed-guarded internally
+                root.RebuildCompoundNow();   // re-entrancy-, destroyed-, and exception-guarded internally
         }
 
         public override float Simulate(float timeStep)
         {
             if (_backend == null)
                 return 1f;
-
-            // [dtproof] Log the ACTUAL timeStep for the first few frames. OpenSim's Scene.FrameTime is in
-            // SECONDS (0.0909, OpenSimDefaults.ini) and flows here unscaled via UpdatePhysics((float)elapsed)
-            // -> Simulate -> Step -> _system.Update. So this MUST print ~0.0909. A value near 90 would mean a
-            // ms->s units bug upstream (it does not exist in this path - proof left in for the record).
-            if (_stepCount < 5)
-                m_log.Info($"{LogHeader} [dtproof] frame {_stepCount}: Simulate timeStep={timeStep:0.000000} s (expect ~0.0909)");
 
             // M7 Task 2: (re)build changed linkset compounds ONCE per frame, here on the step thread before
             // the step. link()/unlink() only mark the root dirty (they no longer rebuild inline); this

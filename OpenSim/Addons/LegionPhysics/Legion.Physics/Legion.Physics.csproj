@@ -20,6 +20,8 @@
     <ImplicitUsings>disable</ImplicitUsings>
     <EnableDefaultItems>false</EnableDefaultItems>
     <Deterministic>true</Deterministic>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks><!-- 2.19.x HeightFieldShapeSettings takes float* -->
+    <NoWarn>$(NoWarn);CS0168</NoWarn>
     <GenerateDocumentationFile>false</GenerateDocumentationFile>
     <!-- Local bin only. Default SDK output (bin\<Config>\net8.0\) is already project-local;
          we intentionally do NOT redirect to the shared OpenSim bin this milestone. -->
@@ -30,12 +32,16 @@
     <Compile Include="JoltPhysicsBackend.cs" />
   </ItemGroup>
 
-  <!-- M1 Task 2: Jolt binding. 2.18.6 is the newest release still shipping lib/net8.0/
-       (net8 dropped at 2.19.0). Native binaries ship inside this package under
-       runtimes/<rid>/native/; single precision (joltc.dll) is the default load,
-       double (joltc_double.dll) is opt-in - decision #2 is closed on single. -->
+  <!-- M1 Task 2: Jolt binding. net8.0 support runs through 2.19.1 (dropped at 2.19.2 -> net9/net10
+       only). 2.19.1 is the newest net8.0-compatible release; it pulls the matching native
+       JoltPhysics.Native 1.0.4 (2.18.6 pulled 1.0.3). Native joltc.dll ships in the JoltPhysics.Native
+       dependency under runtimes/<rid>/native/; single precision (joltc.dll) is the default load,
+       double (joltc_double.dll) is opt-in - decision #2 is closed on single.
+       [M7 boot-hang] bumped 2.18.6 -> 2.19.1 to pick up native 1.0.4 for the frame-0 welded-compound-
+       vs-heightfield Update spin; stays net8.0 (a net9/net10-only 2.22.0 can't load in OpenSim's net8
+       runtime). Re-validate M6.8 parity on the new native before promoting off scratch. -->
   <ItemGroup>
-    <PackageReference Include="JoltPhysicsSharp" Version="2.18.6" />
+    <PackageReference Include="JoltPhysicsSharp" Version="2.19.1" />
   </ItemGroup>
 
 </Project>

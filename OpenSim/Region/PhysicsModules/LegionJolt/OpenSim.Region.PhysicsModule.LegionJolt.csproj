@@ -79,8 +79,10 @@
        never auto-copied without a RID, so we resolve both package paths and copy EXACTLY those two
        files (nothing else) to the output root, where the OpenSim.exe process resolver finds them. -->
   <ItemGroup>
-    <PackageReference Include="JoltPhysicsSharp" Version="2.18.6" GeneratePathProperty="true" PrivateAssets="all" />
-    <PackageReference Include="JoltPhysics.Native" Version="1.0.3" GeneratePathProperty="true" PrivateAssets="all" />
+    <!-- Kept in lockstep with Legion.Physics (2.18.6->2.19.1 for the M7 boot-hang native fix). 2.19.1 is
+         the newest net8.0-compatible JoltPhysicsSharp; it pulls native JoltPhysics.Native 1.0.4. -->
+    <PackageReference Include="JoltPhysicsSharp" Version="2.19.1" GeneratePathProperty="true" PrivateAssets="all" />
+    <PackageReference Include="JoltPhysics.Native" Version="1.0.4" GeneratePathProperty="true" PrivateAssets="all" />
   </ItemGroup>
   <ItemGroup>
     <None Include="$(PkgJoltPhysicsSharp)\lib\net8.0\JoltPhysicsSharp.dll" Link="JoltPhysicsSharp.dll">

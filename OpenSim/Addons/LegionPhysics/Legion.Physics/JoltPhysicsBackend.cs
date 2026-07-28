@@ -417,12 +417,16 @@ namespace Legion.Physics.Jolt
         private void HandleContactAdded(
             PhysicsSystem system, in Body body1, in Body body2,
             in ContactManifold manifold, ref ContactSettings settings)
-            => PushContact(in body1, in body2, in manifold, in settings, ContactPhase.Begin);
+        {
+            PushContact(in body1, in body2, in manifold, in settings, ContactPhase.Begin);
+        }
 
         private void HandleContactPersisted(
             PhysicsSystem system, in Body body1, in Body body2,
             in ContactManifold manifold, ref ContactSettings settings)
-            => PushContact(in body1, in body2, in manifold, in settings, ContactPhase.Persist);
+        {
+            PushContact(in body1, in body2, in manifold, in settings, ContactPhase.Persist);
+        }
 
         private void HandleContactRemoved(PhysicsSystem system, ref SubShapeIDPair pair)
         {
@@ -638,9 +642,17 @@ namespace Legion.Physics.Jolt
                 heights.Slice((n - 1 - jy) * n, n).CopyTo(samples.AsSpan(jy * n, n));
             Vector3 offset = Vector3.Zero;
             Shape inner;
-            var hfSettings = new HeightFieldShapeSettings(samples, offset, joltScale, n);
-            try { inner = hfSettings.Create(); }
-            finally { hfSettings.Dispose(); }
+            // 2.19.x: HeightFieldShapeSettings takes (float* samples, offset, scale, uint sampleCount)
+            // (was float[]/int in 2.18.6). Pin the cook-time temp array; Create() copies into native storage.
+            unsafe
+            {
+                fixed (float* pSamples = samples)
+                {
+                    var hfSettings = new HeightFieldShapeSettings(pSamples, offset, joltScale, (uint)n);
+                    try { inner = hfSettings.Create(); }
+                    finally { hfSettings.Dispose(); }
+                }
+            }
 
             try
             {
@@ -1225,9 +1237,9 @@ namespace Legion.Physics.Jolt
                 // during ExtendedUpdate, cover terrain/static/dynamic/sensor, and - crucially - a
                 // standing avatar re-reports its floor contact every step, which is the real thing the
                 // #4 gate exists to suppress. Movement is untouched (these are observational). See notes.
-                character.OnContactAdded += (CharacterVirtual cv, in BodyID b2, SubShapeID ss, in Double3 pos, in Vector3 normal, ref CharacterContactSettings s)
+                character.OnContactAdded += (CharacterVirtual cv, in BodyID b2, SubShapeID ss, in RVector3 pos, in Vector3 normal, ref CharacterContactSettings s)
                     => PushCharacterBodyContact(rec, b2.ID, ToVec(pos), normal, ContactPhase.Begin);
-                character.OnContactPersisted += (CharacterVirtual cv, in BodyID b2, SubShapeID ss, in Double3 pos, in Vector3 normal, ref CharacterContactSettings s)
+                character.OnContactPersisted += (CharacterVirtual cv, in BodyID b2, SubShapeID ss, in RVector3 pos, in Vector3 normal, ref CharacterContactSettings s)
                     => PushCharacterBodyContact(rec, b2.ID, ToVec(pos), normal, ContactPhase.Persist);
                 character.OnContactRemoved += (CharacterVirtual cv, in BodyID b2, SubShapeID ss)
                     => PushCharacterBodyContact(rec, b2.ID, default, default, ContactPhase.End);
@@ -1239,9 +1251,9 @@ namespace Legion.Physics.Jolt
                     _charVsChar.Add(character);
                     character.SetCharacterVsCharacterCollision(_charVsChar);
                 }
-                character.OnCharacterContactAdded += (CharacterVirtual cv, CharacterVirtual other, SubShapeID ss, in Double3 pos, in Vector3 normal, ref CharacterContactSettings s)
+                character.OnCharacterContactAdded += (CharacterVirtual cv, CharacterVirtual other, SubShapeID ss, in RVector3 pos, in Vector3 normal, ref CharacterContactSettings s)
                     => PushCharacterCharacterContact(rec, other, ToVec(pos), normal, ContactPhase.Begin);
-                character.OnCharacterContactPersisted += (CharacterVirtual cv, CharacterVirtual other, SubShapeID ss, in Double3 pos, in Vector3 normal, ref CharacterContactSettings s)
+                character.OnCharacterContactPersisted += (CharacterVirtual cv, CharacterVirtual other, SubShapeID ss, in RVector3 pos, in Vector3 normal, ref CharacterContactSettings s)
                     => PushCharacterCharacterContact(rec, other, ToVec(pos), normal, ContactPhase.Persist);
 
                 _characterList.Add(rec);
@@ -1249,7 +1261,7 @@ namespace Legion.Physics.Jolt
             }
         }
 
-        private static Vector3 ToVec(in Double3 d) => new Vector3((float)d.X, (float)d.Y, (float)d.Z);
+        private static Vector3 ToVec(in RVector3 d) => new Vector3((float)d.X, (float)d.Y, (float)d.Z);   // 2.19.x renamed Double3 -> RVector3
 
         // Push an avatar-vs-BODY contact into the ring. Fires on the step thread during ExtendedUpdate.
         // Side A is the avatar (no BodyId - it is not a solver body; UserData carries the avatar id);
@@ -1662,14 +1674,46 @@ namespace Legion.Physics.Jolt
             return n;
         }
 
+        // JoltPhysicsSharp 2.19.x query adaptation (two changes vs 2.18.6; RayCast unaffected):
+        //  (1) CollideShape/CastShape now read the COM transform COLUMN-major. System.Numerics builds it
+        //      row-major (translation in the last ROW); 2.18.6's wrapper transposed internally, 2.19.x does
+        //      NOT - so an un-transposed transform collapses the query shape to ~origin (it then only hits
+        //      terrain, never the target). Fix: pass Matrix4x4.Transpose(com). Transposing a row-major matrix
+        //      is the equivalent column-major transform for ANY rotation, so this is exact, not identity-only.
+        //  (2) The no-settings overloads now pass a ZERO-initialized settings struct (CollisionTolerance=0,
+        //      PenetrationTolerance=0), degenerating GJK/EPA. 2.18.6 seeded Jolt's real defaults; restore below.
+        private const float JoltCollisionTolerance = 1.0e-4f;   // Jolt cDefaultCollisionTolerance
+        private const float JoltPenetrationTolerance = 1.0e-4f; // Jolt cDefaultPenetrationTolerance
+
+        private static CollideShapeSettings DefaultCollideSettings() => new CollideShapeSettings
+        {
+            CollisionTolerance = JoltCollisionTolerance,
+            PenetrationTolerance = JoltPenetrationTolerance,
+            MaxSeparationDistance = 0f,
+            ActiveEdgeMode = ActiveEdgeMode.CollideOnlyWithActive,  // Jolt's real CollideShapeSettings default
+            BackFaceMode = BackFaceMode.IgnoreBackFaces,            // Jolt's real default
+        };
+
+        private static ShapeCastSettings DefaultCastSettings() => new ShapeCastSettings
+        {
+            CollisionTolerance = JoltCollisionTolerance,
+            PenetrationTolerance = JoltPenetrationTolerance,
+            ActiveEdgeMode = ActiveEdgeMode.CollideWithAll,
+            BackFaceModeTriangles = BackFaceMode.IgnoreBackFaces, // a sweep enters through the FRONT face
+            BackFaceModeConvex = BackFaceMode.IgnoreBackFaces,
+            ReturnDeepestPoint = false,
+            UseShrunkenShapeAndConvexRadius = false,
+        };
+
         public int OverlapSphere(Vector3 center, float radius, QueryFilter filter, Span<BodyId> results)
         {
             if (_system == null)
                 return 0;
             using var sphere = new SphereShape(MathF.Max(0.001f, radius));
             var found = new List<CollideShapeResult>();
+            var cs = DefaultCollideSettings();
             _system.NarrowPhaseQuery.CollideShape(
-                sphere, Vector3.One, Matrix4x4.CreateTranslation(center), Vector3.Zero,
+                sphere, Vector3.One, Matrix4x4.Transpose(Matrix4x4.CreateTranslation(center)), cs, Vector3.Zero,
                 CollisionCollectorType.AllHit, found, null, FilterFor(filter), null, null);
             return CollectUniqueBodies(found, results);
         }
@@ -1685,8 +1729,9 @@ namespace Legion.Physics.Jolt
             Matrix4x4 com = Matrix4x4.CreateFromQuaternion(orientation);
             com.Translation = center;
             var found = new List<CollideShapeResult>();
+            var cs = DefaultCollideSettings();
             _system.NarrowPhaseQuery.CollideShape(
-                box, Vector3.One, com, Vector3.Zero,
+                box, Vector3.One, Matrix4x4.Transpose(com), cs, Vector3.Zero,
                 CollisionCollectorType.AllHit, found, null, FilterFor(filter), null, null);
             return CollectUniqueBodies(found, results);
         }
@@ -1706,8 +1751,9 @@ namespace Legion.Physics.Jolt
             Matrix4x4 com = Matrix4x4.CreateFromQuaternion(orientation);
             com.Translation = origin;
             var results = new List<ShapeCastResult>();
+            var scs = DefaultCastSettings();
             _system.NarrowPhaseQuery.CastShape(
-                shapeRec.NativeShape, com, castVec, Vector3.Zero,
+                shapeRec.NativeShape, Matrix4x4.Transpose(com), castVec, scs, Vector3.Zero,
                 CollisionCollectorType.ClosestHit, results, null, FilterFor(filter), null, null);
             if (results.Count == 0)
                 return false;
@@ -2046,6 +2092,7 @@ namespace Legion.Physics.Jolt
         }
 
         public bool IsValid(uint handle) => TryGet(handle, out _);
+
 
         public bool Remove(uint handle)
         {

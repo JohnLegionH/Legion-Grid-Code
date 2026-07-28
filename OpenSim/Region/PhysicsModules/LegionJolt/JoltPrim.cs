@@ -142,7 +142,19 @@ namespace OpenSim.Region.PhysicsModules.LegionJolt
         // viewer interpolating a rested object.
         internal void ApplyStepState(in BodyState s)
         {
-            _position = new Vector3(s.Position.X, s.Position.Y, s.Position.Z);
+            var newPos = new Vector3(s.Position.X, s.Position.Y, s.Position.Z);
+            // A loaded physical linkset can sit PENETRATING the terrain; the solver (CollisionSteps=6) then
+            // flings a part to a NaN / far-out-of-region position. Pushing that into the SOP makes OpenSim's
+            // terse-update path (PhysicsRequestingTerseUpdate) attempt a REGION CROSSING (there is no
+            // neighbour), which spins the heartbeat ~5 s per body - the "all water" boot stall. Drop the
+            // glitch update (keep the last good transform) instead of propagating it into a crossing.
+            if (!(float.IsFinite(newPos.X) && float.IsFinite(newPos.Y) && float.IsFinite(newPos.Z))
+                || MathF.Abs(newPos.X) > 1e5f || MathF.Abs(newPos.Y) > 1e5f || MathF.Abs(newPos.Z) > 1e5f)
+            {
+                LegionJoltScene.m_log.Warn($"{LegionJoltScene.LogHeader} [physglitch] body {LocalID} implausible pos {newPos} vel {s.LinearVelocity} - update dropped (no crossing)");
+                return;
+            }
+            _position = newPos;
             SQuaternion prim = SQuaternion.Multiply(SQuaternion.Conjugate(_axisCorrection), s.Orientation);
             _orientation = new Quaternion(prim.X, prim.Y, prim.Z, prim.W);
             _velocity = new Vector3(s.LinearVelocity.X, s.LinearVelocity.Y, s.LinearVelocity.Z);
@@ -417,6 +429,11 @@ namespace OpenSim.Region.PhysicsModules.LegionJolt
                 CreateBodyInternal();
 
                 if (oldCompound.IsValid) _backend.ReleaseShape(oldCompound);
+            }
+            catch (Exception e)
+            {
+                // Never let a linkset rebuild propagate into the heartbeat and wedge the region.
+                LegionJoltScene.m_log.Error($"{LegionJoltScene.LogHeader} linkset rebuild EXCEPTION for root {LocalID}: {e}");
             }
             finally { _rebuilding = false; }
         }

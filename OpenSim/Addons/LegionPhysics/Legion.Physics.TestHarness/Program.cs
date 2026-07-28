@@ -24,6 +24,7 @@ internal static class Program
     }
 
     private static float[] FlatField() => new float[N * N]; // all zero
+    private static float[] MoundField() { var f = new float[N * N]; int c = N / 2; float peak = 25f, rad = 100f; for (int y = 0; y < N; y++) for (int x = 0; x < N; x++) { float d = MathF.Sqrt((x - c) * (x - c) + (y - c) * (y - c)); f[y * N + x] = MathF.Max(0f, peak * (1f - d / rad)); } return f; }
 
     // Raise the CENTRAL grid block [64,192)^2 to `height`. Centred, so it maps to the centre of the
     // world terrain under ANY in-plane axis convention - the orientation check then depends only on
@@ -642,6 +643,272 @@ internal static class Program
             Console.WriteLine($"      single box mass={rcSingle:0.0}; cycles (children:mass):{rcSeq}");
             Check(rcOk, "compound mass = single x member count on EVERY rebuild cycle (no stale/leak across create+release)");
             backend.ReleaseShape(rcb);
+
+            // [32d] Compound placed PENETRATING the terrain (like a persisted linkset LOADED at its rest
+            // position, not dropped from above) - repro of the boot-load heartbeat stall. Create a compound
+            // whose sub-shapes overlap the heightfield, ACTIVE, and Step; measure per-step time. A hang /
+            // pathological slowness here is the frame-0 stall that starves the region under a loaded linkset.
+            Console.WriteLine("\n[32d] Compound penetrating terrain: per-step time (repro of loaded-linkset boot stall)");
+            backend.SetTerrain(flat, Vector3.Zero);   // flat terrain at Z=0
+            ShapeId pcb = backend.CreateBoxShape(new Vector3(0.5f, 0.5f, 0.5f));
+            var pkids = new CompoundChild[] {
+                new CompoundChild { Shape=pcb, Position=new Vector3(0,0,0), Orientation=System.Numerics.Quaternion.Identity, UserData=8300u },
+                new CompoundChild { Shape=pcb, Position=new Vector3(1.5f,0,0), Orientation=System.Numerics.Quaternion.Identity, UserData=8301u },
+                new CompoundChild { Shape=pcb, Position=new Vector3(0,1.5f,0), Orientation=System.Numerics.Quaternion.Identity, UserData=8302u },
+            };
+            ShapeId pcomp = backend.CreateCompoundShape(pkids);
+            var pDesc = BodyDesc.Default; pDesc.Shape=pcomp; pDesc.Position=new Vector3(100f,100f,0.2f);  // boxes penetrate the Z=0 terrain
+            pDesc.MotionType=BodyMotionType.Dynamic; pDesc.Layer=PhysicsLayer.Dynamic; pDesc.UserData=8300u; pDesc.StartActive=true;
+            BodyId pbody = backend.CreateBody(pDesc); backend.ActivateBody(pbody);
+            var pbuf=new BodyState[8]; var pch=new CharacterState[2]; var pct=new ContactReport[16];
+            var psw=System.Diagnostics.Stopwatch.StartNew(); long maxStep=0;
+            for (int i=0;i<30;i++){ long t0=psw.ElapsedMilliseconds; backend.Step(1f/60f, pbuf, pch, pct); long dt=psw.ElapsedMilliseconds-t0; if(dt>maxStep)maxStep=dt; if(i<3||dt>300) Console.WriteLine($"      step {i}: {dt}ms"); }
+            Console.WriteLine($"      30 steps done, maxStep={maxStep}ms (a multi-second step = the stall)");
+            Check(maxStep < 2000, $"compound penetrating terrain does NOT hang the step (maxStep {maxStep}ms)");
+            backend.RemoveBody(pbody); backend.ReleaseShape(pcomp); backend.ReleaseShape(pcb);
+
+            // [32e] Repro the module's LOADED-linkset frame-0 rebuild sequence: create 4 separate ACTIVE
+            // dynamic bodies (root + 3 children) penetrating terrain (as loaded from persistence), then do
+            // exactly what RebuildCompoundNow does - remove all 4, build a compound at the root position,
+            // activate - then Step. A hang/crash here is the backend cause of the boot stall.
+            Console.WriteLine("\n[32e] Loaded-linkset rebuild sequence (remove 4 active bodies -> compound -> step)");
+            backend.SetTerrain(flat, Vector3.Zero);
+            ShapeId ecb = backend.CreateBoxShape(new Vector3(0.5f,0.5f,0.5f));
+            var epos = new Vector3(110f,110f,0.2f);
+            var eoff = new Vector3[]{ new(0,0,0), new(1.5f,0,0), new(0,1.5f,0), new(1.5f,1.5f,0) };
+            var ebodies = new BodyId[4];
+            for(int i=0;i<4;i++){ var d=BodyDesc.Default; d.Shape=ecb; d.Position=epos+eoff[i]; d.MotionType=BodyMotionType.Dynamic; d.Layer=PhysicsLayer.Dynamic; d.UserData=(uint)(8400+i); d.StartActive=true; ebodies[i]=backend.CreateBody(d); backend.ActivateBody(ebodies[i]); }
+            for(int i=0;i<4;i++) backend.RemoveBody(ebodies[i]);
+            var ekids=new CompoundChild[4];
+            for(int i=0;i<4;i++) ekids[i]=new CompoundChild{ Shape=ecb, Position=eoff[i], Orientation=System.Numerics.Quaternion.Identity, UserData=(uint)(8400+i) };
+            ShapeId ecomp=backend.CreateCompoundShape(ekids);
+            var erd=BodyDesc.Default; erd.Shape=ecomp; erd.Position=epos; erd.MotionType=BodyMotionType.Dynamic; erd.Layer=PhysicsLayer.Dynamic; erd.UserData=8400u; erd.StartActive=true;
+            BodyId erb=backend.CreateBody(erd); backend.ActivateBody(erb);
+            var eb=new BodyState[8]; var ec2=new CharacterState[2]; var ect=new ContactReport[16];
+            var esw=System.Diagnostics.Stopwatch.StartNew(); long emax=0;
+            for(int i=0;i<30;i++){ long t0=esw.ElapsedMilliseconds; backend.Step(1f/60f, eb, ec2, ect); long dt=esw.ElapsedMilliseconds-t0; if(dt>emax)emax=dt; }
+            Console.WriteLine($"      30 steps after rebuild sequence, maxStep={emax}ms");
+            Check(emax<2000, $"loaded-linkset rebuild sequence does not hang (maxStep {emax}ms)");
+            backend.RemoveBody(erb); backend.ReleaseShape(ecomp); backend.ReleaseShape(ecb);
+
+            // [32f] MODULE-ACCURATE repro: CollisionSteps=6 (the module setting; harness default is 1) +
+            // mutually-OVERLAPPING loaded linkset parts. Before the deferred weld, the linkset's 4 parts are
+            // INDIVIDUAL dynamic bodies ~0.6 m apart = overlapping ~0.4 m, penetrating terrain, stepped at
+            // CollisionSteps=6. This is the combination [32d]/[32e] lacked. A hang here IS the boot stall
+            // (heartbeat ThreadState=Running = a compute loop in the solver).
+            Console.WriteLine("\n[32f] CollisionSteps=6 + overlapping penetrating linkset bodies (module-accurate repro)");
+            var s6 = PhysicsBackendSettings.Default; s6.CollisionSteps = 6;
+            var bk6 = new JoltPhysicsBackend(); bk6.Initialize(s6);
+            ShapeId f6 = bk6.CreateHeightFieldShape(FlatField(), N, N, new Vector3(S,S,S)); bk6.SetTerrain(f6, Vector3.Zero);
+            ShapeId b6 = bk6.CreateBoxShape(new Vector3(0.5f,0.5f,0.5f));
+            var off6 = new Vector3[]{ new(0,0,0), new(0.6f,0,0), new(0,0.6f,0), new(0.6f,0.6f,0) };
+            var bd6 = new BodyId[4];
+            for(int i=0;i<4;i++){ var d=BodyDesc.Default; d.Shape=b6; d.Position=new Vector3(100f,100f,0.3f)+off6[i]; d.MotionType=BodyMotionType.Dynamic; d.Layer=PhysicsLayer.Dynamic; d.UserData=(uint)(8500+i); d.StartActive=true; bd6[i]=bk6.CreateBody(d); bk6.ActivateBody(bd6[i]); }
+            var b6buf=new BodyState[8]; var b6ch=new CharacterState[2]; var b6ct=new ContactReport[16];
+            var sw6=System.Diagnostics.Stopwatch.StartNew(); long m6=0;
+            for(int i=0;i<30;i++){ long t0=sw6.ElapsedMilliseconds; bk6.Step(1f/60f, b6buf, b6ch, b6ct); long dt=sw6.ElapsedMilliseconds-t0; if(dt>m6)m6=dt; if(dt>200)Console.WriteLine($"      step {i}: {dt}ms"); }
+            Console.WriteLine($"      30 steps, maxStep={m6}ms (multi-second/hang = the boot stall)");
+            Check(m6<2000, $"CollisionSteps=6 + overlapping linkset bodies does not hang (maxStep {m6}ms)");
+
+            // [32g] LIVE-TERRAIN repro: compound at the PEAK of a MOUND heightfield (like the pinhead-island,
+            // centre=25 sloping to 0) + CollisionSteps=6. The live weld-at-load boot hangs in backendStep on
+            // the welded compound; earlier repros used FLAT terrain. If this hangs, it is the compound-vs-
+            // sloped-heightfield step at CollisionSteps=6.
+            Console.WriteLine("\n[32g] Compound on a MOUND heightfield peak + CollisionSteps=6 (live-terrain repro)");
+            var sg = PhysicsBackendSettings.Default; sg.CollisionSteps = 6;
+            var bkg = new JoltPhysicsBackend(); bkg.Initialize(sg);
+            ShapeId fg = bkg.CreateHeightFieldShape(MoundField(), N, N, new Vector3(S,S,S)); bkg.SetTerrain(fg, Vector3.Zero);
+            ShapeId cbg = bkg.CreateBoxShape(new Vector3(0.5f,0.5f,0.5f));
+            var kg = new CompoundChild[]{
+                new CompoundChild{Shape=cbg,Position=new Vector3(0,0,0),Orientation=System.Numerics.Quaternion.Identity,UserData=8600u},
+                new CompoundChild{Shape=cbg,Position=new Vector3(0.6f,0,0),Orientation=System.Numerics.Quaternion.Identity,UserData=8601u},
+                new CompoundChild{Shape=cbg,Position=new Vector3(0,0.6f,0),Orientation=System.Numerics.Quaternion.Identity,UserData=8602u},
+                new CompoundChild{Shape=cbg,Position=new Vector3(0.6f,0.6f,0),Orientation=System.Numerics.Quaternion.Identity,UserData=8603u},
+            };
+            ShapeId compg = bkg.CreateCompoundShape(kg);
+            var dg = BodyDesc.Default; dg.Shape=compg; dg.Position=new Vector3(128f,128f,25.3f); dg.MotionType=BodyMotionType.Dynamic; dg.Layer=PhysicsLayer.Dynamic; dg.UserData=8600u; dg.StartActive=true;
+            BodyId bg = bkg.CreateBody(dg); bkg.ActivateBody(bg);
+            var gbuf=new BodyState[8]; var gch=new CharacterState[2]; var gct=new ContactReport[16];
+            var swg=System.Diagnostics.Stopwatch.StartNew(); long mg=0;
+            for(int i=0;i<30;i++){ long t0=swg.ElapsedMilliseconds; bkg.Step(1f/60f, gbuf, gch, gct); long dt=swg.ElapsedMilliseconds-t0; if(dt>mg)mg=dt; if(dt>200)Console.WriteLine($"      step {i}: {dt}ms"); }
+            Console.WriteLine($"      30 steps, maxStep={mg}ms");
+            Check(mg<2000, $"compound on mound terrain does not hang (maxStep {mg}ms)");
+
+            // [32h] EXACT LIVE GEOMETRY repro (from the boot's [linkrebuild]): root + 3 children at the live
+            // offsets, welded compound loaded PENETRATING a flat-25 heightfield at rootPos Z=25.32,
+            // CollisionSteps=6. The live native-Jolt Step spins here (all contact counters 0). Try box halves
+            // 0.25 and 0.5 (unknown live prim size) - a hang at either = reproduced.
+            foreach (float half in new[] { 0.25f, 0.5f })
+            {
+                Console.WriteLine($"\n[32h] EXACT-live compound (box half={half}) penetrating flat-25 terrain + CollisionSteps=6");
+                var setH = PhysicsBackendSettings.Default; setH.CollisionSteps = 6;
+                var bkh = new JoltPhysicsBackend(); bkh.Initialize(setH);
+                var flat25 = new float[N * N]; for (int i = 0; i < flat25.Length; i++) flat25[i] = 25f;
+                ShapeId fldH = bkh.CreateHeightFieldShape(flat25, N, N, new Vector3(S, S, S)); bkh.SetTerrain(fldH, Vector3.Zero);
+                ShapeId cbh = bkh.CreateBoxShape(new Vector3(half, half, half));
+                var offs = new[] { new Vector3(0,0,0), new Vector3(0.05f,1.47f,-0.24f), new Vector3(0.02f,1.49f,0.74f), new Vector3(0.03f,0.73f,0.40f) };
+                // LIVE: root prim is TILTED ~26deg; children counter-rotated (invRoot) so they are world-upright.
+                var rootQ = new System.Numerics.Quaternion(0.2284f, -0.0181f, -0.0111f, 0.9733f);
+                var invQ = System.Numerics.Quaternion.Conjugate(rootQ);
+                var kh = new CompoundChild[4];
+                for (int i = 0; i < 4; i++) kh[i] = new CompoundChild { Shape = cbh, Position = offs[i], Orientation = i == 0 ? System.Numerics.Quaternion.Identity : invQ, UserData = (uint)(8700 + i) };
+                ShapeId comph = bkh.CreateCompoundShape(kh);
+                var descH = BodyDesc.Default; descH.Shape = comph; descH.Density = 10f; descH.Orientation = rootQ; descH.Position = new Vector3(126.86f, 128.26f, 25.32f); descH.MotionType = BodyMotionType.Dynamic; descH.Layer = PhysicsLayer.Dynamic; descH.UserData = 8700u; descH.StartActive = true;
+                BodyId bodyH = bkh.CreateBody(descH); bkh.ActivateBody(bodyH);
+                var hbuf = new BodyState[8]; var hch = new CharacterState[2]; var hct = new ContactReport[16];
+                var swh = System.Diagnostics.Stopwatch.StartNew(); long mh = 0;
+                for (int i = 0; i < 30; i++) { long t0 = swh.ElapsedMilliseconds; bkh.Step(0.0909f, hbuf, hch, hct); long dt = swh.ElapsedMilliseconds - t0; if (dt > mh) mh = dt; if (dt > 200) Console.WriteLine($"      step {i}: {dt}ms"); }
+                Console.WriteLine($"      30 steps, maxStep={mh}ms");
+                Check(mh < 2000, $"EXACT-live compound (half={half}) does not hang (maxStep {mh}ms)");
+            }
+
+            // ---- [32i] EXACT LIVE BOOT SEQUENCE: 4 active overlapping bodies -> remove -> weld -> step ----
+            // The live boot creates root+3 children as individual ACTIVE, deeply-overlapping bodies at load,
+            // then at frame 0 removes them (children first, root last) and welds the compound, THEN steps.
+            // [32h] only ever created the compound fresh; it never exercised the create-4-active-then-remove
+            // churn that precedes the weld. Removing active overlapping bodies can leave Jolt's broadphase /
+            // island state inconsistent so the next Update spins. A native hang here reproduces the boot stall.
+            Console.WriteLine("\n[32i] LIVE boot sequence: 4 active overlapping bodies -> remove -> weld -> step (CollisionSteps=6)");
+            {
+                const int Ni = 256; const float Si = 256f;
+                var seti = PhysicsBackendSettings.Default; seti.CollisionSteps = 6;
+                var bki = new JoltPhysicsBackend(); bki.Initialize(seti);
+                var flatI = new float[Ni * Ni]; for (int i = 0; i < flatI.Length; i++) flatI[i] = 25f;
+                ShapeId fldI = bki.CreateHeightFieldShape(flatI, Ni, Ni, new Vector3(Si, Si, Si)); bki.SetTerrain(fldI, Vector3.Zero);
+                ShapeId boxI = bki.CreateBoxShape(new Vector3(0.25f, 0.25f, 0.25f));
+                var rootQi = new System.Numerics.Quaternion(0.2284f, -0.0181f, -0.0111f, 0.9733f);
+                var invQi = System.Numerics.Quaternion.Conjugate(rootQi);
+                var rootW = new Vector3(126.86f, 128.26f, 25.32f);
+                var offi = new[] { new Vector3(0,0,0), new Vector3(0.05f,1.47f,-0.24f), new Vector3(0.02f,1.49f,0.74f), new Vector3(0.03f,0.73f,0.40f) };
+                // (1) create 4 ACTIVE individual bodies at world positions: root tilted, children world-upright, overlapping.
+                var idsI = new BodyId[4];
+                for (int i = 0; i < 4; i++)
+                {
+                    var d = BodyDesc.Default; d.Shape = boxI; d.Density = 10f;
+                    d.Position = rootW + Vector3.Transform(offi[i], rootQi);
+                    d.Orientation = i == 0 ? rootQi : System.Numerics.Quaternion.Identity;
+                    d.MotionType = BodyMotionType.Dynamic; d.Layer = PhysicsLayer.Dynamic;
+                    d.UserData = (uint)(9100 + i); d.StartActive = true;
+                    idsI[i] = bki.CreateBody(d); bki.ActivateBody(idsI[i]);
+                }
+                // (2) weld order: remove the 3 children first...
+                for (int i = 1; i < 4; i++) bki.RemoveBody(idsI[i]);
+                // (3) build the compound (root@identity, children counter-rotated at root-frame offsets)...
+                var kidsI = new CompoundChild[4];
+                for (int i = 0; i < 4; i++) kidsI[i] = new CompoundChild { Shape = boxI, Position = offi[i], Orientation = i == 0 ? System.Numerics.Quaternion.Identity : invQi, UserData = (uint)(9100 + i) };
+                ShapeId compI = bki.CreateCompoundShape(kidsI);
+                // (4) ...then remove the root body LAST and create the compound body (as RebuildCompoundNow does).
+                bki.RemoveBody(idsI[0]);
+                var cd = BodyDesc.Default; cd.Shape = compI; cd.Density = 10f; cd.Orientation = rootQi; cd.Position = rootW;
+                cd.MotionType = BodyMotionType.Dynamic; cd.Layer = PhysicsLayer.Dynamic; cd.UserData = 9100u; cd.StartActive = true;
+                BodyId cbI = bki.CreateBody(cd); bki.ActivateBody(cbI);
+                // (5) step at the live rate.
+                var bbI = new BodyState[8]; var chI = new CharacterState[2]; var ctI = new ContactReport[16];
+                var swi = System.Diagnostics.Stopwatch.StartNew(); long maxi = 0;
+                for (int i = 0; i < 30; i++) { long t0 = swi.ElapsedMilliseconds; bki.Step(0.0909f, bbI, chI, ctI); long dt = swi.ElapsedMilliseconds - t0; if (dt > maxi) maxi = dt; }
+                Console.WriteLine($"      30 steps, maxStep={maxi}ms");
+                Check(maxi < 2000, $"LIVE boot sequence does not hang (maxStep {maxi}ms)");
+            }
+
+            // ---- [32j] REAL heightfield at CORRECT scale (module builds 257x257 @ 1m spacing) + exact compound ----
+            // EVERY prior terrain repro passed scale (256,256,256) => 256m sample spacing, so the compound sat on
+            // ONE giant flat quad (geometrically wrong - that is why nothing hung). The module builds an (N+1)=257
+            // square field at scale (1,1,1) = 1m spacing: the REAL pinhead-island dome under the compound. This
+            // exact terrain input (correct scale + real DB heights) was never tested. Load realterrain.f32.
+            Console.WriteLine("\n[32j] REAL heightfield 257x257 @ 1m spacing + exact compound at (126.86,128.26,25.32)");
+            {
+                var terPath = @"D:\jolt-boot-test\bin\realterrain.f32";
+                if (!System.IO.File.Exists(terPath)) { Console.WriteLine("      (realterrain.f32 missing; skipping [32j])"); }
+                else
+                {
+                    var terBytes = System.IO.File.ReadAllBytes(terPath);
+                    int src = 256; var hj = new float[src * src];
+                    for (int k = 0; k < hj.Length; k++) hj[k] = BitConverter.ToSingle(terBytes, k * 4);
+                    int mj = src + 1;                                   // module: N+1 = 257
+                    var fieldj = new float[mj * mj];
+                    for (int y = 0; y < mj; y++) { int sr = Math.Min(y, src - 1) * src; int dr = y * mj; for (int x = 0; x < mj; x++) fieldj[dr + x] = hj[sr + Math.Min(x, src - 1)]; }
+                    var setj = PhysicsBackendSettings.Default; setj.CollisionSteps = 6;
+                    var bkj = new JoltPhysicsBackend(); bkj.Initialize(setj);
+                    ShapeId fldj = bkj.CreateHeightFieldShape(fieldj, mj, mj, new Vector3(1f, 1f, 1f)); bkj.SetTerrain(fldj, Vector3.Zero);
+                    ShapeId boxj = bkj.CreateBoxShape(new Vector3(0.25f, 0.25f, 0.25f));
+                    var rootQj = new System.Numerics.Quaternion(0.2284f, -0.0181f, -0.0111f, 0.9733f);
+                    var invQj = System.Numerics.Quaternion.Conjugate(rootQj);
+                    var offj = new[] { new Vector3(0,0,0), new Vector3(0.05f,1.47f,-0.24f), new Vector3(0.02f,1.49f,0.74f), new Vector3(0.03f,0.73f,0.40f) };
+                    var kidsj = new CompoundChild[4];
+                    for (int i = 0; i < 4; i++) kidsj[i] = new CompoundChild { Shape = boxj, Position = offj[i], Orientation = i == 0 ? System.Numerics.Quaternion.Identity : invQj, UserData = (uint)(9200 + i) };
+                    ShapeId compj = bkj.CreateCompoundShape(kidsj);
+                    var cdj = BodyDesc.Default; cdj.Shape = compj; cdj.Density = 10f; cdj.Orientation = rootQj; cdj.Position = new Vector3(126.86f, 128.26f, 25.32f);
+                    cdj.LinearVelocity = new Vector3(0.01708f, 0.40312f, -0.13121f);   // persisted root velocity (DB)
+                    cdj.AngularVelocity = new Vector3(-1.20333f, 0.05029f, -0.03555f); // persisted root angular velocity (DB)
+                    cdj.MotionType = BodyMotionType.Dynamic; cdj.Layer = PhysicsLayer.Dynamic; cdj.UserData = 9200u; cdj.StartActive = true;
+                    BodyId cbj = bkj.CreateBody(cdj); bkj.ActivateBody(cbj);
+                    var bbj = new BodyState[8]; var chj = new CharacterState[2]; var ctj = new ContactReport[16];
+                    var swj = System.Diagnostics.Stopwatch.StartNew(); long maxj = 0;
+                    for (int i = 0; i < 30; i++) { long t0 = swj.ElapsedMilliseconds; bkj.Step(0.0909f, bbj, chj, ctj); long dt = swj.ElapsedMilliseconds - t0; if (dt > maxj) maxj = dt; }
+                    Console.WriteLine($"      30 steps, maxStep={maxj}ms");
+                    Check(maxj < 2000, $"REAL-terrain compound does not hang (maxStep {maxj}ms)");
+                }
+            }
+
+            // ---- [32k] REAL terrain (257@1m) + the CREATE-4-ACTIVE-THEN-REMOVE churn + weld + persisted vel ----
+            // The one combination never tested: [32i] had the churn on a wrong-scale flat quad; [32j] had the
+            // real dome but a fresh compound (no churn). Creating 4 active bodies OVERLAPPING the REAL heightfield
+            // then removing them can leave Jolt's broadphase quadtree with dangling nodes so the next Update spins
+            // with 0 contacts - exactly the live boot signature. This is the faithful live boot on the real dome.
+            Console.WriteLine("\n[32k] REAL terrain + create-4-active-overlapping -> remove -> weld -> step (live boot faithful)");
+            {
+                var terPath = @"D:\jolt-boot-test\bin\realterrain.f32";
+                if (!System.IO.File.Exists(terPath)) { Console.WriteLine("      (realterrain.f32 missing; skipping [32k])"); }
+                else
+                {
+                    var terBytes = System.IO.File.ReadAllBytes(terPath);
+                    int src = 256; var hk = new float[src * src];
+                    for (int q = 0; q < hk.Length; q++) hk[q] = BitConverter.ToSingle(terBytes, q * 4);
+                    int mk = src + 1;
+                    var fieldk = new float[mk * mk];
+                    for (int y = 0; y < mk; y++) { int sr = Math.Min(y, src - 1) * src; int dr = y * mk; for (int x = 0; x < mk; x++) fieldk[dr + x] = hk[sr + Math.Min(x, src - 1)]; }
+                    var setk = PhysicsBackendSettings.Default; setk.CollisionSteps = 6;
+                    var bkk = new JoltPhysicsBackend(); bkk.Initialize(setk);
+                    ShapeId fldk = bkk.CreateHeightFieldShape(fieldk, mk, mk, new Vector3(1f, 1f, 1f)); bkk.SetTerrain(fldk, Vector3.Zero);
+                    if (bkk.RayCast(new Vector3(126.86f, 128.26f, 5000f), new Vector3(0, 0, -1f), 10000f, QueryFilter.All, out RayHit tprobe))
+                        Console.WriteLine($"      terrain under compound XY: z={tprobe.Point.Z:0.###} (compound root at 25.32; penetration≈{25.32f - tprobe.Point.Z:0.###} m)");
+                    else Console.WriteLine("      terrain probe MISSED under compound XY (compound not over terrain!)");
+                    ShapeId boxk = bkk.CreateBoxShape(new Vector3(0.25f, 0.25f, 0.25f));
+                    var rootQk = new System.Numerics.Quaternion(0.2284f, -0.0181f, -0.0111f, 0.9733f);
+                    var invQk = System.Numerics.Quaternion.Conjugate(rootQk);
+                    var rootWk = new Vector3(126.86f, 128.26f, 25.32f);
+                    var offk = new[] { new Vector3(0,0,0), new Vector3(0.05f,1.47f,-0.24f), new Vector3(0.02f,1.49f,0.74f), new Vector3(0.03f,0.73f,0.40f) };
+                    // (1) 4 ACTIVE individual bodies overlapping the REAL heightfield.
+                    var idk = new BodyId[4];
+                    for (int i = 0; i < 4; i++)
+                    {
+                        var d = BodyDesc.Default; d.Shape = boxk; d.Density = 10f;
+                        d.Position = rootWk + Vector3.Transform(offk[i], rootQk);
+                        d.Orientation = i == 0 ? rootQk : System.Numerics.Quaternion.Identity;
+                        d.MotionType = BodyMotionType.Dynamic; d.Layer = PhysicsLayer.Dynamic;
+                        d.UserData = (uint)(9300 + i); d.StartActive = true;
+                        idk[i] = bkk.CreateBody(d); bkk.ActivateBody(idk[i]);
+                    }
+                    // (2) remove children, (3) build compound, (4) remove root, create compound body.
+                    for (int i = 1; i < 4; i++) bkk.RemoveBody(idk[i]);
+                    var kidsk = new CompoundChild[4];
+                    for (int i = 0; i < 4; i++) kidsk[i] = new CompoundChild { Shape = boxk, Position = offk[i], Orientation = i == 0 ? System.Numerics.Quaternion.Identity : invQk, UserData = (uint)(9300 + i) };
+                    ShapeId compk = bkk.CreateCompoundShape(kidsk);
+                    bkk.RemoveBody(idk[0]);
+                    var cdk = BodyDesc.Default; cdk.Shape = compk; cdk.Density = 10f; cdk.Orientation = rootQk; cdk.Position = rootWk;
+                    cdk.LinearVelocity = new Vector3(0.01708f, 0.40312f, -0.13121f);
+                    cdk.AngularVelocity = new Vector3(-1.20333f, 0.05029f, -0.03555f);
+                    cdk.MotionType = BodyMotionType.Dynamic; cdk.Layer = PhysicsLayer.Dynamic; cdk.UserData = 9300u; cdk.StartActive = true;
+                    BodyId cbk = bkk.CreateBody(cdk); bkk.ActivateBody(cbk);
+                    // (5) step at the live rate.
+                    var bbk = new BodyState[8]; var chk = new CharacterState[2]; var ctk = new ContactReport[16];
+                    var swk = System.Diagnostics.Stopwatch.StartNew(); long maxk = 0; int lastActive = -1;
+                    for (int i = 0; i < 30; i++) { long t0 = swk.ElapsedMilliseconds; var rk = bkk.Step(0.0909f, bbk, chk, ctk); long dt = swk.ElapsedMilliseconds - t0; if (dt > maxk) maxk = dt; lastActive = rk.ActiveBodyCount; }
+                    bkk.TryGetBodyState(cbk, out BodyState fin);
+                    Console.WriteLine($"      30 steps, maxStep={maxk}ms  | VALIDITY: lastActiveBodyCount={lastActive} compound finalPos=({fin.Position.X:0.##},{fin.Position.Y:0.##},{fin.Position.Z:0.##}) flags={fin.Flags} (started Z=25.32)");
+                    Check(maxk < 2000, $"REAL-terrain + churn does not hang (maxStep {maxk}ms)");
+                }
+            }
 
             // ---- 33. SCALED SHAPE: box takes non-uniform scale; sphere non-uniform CLAMPS to uniform. ----
             Console.WriteLine("\n[33] CreateScaledShape: box non-uniform applied; sphere non-uniform clamped; SetBodyShape swap");
