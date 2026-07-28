@@ -436,7 +436,18 @@ namespace Legion.Physics.Jolt
             // which is correct (there is nothing left to name).
             _joltToRecord.TryGetValue(pair.Body1ID.ID, out JoltBodyRecord? ra);
             _joltToRecord.TryGetValue(pair.Body2ID.ID, out JoltBodyRecord? rb);
-            _contactListener.Push(BuildContact(ra, rb, default, default, 0f, ContactPhase.End));
+            // End carries the sub-shape pair, so name the struck child on each side (the module ignores the
+            // End phase today - OpenSim derives ends from absence - but keep the identity correct for parity).
+            _contactListener.Push(BuildContact(ra, rb, default, default, 0f, ContactPhase.End,
+                ResolveStruckPart(ra, pair.SubShapeID1), ResolveStruckPart(rb, pair.SubShapeID2)));
+        }
+
+        // The STRUCK part's UserData: the compound child hit (ResolveChildUserData), or the body's own
+        // UserData for a single-shape body. This is the per-contact link identity (llDetectedLinkNumber).
+        private uint ResolveStruckPart(JoltBodyRecord? rec, uint subShapeId)
+        {
+            uint child = ResolveChildUserData(rec, subShapeId);
+            return child != 0 ? child : (rec?.UserData ?? 0u);
         }
 
         // WORKER-THREAD context. Resolve both sides from the reverse map (never lock a body), apply the
@@ -478,11 +489,16 @@ namespace Legion.Physics.Jolt
             for (int i = 0; i < impulses.Length; i++)
                 impulse += impulses[i].ContactImpulse;
 
-            _contactListener.Push(BuildContact(ra, rb, point, normal, MathF.Max(0f, impulse), phase));
+            // Name the struck part on each side from the contact sub-shape (child of a linkset, or the body
+            // itself) - the per-child collision identity behind llDetectedLinkNumber.
+            uint childA = ResolveStruckPart(ra, manifold.SubShapeID1.Value);
+            uint childB = ResolveStruckPart(rb, manifold.SubShapeID2.Value);
+            _contactListener.Push(BuildContact(ra, rb, point, normal, MathF.Max(0f, impulse), phase, childA, childB));
         }
 
         private static ContactReport BuildContact(
-            JoltBodyRecord? ra, JoltBodyRecord? rb, Vector3 point, Vector3 normal, float impulse, ContactPhase phase)
+            JoltBodyRecord? ra, JoltBodyRecord? rb, Vector3 point, Vector3 normal, float impulse, ContactPhase phase,
+            uint childUserDataA, uint childUserDataB)
         {
             return new ContactReport
             {
@@ -490,6 +506,8 @@ namespace Legion.Physics.Jolt
                 BodyB = rb != null ? new BodyId(rb.Handle) : BodyId.Invalid,
                 UserDataA = ra != null ? ra.UserData : 0u,
                 UserDataB = rb != null ? rb.UserData : 0u,
+                ChildUserDataA = childUserDataA,
+                ChildUserDataB = childUserDataB,
                 Point = point,
                 Normal = normal,
                 Impulse = impulse,
@@ -1247,11 +1265,11 @@ namespace Legion.Physics.Jolt
                 // standing avatar re-reports its floor contact every step, which is the real thing the
                 // #4 gate exists to suppress. Movement is untouched (these are observational). See notes.
                 character.OnContactAdded += (CharacterVirtual cv, in BodyID b2, SubShapeID ss, in RVector3 pos, in Vector3 normal, ref CharacterContactSettings s)
-                    => PushCharacterBodyContact(rec, b2.ID, ToVec(pos), normal, ContactPhase.Begin);
+                    => PushCharacterBodyContact(rec, b2.ID, ss.Value, ToVec(pos), normal, ContactPhase.Begin);
                 character.OnContactPersisted += (CharacterVirtual cv, in BodyID b2, SubShapeID ss, in RVector3 pos, in Vector3 normal, ref CharacterContactSettings s)
-                    => PushCharacterBodyContact(rec, b2.ID, ToVec(pos), normal, ContactPhase.Persist);
+                    => PushCharacterBodyContact(rec, b2.ID, ss.Value, ToVec(pos), normal, ContactPhase.Persist);
                 character.OnContactRemoved += (CharacterVirtual cv, in BodyID b2, SubShapeID ss)
-                    => PushCharacterBodyContact(rec, b2.ID, default, default, ContactPhase.End);
+                    => PushCharacterBodyContact(rec, b2.ID, ss.Value, default, default, ContactPhase.End);
 
                 // Avatar-avatar: register in the shared collision so capsules push/block, and report
                 // the contact. otherCharacter.UserData gives the other avatar's id directly.
@@ -1276,7 +1294,7 @@ namespace Legion.Physics.Jolt
         // Side A is the avatar (no BodyId - it is not a solver body; UserData carries the avatar id);
         // side B is the touched body, resolved via the reverse map. Persist is gated exactly like body
         // contacts: forwarded only if the avatar or the other body wants events.
-        private void PushCharacterBodyContact(JoltCharacterRecord ch, uint otherJoltId, Vector3 point, Vector3 normal, ContactPhase phase)
+        private void PushCharacterBodyContact(JoltCharacterRecord ch, uint otherJoltId, uint otherSubShape, Vector3 point, Vector3 normal, ContactPhase phase)
         {
             _joltToRecord.TryGetValue(otherJoltId, out JoltBodyRecord? other);
             bool wants = ch.WantsContactEvents || (other?.WantsContactEvents ?? false);
@@ -1288,6 +1306,8 @@ namespace Legion.Physics.Jolt
                 BodyB = other != null ? new BodyId(other.Handle) : BodyId.Invalid,
                 UserDataA = ch.UserData,
                 UserDataB = other?.UserData ?? 0u,
+                ChildUserDataA = ch.UserData,           // the avatar has no sub-shapes; itself is the struck part
+                ChildUserDataB = ResolveStruckPart(other, otherSubShape),   // the linkset child the avatar touched
                 Point = point,
                 Normal = normal,                        // character-contact normal (points toward the character)
                 Impulse = 0f,                           // controller-resolved contact; no solver impulse available
@@ -1307,6 +1327,8 @@ namespace Legion.Physics.Jolt
                 BodyB = BodyId.Invalid,
                 UserDataA = ch.UserData,
                 UserDataB = otherUserData,
+                ChildUserDataA = ch.UserData,           // avatars have no sub-shapes; each side is its own part
+                ChildUserDataB = otherUserData,
                 Point = point,
                 Normal = normal,
                 Impulse = 0f,

@@ -397,6 +397,11 @@ namespace Legion.Physics
         public BodyId BodyB;
         public uint UserDataA;
         public uint UserDataB;
+        /// <summary>The STRUCK part's UserData on each side, resolved from the contact sub-shape: for a
+        /// compound (linkset) body this is the specific child prim's id; for a single-shape body it is the
+        /// body's own UserData. Drives per-child collision identity (llDetectedLinkNumber).</summary>
+        public uint ChildUserDataA;
+        public uint ChildUserDataB;
         public Vector3 Point;
         /// <summary>Points from A toward B.</summary>
         public Vector3 Normal;

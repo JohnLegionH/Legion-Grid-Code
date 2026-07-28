@@ -618,9 +618,31 @@ hooks were no-ops in `JoltPrim`.
   linksets. Standard OpenSim surface (Tranquillity-portable): the module only fills `CollisionEventUpdate`
   and calls the base `SendCollisionUpdate`; SOP does the rest, engine-agnostic.
 
-Task 3 landing 2 (per-child collision identity: resolve `manifold.SubShapeID1/2` -> `ResolveChildUserData`
--> dispatch the collision to the struck CHILD part so `llDetectedLinkNumber` returns its link, both
-directions) builds on this + the `CompoundChild.UserData` foundation.
+- **Task 3, landing 2 - per-child collision IDENTITY (llDetectedLinkNumber, closes the M4 gap).** The M4
+  `ContactReport` had no way to say WHICH child of a linkset a contact struck - it only carried the root's
+  UserData. Landing 2 adds `ContactReport.ChildUserDataA/ChildUserDataB`: the STRUCK part on each side,
+  resolved from the contact sub-shape (`ContactManifold.SubShapeID1/2` -> `ResolveChildUserData` -> the
+  compound child's LocalID, or the body's own id for a single prim). Wired through the body-body path, the
+  End path (`SubShapeIDPair`), and the avatar-contact paths (a character's `OnContact*` carries the touched
+  body's sub-shape, so an avatar-vs-linkset contact names the child too). The module's `DispatchContacts`
+  then dispatches each contact to the STRUCK part on each side (`ChildUserData`) and names the other side's
+  struck part as the collider - symmetric, so it covers BOTH 3A (linkset-as-hit: the hit link reports it)
+  and 3B (linkset-as-hitter: the struck object's `llDetectedKey` names the specific hitting child).
+  - **Why dispatch-to-child yields the right link with NO core-OpenSim edit:** `llDetectedLinkNumber` is
+    the RECEIVING part's `SceneObjectPart.LinkNum` (`CreateDetObject` sets `linkNumber = this.LinkNum`).
+    `SceneObjectGroup.UpdatePhysicsSubscribedEvents` merges the ROOT's aggregated script events into every
+    part, so a linkset with a root collision script subscribes EVERY child's PhysicsActor. Dispatching to
+    child N runs child N's `PhysicsCollision`; with no own-script it propagates to the root script via
+    `SendCollisionEvent` carrying child N's `LinkNum`. So the number is OpenSim's own (SL-exact: root=1,
+    children 2..N) - the module only ensures the right PART receives the collision.
+  - Proven: `jolt collidelinktest` (real `Ctrl+L`-equivalent linkset + a REAL compiled Phlox
+    `collision_start` script - box dropped on link 3 -> EventManager `DetectedObject.linkNumber`=3 AND the
+    script's `llDetectedLinkNumber`=3, captured via `llSay`), and viewer (John: object dropped on a child
+    of a real linkset -> "hit link 4 by Object" - the struck child's link, collider named). An earlier
+    "link 0" was a NON-Ctrl+L-linked test object (physics-welded != scene-linked); real linksets are exact.
+
+This completes M7 Task 3 (base collision dispatch + per-child identity) and the `CompoundChild.UserData`
+line begun at Task 1.
 
 ## Terrain collision: heightfield now, terrain-mesh in reserve (M6.5)
 

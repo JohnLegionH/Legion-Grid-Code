@@ -268,6 +268,7 @@ namespace OpenSim.Region.PhysicsModules.LegionJolt
             if (cmd.Length >= 2 && cmd[1] == "linktest") { JoltLinkTest(); return; }
             if (cmd.Length >= 2 && cmd[1] == "unlinktest") { JoltUnlinkTest(); return; }
             if (cmd.Length >= 2 && cmd[1] == "collidetest") { JoltCollideTest(); return; }
+            if (cmd.Length >= 2 && cmd[1] == "collidelinktest") { JoltCollideLinkTest(); return; }
 
             if (cmd.Length >= 2 && cmd[1] == "terraintest")
             {
@@ -647,6 +648,110 @@ namespace OpenSim.Region.PhysicsModules.LegionJolt
 
             _scene.DeleteSceneObject(box, false);
             _scene.DeleteSceneObject(plat, false);
+        }
+
+        // M7 Task 3 (landing 2) proof: per-child collision identity. Build a REAL scene linkset (root=link1 +
+        // two children link2/link3), make it physical (-> Jolt compound), subscribe + hook each link's actor
+        // (what a root collision script triggers via UpdatePhysicsSubscribedEvents), drop a box onto LINK 3,
+        // and confirm the module delivers that collision to LINK 3's actor (not the root). Because OpenSim's
+        // PhysicsCollision runs on the receiving part, llDetectedLinkNumber for that collision == 3.
+        private void JoltCollideLinkTest()
+        {
+            float tz = 25f;
+            try { tz = (float)_scene.Heightmap[128, 128]; } catch { }
+            var size = new Vector3(0.5f, 0.5f, 0.5f);
+            Vector3 rootPos = new Vector3(128f, 128f, tz + 0.30f);
+            SceneObjectGroup ls = RezTestPrim("box", rootPos, size);
+            SceneObjectGroup a = RezTestPrim("box", rootPos + new Vector3(0f, 0.7f, 0f), size);
+            SceneObjectGroup b = RezTestPrim("box", rootPos + new Vector3(0f, 1.4f, 0f), size);
+            ls.LinkToGroup(a);              // real scene link: root=1, a=link2, b=link3
+            ls.LinkToGroup(b);
+            ls.ScriptSetPhysicsStatus(true);   // physical linkset -> compound welded via child.link(root)
+            System.Threading.Thread.Sleep(1000);
+
+            SceneObjectPart link3 = ls.GetLinkNumPart(3);
+            if (ls.RootPart.PhysActor == null || link3 == null || ls.PrimCount < 3)
+            {
+                MainConsole.Instance.Output($"{LogHeader} collidelinktest: linkset setup failed (parts={ls.PrimCount}).");
+                try { _scene.DeleteSceneObject(ls, false); } catch { }
+                return;
+            }
+
+            UUID dropUUID = UUID.Zero;
+
+            // (a) EventManager capture: the DetectedObject.linkNumber OpenSim hands the script engine (what
+            //     Phlox's collision handler consumes via DetectParams.Populate). Register real collision flags
+            //     on the ROOT so OpenSim subscribes every linkset part + delivers via OnScriptColliderStart.
+            UUID fakeItem = UUID.Random();
+            ls.RootPart.SetScriptEvents(fakeItem, (ulong)(scriptEvents.collision_start | scriptEvents.collision | scriptEvents.collision_end));
+            var emLinks = new List<int>();
+            EventManager.ScriptColliding emHandler = (uint localID, ColliderArgs col) =>
+            {
+                lock (emLinks)
+                    foreach (DetectedObject d in col.Colliders)
+                        if (dropUUID != UUID.Zero && d.keyUUID == dropUUID) emLinks.Add(d.linkNumber);
+            };
+            _scene.EventManager.OnScriptColliderStart += emHandler;
+            _scene.EventManager.OnScriptColliding += emHandler;
+
+            // (b) REAL Phlox script on the ROOT: capture what llDetectedLinkNumber ACTUALLY returns (the full
+            //     Phlox VM path - the exact thing John's viewer script sees), via llSay -> OnChatFromWorld.
+            var scriptLinks = new List<int>();
+            EventManager.ChatFromWorldEvent chatHandler = (object sender, OSChatMessage m) =>
+            {
+                if (m?.Message != null && m.Message.StartsWith("COLLIDELINK="))
+                    if (int.TryParse(m.Message.Substring("COLLIDELINK=".Length), out int L)) lock (scriptLinks) scriptLinks.Add(L);
+            };
+            _scene.EventManager.OnChatFromWorld += chatHandler;
+
+            UUID owner = ls.RootPart.OwnerID;
+            string lsl = "default { collision_start(integer n) { llSay(0, \"COLLIDELINK=\" + (string)llDetectedLinkNumber(0)); } }";
+            bool scriptRezzed = false;
+            try
+            {
+                // Manual rez (bypass the CanCreateObjectInventory gate - no avatar is logged in headless).
+                var asset = new AssetBase(UUID.Random(), "collidelink-probe", (sbyte)AssetType.LSLText, owner.ToString())
+                { Data = System.Text.Encoding.ASCII.GetBytes(lsl) };
+                _scene.AssetService.Store(asset);
+                var taskItem = new TaskInventoryItem
+                {
+                    ItemID = UUID.Random(), AssetID = asset.FullID,
+                    ParentPartID = ls.RootPart.UUID, ParentID = ls.RootPart.UUID,
+                    Name = "collidelink-probe", Description = "",
+                    Type = (int)AssetType.LSLText, InvType = (int)InventoryType.LSL,
+                    OwnerID = owner, CreatorID = owner,
+                    BasePermissions = (uint)OpenMetaverse.PermissionMask.All, CurrentPermissions = (uint)OpenMetaverse.PermissionMask.All,
+                    EveryonePermissions = 0, NextPermissions = (uint)OpenMetaverse.PermissionMask.All, GroupPermissions = 0,
+                    GroupID = UUID.Zero, Flags = 0, CreationDate = 0, PermsGranter = UUID.Zero, PermsMask = 0,
+                };
+                ls.RootPart.Inventory.AddInventoryItem(taskItem, false);
+                scriptRezzed = ls.RootPart.Inventory.CreateScriptInstance(taskItem, 0, false, _scene.DefaultScriptEngine, 1);
+            }
+            catch (System.Exception ex) { MainConsole.Instance.Output($"{LogHeader} collidelinktest: manual script rez failed: {ex.Message}"); }
+            System.Threading.Thread.Sleep(2500);   // compile + start + settle
+
+            Vector3 c3 = link3.GetWorldPosition();
+            SceneObjectGroup drop = RezTestPrim("box", new Vector3(c3.X, c3.Y, c3.Z + 3.5f), size);
+            dropUUID = drop.RootPart.UUID;
+            drop.ScriptSetPhysicsStatus(true);
+            System.Threading.Thread.Sleep(4500);   // fall + strike link 3
+
+            _scene.EventManager.OnScriptColliderStart -= emHandler;
+            _scene.EventManager.OnScriptColliding -= emHandler;
+            _scene.EventManager.OnChatFromWorld -= chatHandler;
+            try { ls.RootPart.RemoveScriptEvents(fakeItem); } catch { }
+
+            string emVals, scVals;
+            lock (emLinks) emVals = string.Join(",", emLinks);
+            lock (scriptLinks) scVals = string.Join(",", scriptLinks);
+            MainConsole.Instance.Output($"{LogHeader} [collidelinktest] box struck link 3 ({link3.LocalId}). scriptRezzed={scriptRezzed}");
+            MainConsole.Instance.Output($"{LogHeader} [collidelinktest] EventManager DetectedObject.linkNumber=[{emVals}]  |  REAL script llDetectedLinkNumber=[{scVals}]  (want 3)");
+            bool emOk; lock (emLinks) emOk = emLinks.Contains(3);
+            bool scOk; lock (scriptLinks) scOk = scriptLinks.Contains(3);
+            MainConsole.Instance.Output($"{LogHeader} [collidelinktest] {((emOk && scOk) ? "PASS" : "CHECK")}: EventManager={(emOk ? "3" : "not-3")}, script={(scOk ? "3" : "not-3")}. {(emOk && !scOk ? "-> BREAK IS IN THE PHLOX VM (EventManager correct, script wrong)." : "")}");
+
+            _scene.DeleteSceneObject(drop, false);
+            _scene.DeleteSceneObject(ls, false);
         }
 
         // M7 Task 2 proof: build a physical linkset (root + 2 children), then UNLINK the way OpenSim does
@@ -2129,8 +2234,9 @@ namespace OpenSim.Region.PhysicsModules.LegionJolt
         // body) + End (separation). The "currently touching" set OpenSim wants = Begin|Persist this frame;
         // End is implicit (a pair that drops out of the set). A prim that touched last frame but not now
         // still needs one (empty) update so collision_end can fire - _collidedLastFrame drives that flush.
-        // Root-level for now: a linkset reports against its ROOT prim (compound body UserData = root LocalID);
-        // per-child identity (llDetectedLinkNumber for the struck child) is the next step.
+        // Per-child (landing 2): each contact names the STRUCK part on each side (ChildUserData - the
+        // compound child hit, resolved from the contact sub-shape), so a linkset reports against the specific
+        // child and llDetectedLinkNumber returns that child's link (see the AddCollider block below).
         private void DispatchContacts(int contactCount)
         {
             _collisionAccum.Clear();
@@ -2141,13 +2247,18 @@ namespace OpenSim.Region.PhysicsModules.LegionJolt
                 if (c.Phase == ContactPhase.End)
                     continue;   // OpenSim derives "ended" from absence in the current set
 
+                // Per-child identity (M7 Task 3 landing 2): dispatch to the STRUCK part on each side
+                // (ChildUserData - the compound child hit, or the body itself for a single prim), and name
+                // the OTHER side's struck part as the collider. Delivering to child N's PhysicsActor makes
+                // OpenSim run child N's PhysicsCollision, so llDetectedLinkNumber == N (and it propagates to
+                // the root script - every linkset part is subscribed via the root's aggregated events).
                 // Jolt's normal points A -> B; give each side the surface normal pointing back at it.
                 // ContactReport carries System.Numerics vectors (SVector3); OpenSim's ContactPoint is OMV.
                 Vector3 pt = new Vector3(c.Point.X, c.Point.Y, c.Point.Z);
-                if (IsSubscribedPrim(c.UserDataA))
-                    AccumFor(c.UserDataA).AddCollider(c.UserDataB, new ContactPoint(pt, new Vector3(c.Normal.X, c.Normal.Y, c.Normal.Z), 0f));
-                if (IsSubscribedPrim(c.UserDataB))
-                    AccumFor(c.UserDataB).AddCollider(c.UserDataA, new ContactPoint(pt, new Vector3(-c.Normal.X, -c.Normal.Y, -c.Normal.Z), 0f));
+                if (IsSubscribedPrim(c.ChildUserDataA))
+                    AccumFor(c.ChildUserDataA).AddCollider(c.ChildUserDataB, new ContactPoint(pt, new Vector3(c.Normal.X, c.Normal.Y, c.Normal.Z), 0f));
+                if (IsSubscribedPrim(c.ChildUserDataB))
+                    AccumFor(c.ChildUserDataB).AddCollider(c.ChildUserDataA, new ContactPoint(pt, new Vector3(-c.Normal.X, -c.Normal.Y, -c.Normal.Z), 0f));
             }
 
             // Deliver this frame's sets.
