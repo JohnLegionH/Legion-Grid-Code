@@ -65,6 +65,9 @@
     <ProjectReference Include="..\..\Framework\OpenSim.Region.Framework.csproj" />
     <ProjectReference Include="..\SharedBase\OpenSim.Region.PhysicsModules.SharedBase.csproj" />
     <ProjectReference Include="..\..\..\Addons\LegionPhysics\Legion.Physics\Legion.Physics.csproj" />
+    <!-- M8: the backend-agnostic Halcyon vehicle controller (extracted from BulletSim's
+         LegionVehicleDynamics; one source of truth for vehicle feel). Copies to the shared bin. -->
+    <ProjectReference Include="..\..\..\Addons\LegionPhysics\Legion.Vehicles\Legion.Vehicles.csproj" />
   </ItemGroup>
 
   <!-- Jolt binding + native. The backend (Legion.Physics) references JoltPhysicsSharp transitively,
@@ -98,6 +101,7 @@
   <ItemGroup>
     <Compile Include="LegionJoltScene.cs" />
     <Compile Include="JoltPrim.cs" />
+    <Compile Include="JoltVehicleBody.cs" />
     <Compile Include="JoltCharacter.cs" />
     <Compile Include="Properties\AssemblyInfo.cs" />
   </ItemGroup>

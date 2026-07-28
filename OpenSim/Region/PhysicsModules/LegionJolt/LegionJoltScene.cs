@@ -66,6 +66,32 @@ namespace OpenSim.Region.PhysicsModules.LegionJolt
         private int _regionSizeY;
         private Scene _scene;
 
+        // Vehicle-controller world inputs (M8): the region water plane, the last cooked terrain
+        // sample field (for height-at-XY without a per-frame raycast), the world gravity handed to
+        // the backend, and the last Simulate dt (BulletSim's LastTimeStep, used by AddForce).
+        internal float WaterLevel { get; private set; }
+        internal SVector3 DefaultGravity { get; private set; } = new SVector3(0f, 0f, -9.80665f);
+        internal float LastTimeStep = 0.0909f;
+        private float[] _terrainField;   // the (N+1)-square field SetTerrain cooked (row = y * _terrainFieldM)
+        private int _terrainFieldM;
+
+        // Bilinear terrain height at region XY, from the same samples the collision heightfield was
+        // cooked from (1 m spacing, origin at the region corner). Clamps outside the field.
+        internal float TerrainHeightAt(float x, float y)
+        {
+            float[] f = _terrainField;
+            int m = _terrainFieldM;
+            if (f == null || m < 2)
+                return 0f;
+            x = Math.Clamp(x, 0f, m - 1.001f);
+            y = Math.Clamp(y, 0f, m - 1.001f);
+            int x0 = (int)x, y0 = (int)y;
+            float fx = x - x0, fy = y - y0;
+            float h00 = f[y0 * m + x0], h10 = f[y0 * m + x0 + 1];
+            float h01 = f[(y0 + 1) * m + x0], h11 = f[(y0 + 1) * m + x0 + 1];
+            return h00 * (1 - fx) * (1 - fy) + h10 * fx * (1 - fy) + h01 * (1 - fx) * fy + h11 * fx * fy;
+        }
+
         // M6.2 Task 2: radial-cone hill parameters (set by `jolt terrainhill`) so `jolt hilltest` can
         // print hand-computable expected Z. z = base + amp*max(0, 1 - dist((x,y),(cx,cy))/R).
         private float _hillCx, _hillCy, _hillBase, _hillAmp, _hillR;
@@ -206,6 +232,7 @@ namespace OpenSim.Region.PhysicsModules.LegionJolt
 
             _backend = new LegionJoltBackend();
             _backend.Initialize(settings);
+            DefaultGravity = settings.Gravity;   // the vehicle controller applies this manually
 
             EngineType = Name;                              // osGetPhysicsEngineType
             EngineName = $"{_backend.Name} {_backend.Version}"; // osGetPhysicsEngineName
@@ -250,7 +277,7 @@ namespace OpenSim.Region.PhysicsModules.LegionJolt
             {
                 _consoleRegistered = true;
                 MainConsole.Instance.Commands.AddCommand("Physics", false, "jolt",
-                    "jolt linktest | unlinktest | collidetest | terraintest | terrainslope | terrainhill | hilltest | probe <x> <y> | rezprims | rayprims | rezmesh | rezmeshn <count> | raymesh | droptest | dropmesh | dropstatus | avatarstatus | charframe [secs] | sitstatus | sittest | unsit | sittarget | sensortest | raytest | heights <x> <y> | clearprims",
+                    "jolt linktest | unlinktest | collidetest | boattest | terraintest | terrainslope | terrainhill | hilltest | probe <x> <y> | rezprims | rayprims | rezmesh | rezmeshn <count> | raymesh | droptest | dropmesh | dropstatus | avatarstatus | charframe [secs] | sitstatus | sittest | unsit | sittarget | sensortest | raytest | heights <x> <y> | clearprims",
                     "Legion Jolt proofs (M6.2 terrain / M6.3 prims): raycast the cooked collision surfaces and report hits.",
                     HandleJoltConsole);
             }
@@ -269,6 +296,7 @@ namespace OpenSim.Region.PhysicsModules.LegionJolt
             if (cmd.Length >= 2 && cmd[1] == "unlinktest") { JoltUnlinkTest(); return; }
             if (cmd.Length >= 2 && cmd[1] == "collidetest") { JoltCollideTest(); return; }
             if (cmd.Length >= 2 && cmd[1] == "collidelinktest") { JoltCollideLinkTest(); return; }
+            if (cmd.Length >= 2 && cmd[1] == "boattest") { JoltBoatTest(); return; }
 
             if (cmd.Length >= 2 && cmd[1] == "terraintest")
             {
@@ -554,7 +582,7 @@ namespace OpenSim.Region.PhysicsModules.LegionJolt
                 return;
             }
 
-            MainConsole.Instance.Output("Usage: jolt linktest | unlinktest | collidetest | terraintest | terrainslope | terrainhill | hilltest | probe <x> <y> | rezprims | rayprims | rezmesh | rezmeshn <count> | raymesh | droptest | dropmesh | dropstatus | avatarstatus | charframe [secs] | sitstatus | sittest | unsit | sittarget | sensortest | raytest | heights <x> <y> | clearprims");
+            MainConsole.Instance.Output("Usage: jolt linktest | unlinktest | collidetest | boattest | terraintest | terrainslope | terrainhill | hilltest | probe <x> <y> | rezprims | rayprims | rezmesh | rezmeshn <count> | raymesh | droptest | dropmesh | dropstatus | avatarstatus | charframe [secs] | sitstatus | sittest | unsit | sittarget | sensortest | raytest | heights <x> <y> | clearprims");
         }
 
         // M7 Task 1 proof: rez a root + 2 children at offsets, make the root physical, then run the OpenSim
@@ -648,6 +676,93 @@ namespace OpenSim.Region.PhysicsModules.LegionJolt
 
             _scene.DeleteSceneObject(box, false);
             _scene.DeleteSceneObject(plat, false);
+        }
+
+        // M8 Task 2 slice (a) proof: a physical prim becomes a VEHICLE_TYPE_BOAT and a held linear
+        // motor drives it forward - proving the controller -> Jolt force path end to end (params ->
+        // controller, per-frame Step BEFORE the physics step, velocity changes through the backend).
+        // The motor is re-set every ~0.5 s exactly like a boat script holding forward (the Halcyon
+        // boat preset's 1 s decay means a single set dies away - re-assertion is the real usage).
+        // PASS = forward speed builds toward the motor target. Hover/attractor/steering behaviour is
+        // printed as INFO for the next slices, not asserted here.
+        private void JoltBoatTest()
+        {
+            if (_scene == null) { MainConsole.Instance.Output($"{LogHeader} no scene."); return; }
+
+            // Find open water: grid-scan the terrain field for the deepest spot comfortably inside
+            // the region edges (candidate-spot guessing only found this region's central plateau).
+            float water = WaterLevel;
+            float bx = 128f, by = 128f, bestDepth = float.MinValue;
+            for (int gy = 24; gy <= _regionSizeY - 24; gy += 8)
+            {
+                for (int gx = 24; gx <= _regionSizeX - 24; gx += 8)
+                {
+                    float depth = water - TerrainHeightAt(gx, gy);
+                    if (depth > bestDepth) { bestDepth = depth; bx = gx; by = gy; }
+                }
+            }
+            // This scratch region can be a flat plateau ABOVE the water plane (no open water at
+            // all). In that case cook a PHYSICS-ONLY basin - lower a 48 m patch of the collision
+            // terrain to 6 m below water around the test spot, run, restore. The scene heightmap is
+            // untouched (no taint -> the terrain tick won't re-push it mid-test).
+            float[] restoreHm = null;
+            if (bestDepth < 2f)
+            {
+                bx = 128f; by = 128f;
+                float[] hm = _scene.Heightmap.GetFloatsSerialised();
+                restoreHm = (float[])hm.Clone();
+                for (int gy = (int)by - 24; gy <= (int)by + 24; gy++)
+                    for (int gx = (int)bx - 24; gx <= (int)bx + 24; gx++)
+                        if (gx >= 0 && gx < _regionSizeX && gy >= 0 && gy < _regionSizeY)
+                            hm[gy * _regionSizeX + gx] = water - 6f;
+                SetTerrain(hm);
+                MainConsole.Instance.Output($"{LogHeader} [boattest] no open water in this region (deepest spot {bestDepth:0.0} m) - cooked a physics-only 48 m basin at ({bx:0},{by:0}), terrain there now {TerrainHeightAt(bx, by):0.00}, restored after the test.");
+            }
+
+            SceneObjectGroup boat = RezTestPrim("box", new Vector3(bx, by, water + 0.4f), new Vector3(2f, 1f, 0.5f));
+            boat.ScriptSetPhysicsStatus(true);
+            PhysicsActor pa = boat.RootPart.PhysActor;
+            if (pa == null) { MainConsole.Instance.Output($"{LogHeader} boattest: boat has no PhysActor."); _scene.DeleteSceneObject(boat, false); return; }
+
+            uint id = boat.RootPart.LocalId;
+            pa.VehicleType = (int)Vehicle.TYPE_BOAT;
+            MainConsole.Instance.Output($"{LogHeader} [boattest] boat id={id} at ({bx:0},{by:0}) water={water:0.00} terrain={TerrainHeightAt(bx, by):0.00} mass={pa.Mass:0.00} type={pa.VehicleType} (expect 3)");
+
+            var motor = new Vector3(4f, 0f, 0f);   // hold forward at 4 m/s (local +X)
+            MainConsole.Instance.Output($"{LogHeader} [boattest] holding LINEAR_MOTOR_DIRECTION={motor} (re-set every 0.5 s, like a driver holding forward)");
+            MainConsole.Instance.Output($"     t   |  fwdSpeed |   speedXY |  z-water  |  tiltDeg");
+
+            float first = float.NaN, last = float.NaN;
+            JoltPrim jp;
+            lock (_prims) _prims.TryGetValue(id, out jp);
+
+            for (int i = 0; i <= 8; i++)
+            {
+                pa.VehicleVectorParam((int)Vehicle.LINEAR_MOTOR_DIRECTION, motor);
+                System.Threading.Thread.Sleep(500);
+
+                if (jp == null || !_backend.TryGetBodyState(jp.BodyHandle, out BodyState st))
+                { MainConsole.Instance.Output($"  {i * 0.5f,4:0.0}s | (no body state)"); continue; }
+
+                // Forward speed = velocity projected on the body's local +X in world.
+                var fwd = SVector3.Transform(new SVector3(1f, 0f, 0f), st.Orientation);
+                float fwdSpeed = st.LinearVelocity.X * fwd.X + st.LinearVelocity.Y * fwd.Y + st.LinearVelocity.Z * fwd.Z;
+                float speedXY = (float)Math.Sqrt(st.LinearVelocity.X * st.LinearVelocity.X + st.LinearVelocity.Y * st.LinearVelocity.Y);
+                var up = SVector3.Transform(new SVector3(0f, 0f, 1f), st.Orientation);
+                float tilt = (float)(Math.Acos(Math.Clamp(up.Z, -1f, 1f)) * 180.0 / Math.PI);
+
+                if (i == 1) first = fwdSpeed;
+                last = fwdSpeed;
+                MainConsole.Instance.Output($"  {i * 0.5f,4:0.0}s | {fwdSpeed,9:0.000} | {speedXY,9:0.000} | {st.Position.Z - water,9:0.000} | {tilt,8:0.0}");
+            }
+
+            bool pass = last > 1.5f && (float.IsNaN(first) || last >= first - 0.25f);
+            MainConsole.Instance.Output($"{LogHeader} [boattest] {(pass ? "PASS" : "FAIL")}: boat under a held linear motor reached {last:0.00} m/s forward (target 4). " +
+                "z-water and tiltDeg columns are INFO for the hover/attractor slices.");
+
+            _scene.DeleteSceneObject(boat, false);
+            if (restoreHm != null)
+                SetTerrain(restoreHm);   // put the real collision terrain back
         }
 
         // M7 Task 3 (landing 2) proof: per-child collision identity. Build a REAL scene linkset (root=link1 +
@@ -2083,6 +2198,43 @@ namespace OpenSim.Region.PhysicsModules.LegionJolt
         // Simulate. link()/unlink() add to this instead of rebuilding inline (which hung the boot-load).
         private readonly HashSet<JoltPrim> _dirtyLinksets = new HashSet<JoltPrim>();
 
+        // ---------------------------------------------------------------------
+        // Vehicles (M8): active vehicle prims, driven per-frame from Simulate BEFORE the physics
+        // step (the Jolt equivalent of BulletSim's BeforeStep event). JoltPrim registers itself when
+        // its controller's type is set and unregisters on TYPE_NONE/destroy.
+        // ---------------------------------------------------------------------
+        private readonly HashSet<JoltPrim> _vehicles = new HashSet<JoltPrim>();
+
+        internal void RegisterVehicle(JoltPrim prim)
+        {
+            lock (_vehicles) _vehicles.Add(prim);
+        }
+
+        internal void UnregisterVehicle(JoltPrim prim)
+        {
+            lock (_vehicles) _vehicles.Remove(prim);
+        }
+
+        private void StepVehicles(float timeStep)
+        {
+            JoltPrim[] vehicles;
+            lock (_vehicles)
+            {
+                if (_vehicles.Count == 0) return;
+                vehicles = new JoltPrim[_vehicles.Count];
+                _vehicles.CopyTo(vehicles);
+            }
+            foreach (JoltPrim v in vehicles)
+            {
+                try { v.StepVehicle(timeStep); }
+                catch (Exception e)
+                {
+                    // Never let one vehicle's math wedge the heartbeat.
+                    m_log.Error($"{LogHeader} vehicle step EXCEPTION for prim {v.LocalID}: {e}");
+                }
+            }
+        }
+
         internal void MarkLinksetDirty(JoltPrim root)
         {
             lock (_dirtyLinksets) _dirtyLinksets.Add(root);
@@ -2116,6 +2268,11 @@ namespace OpenSim.Region.PhysicsModules.LegionJolt
             // coalesces a whole linkset's worth of child-links into a single rebuild - the boot-load of a
             // persisted physical linkset used to hang because every child's link() churned the live root.
             DrainDirtyLinksets();
+
+            // M8: run each active vehicle's Halcyon controller BEFORE the physics step, so its
+            // velocity changes/forces/torques are consumed by THIS step (BulletSim's BeforeStep model).
+            LastTimeStep = timeStep;
+            StepVehicles(timeStep);
 
             // ONE backend Step per frame at OpenSim's ~11 fps cadence (Scene.FrameTime 0.0909 s). The
             // character is stepped exactly once per frame - the known-good path (M6.5 Task 1: stood + ran
@@ -2338,6 +2495,11 @@ namespace OpenSim.Region.PhysicsModules.LegionJolt
             ShapeId newShape = _backend.CreateHeightFieldShape(field, m, m, new SVector3(1f, 1f, 1f));
             _backend.SetTerrain(newShape, SVector3.Zero);
 
+            // Retain the cooked samples for TerrainHeightAt (vehicle hover/ground inputs) - the
+            // exact field the collision surface was built from, so heights agree with contacts.
+            _terrainField = field;
+            _terrainFieldM = m;
+
             // Release the previous terrain shape: SetTerrain already replaced its body (dropping that
             // native ref), so releasing our handle frees it.
             if (_terrainShape.IsValid)
@@ -2353,6 +2515,7 @@ namespace OpenSim.Region.PhysicsModules.LegionJolt
 
         public override void SetWaterLevel(float baseheight)
         {
+            WaterLevel = baseheight;   // vehicle hover (HoverWaterOnly) reads this
             _backend?.SetWaterHeight(baseheight);
         }
 

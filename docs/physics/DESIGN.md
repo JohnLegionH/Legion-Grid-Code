@@ -644,6 +644,40 @@ hooks were no-ops in `JoltPrim`.
 This completes M7 Task 3 (base collision dispatch + per-child identity) and the `CompoundChild.UserData`
 line begun at Task 1.
 
+## M8 Task 2 — vehicles: the extracted Halcyon controller, first boat slice
+
+Decision (John): **extract, don't replicate**. Vehicle FEEL is fragile and math-defined; a re-derived
+controller could drift in ways indistinguishable from real bugs. So the boat-relevant force terms of
+BulletSim's `LegionVehicleDynamics.cs` moved **verbatim** (same computations, same order, same constants)
+into a NEW backend-agnostic assembly, and BulletSim's copy stays **byte-for-byte untouched** as the A/B
+feel reference (the M6.8/M7 parity pattern).
+
+- **`Legion.Vehicles`** (`OpenSim/Addons/LegionPhysics/Legion.Vehicles/`, links ONLY OpenMetaverseTypes —
+  no OpenSim, no engine): `LegionVehicleController` (the Halcyon math; the seam-substitution table is in
+  its header), `IVehicleBody` (the neutral seam: read pos/orient/linVel/angVel/mass/inertia/gravity/
+  water/terrain; write velocity-change/AddForce/AddTorque/KeepAwake), plus verbatim copies of the
+  properties/data/limits types and the LSL wire-code enum. Portable to Tranquillity as-is.
+- **Deferred slices** (calls removed from `Step`, everything else in place): linear/angular deflection,
+  sled, banking-to-yaw (the banking-turn motor block is retained and inert at `BankingDirection`=0),
+  mouselook, wind.
+- **Jolt wiring**: `JoltVehicleBody` implements the seam (per-frame snapshot with BulletSim's
+  read-back-what-you-wrote velocity semantics); `JoltPrim` implements the `Vehicle*` params + wired
+  `AddForce`/`AddAngularForce` (non-push force is force-per-second, BulletSim-style); the controller runs
+  from `Simulate` BEFORE the step (BulletSim's `BeforeStep` model). Active vehicle body setup mirrors
+  `SetPhysicalParameters`: friction/restitution/damping 0, **engine gravity OFF** (controller applies
+  gravity manually), **sleeping disabled** (new backend `SetBodyAllowSleeping`; inertia for the vertical
+  attractor via new `GetBodyInertiaDiagonal`). Params re-assert after every body recreate (weld/reshape).
+- **Inputs**: region water plane cached at `SetWaterLevel`; terrain height bilinear from the SAME (N+1)
+  field the collision heightfield was cooked from (`TerrainHeightAt`).
+- **Proven (slice a — linear motor)**: `jolt boattest` rezzes a physical box over water (this scratch
+  region is a flat 25 m plateau above 20 m water, so the test cooks a temporary physics-only basin),
+  makes it `VEHICLE_TYPE_BOAT`, holds `LINEAR_MOTOR_DIRECTION=<4,0,0>` re-set every 0.5 s: forward speed
+  ramps 0.11→0.39→0.88→1.63→2.28→2.90→3.32→3.57→**3.75 m/s** asymptoting to the 4 m/s target (the
+  Halcyon exponential ramp), **z holds water+0.45** the whole run (hover already balancing gravity) and
+  **tilt stays 0.0°** (attractor holding level). PASS.
+- Next slices (prove in order, viewer + console): (b) hover at water, (c) vertical attractor self-right,
+  (d) angular motor steering; then the deferred terms; then BulletSim A/B feel comparison.
+
 ## Terrain collision: heightfield now, terrain-mesh in reserve (M6.5)
 
 We collide against the region terrain with a Jolt **`HeightFieldShape`** (cooked from the region

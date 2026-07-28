@@ -1,0 +1,42 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    Legion.Vehicles - the backend-agnostic Halcyon vehicle controller (M8).
+
+    The vehicle math is EXTRACTED VERBATIM from BulletSim's LegionVehicleDynamics.cs (itself the
+    faithful Halcyon port) so Legion (BulletSim + Jolt) and Tranquillity share ONE source of truth
+    for vehicle FEEL. The controller reads/writes physics ONLY through IVehicleBody - it links
+    NEITHER OpenSim NOR any physics engine. Only OpenMetaverseTypes (the math types the Halcyon
+    port is written in - Vector3/Quaternion/Utils) is referenced, resolved from the built bin.
+
+    Csproj is hand-maintained (Legion convention): EnableDefaultItems is OFF, every .cs needs an
+    explicit <Compile Include>. Do NOT run runprebuild against this tree.
+  -->
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <OutputType>Library</OutputType>
+    <AssemblyName>Legion.Vehicles</AssemblyName>
+    <RootNamespace>Legion.Vehicles</RootNamespace>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <EnableDefaultItems>false</EnableDefaultItems>
+    <Deterministic>true</Deterministic>
+    <GenerateDocumentationFile>false</GenerateDocumentationFile>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Reference Include="OpenMetaverseTypes">
+      <HintPath>..\..\..\..\bin\OpenMetaverseTypes.dll</HintPath>
+      <Private>False</Private>
+    </Reference>
+  </ItemGroup>
+
+  <ItemGroup>
+    <Compile Include="IVehicleBody.cs" />
+    <Compile Include="VehicleParamCodes.cs" />
+    <Compile Include="LegionVehicleProperties.cs" />
+    <Compile Include="LegionVehicleData.cs" />
+    <Compile Include="LegionVehicleLimits.cs" />
+    <Compile Include="LegionVehicleController.cs" />
+  </ItemGroup>
+
+</Project>
