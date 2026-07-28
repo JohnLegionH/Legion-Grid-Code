@@ -668,6 +668,21 @@ further problems, the escape hatch is to bake a `MeshShape` (or per-region tiled
 fast bodies. Kept in reserve, not implemented: the heightfield + `CollisionSteps=6` is cheaper and proven
 for the current (gravity-driven) workload.
 
+## Known issues (scoped for a focused fix, not part of M7)
+
+- **Raising terrain under a standing avatar BURIES it (does not lift it).** Editing terrain UP (terrain
+  fill/raise) beneath a standing physical avatar leaves the avatar UNDER the new surface at its old Z,
+  instead of pushing it up to ride the raised ground. Observed live: the character could not fly out
+  (terrain now above it) nor escape (no TP); a viewer restart recovered. Likely cause: the Jolt
+  `CharacterVirtual`'s ground detection does not re-resolve against a LIVE heightfield swap - `SetTerrain`
+  replaces the terrain shape/body, but the character keeps its old position/ground state and is not
+  re-grounded onto the new surface. Diagnostic split for the focused look: (1) does a rising PRIM platform
+  under the avatar lift it correctly? If yes but rising terrain does not, the bug is specifically the
+  heightfield-update path not re-grounding the character (not general character-vs-moving-surface). (2)
+  does the character re-detect ground when the terrain shape changes mid-session? (3) safety net: after a
+  `SetTerrain`, if a character ends up below the new surface at its XY, lift it to ground (un-bury) rather
+  than trapping it. Scope: `LegionJoltScene.SetTerrain` + `JoltCharacter` grounding; no M7 dependency.
+
 ## Build notes
 
 - New `.cs` files need explicit `<Compile Include>` entries — `EnableDefaultItems`
