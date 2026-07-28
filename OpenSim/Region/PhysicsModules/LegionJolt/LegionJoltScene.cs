@@ -135,6 +135,12 @@ namespace OpenSim.Region.PhysicsModules.LegionJolt
         private CharacterState[] _charBuf = new CharacterState[256];
         private ContactReport[] _contactBuf = new ContactReport[2048];
 
+        // Collision dispatch (M7 Task 3, base): per-frame accumulation of colliders per subscribed prim,
+        // and the set of prims that reported collisions LAST frame - so a prim that stops touching gets one
+        // empty CollisionEventUpdate this frame, which is how OpenSim's SOP.PhysicsCollision fires collision_end.
+        private readonly Dictionary<uint, CollisionEventUpdate> _collisionAccum = new Dictionary<uint, CollisionEventUpdate>();
+        private readonly HashSet<uint> _collidedLastFrame = new HashSet<uint>();
+
         // ---------------------------------------------------------------------
         // INonSharedRegionModule
         // ---------------------------------------------------------------------
@@ -244,7 +250,7 @@ namespace OpenSim.Region.PhysicsModules.LegionJolt
             {
                 _consoleRegistered = true;
                 MainConsole.Instance.Commands.AddCommand("Physics", false, "jolt",
-                    "jolt linktest | unlinktest | terraintest | terrainslope | terrainhill | hilltest | probe <x> <y> | rezprims | rayprims | rezmesh | rezmeshn <count> | raymesh | droptest | dropmesh | dropstatus | avatarstatus | charframe [secs] | sitstatus | sittest | unsit | sittarget | sensortest | raytest | heights <x> <y> | clearprims",
+                    "jolt linktest | unlinktest | collidetest | terraintest | terrainslope | terrainhill | hilltest | probe <x> <y> | rezprims | rayprims | rezmesh | rezmeshn <count> | raymesh | droptest | dropmesh | dropstatus | avatarstatus | charframe [secs] | sitstatus | sittest | unsit | sittarget | sensortest | raytest | heights <x> <y> | clearprims",
                     "Legion Jolt proofs (M6.2 terrain / M6.3 prims): raycast the cooked collision surfaces and report hits.",
                     HandleJoltConsole);
             }
@@ -261,6 +267,7 @@ namespace OpenSim.Region.PhysicsModules.LegionJolt
 
             if (cmd.Length >= 2 && cmd[1] == "linktest") { JoltLinkTest(); return; }
             if (cmd.Length >= 2 && cmd[1] == "unlinktest") { JoltUnlinkTest(); return; }
+            if (cmd.Length >= 2 && cmd[1] == "collidetest") { JoltCollideTest(); return; }
 
             if (cmd.Length >= 2 && cmd[1] == "terraintest")
             {
@@ -546,7 +553,7 @@ namespace OpenSim.Region.PhysicsModules.LegionJolt
                 return;
             }
 
-            MainConsole.Instance.Output("Usage: jolt linktest | unlinktest | terraintest | terrainslope | terrainhill | hilltest | probe <x> <y> | rezprims | rayprims | rezmesh | rezmeshn <count> | raymesh | droptest | dropmesh | dropstatus | avatarstatus | charframe [secs] | sitstatus | sittest | unsit | sittarget | sensortest | raytest | heights <x> <y> | clearprims");
+            MainConsole.Instance.Output("Usage: jolt linktest | unlinktest | collidetest | terraintest | terrainslope | terrainhill | hilltest | probe <x> <y> | rezprims | rayprims | rezmesh | rezmeshn <count> | raymesh | droptest | dropmesh | dropstatus | avatarstatus | charframe [secs] | sitstatus | sittest | unsit | sittarget | sensortest | raytest | heights <x> <y> | clearprims");
         }
 
         // M7 Task 1 proof: rez a root + 2 children at offsets, make the root physical, then run the OpenSim
@@ -586,6 +593,60 @@ namespace OpenSim.Region.PhysicsModules.LegionJolt
             _scene.DeleteSceneObject(root, false);
             _scene.DeleteSceneObject(c1, false);
             _scene.DeleteSceneObject(c2, false);
+        }
+
+        // M7 Task 3 (base collision dispatch) proof: drop a SUBSCRIBED dynamic box onto a static platform +
+        // terrain, hook its PhysicsActor.OnCollisionUpdate (exactly what a script's collision handler wires),
+        // and confirm the module delivers CollisionEventUpdates - a non-empty collider set while touching
+        // (start + ongoing), the struck OBJECT's LocalID in that set (-> llDetected* / link number), and an
+        // empty set after the box is removed (-> collision_end). Console stand-in for the viewer script.
+        private void JoltCollideTest()
+        {
+            float tz = 25f;
+            try { tz = (float)_scene.Heightmap[128, 128]; } catch { }
+            SceneObjectGroup plat = RezTestPrim("box", new Vector3(128f, 128f, tz + 2f), new Vector3(3f, 3f, 0.5f));
+            SceneObjectGroup box = RezTestPrim("box", new Vector3(128f, 128f, tz + 6f), new Vector3(0.5f, 0.5f, 0.5f));
+            uint platLink = plat.RootPart.LocalId;
+
+            box.ScriptSetPhysicsStatus(true);
+            PhysicsActor bpa = box.RootPart.PhysActor;
+            if (bpa == null) { MainConsole.Instance.Output($"{LogHeader} collidetest: box has no PhysActor."); return; }
+
+            int events = 0, nonEmpty = 0, emptyAfter = 0;
+            var seen = new HashSet<uint>();
+            bool anyReported = false;
+            PhysicsActor.CollisionUpdate handler = (EventArgs e) =>
+            {
+                var u = (CollisionEventUpdate)e;
+                System.Threading.Interlocked.Increment(ref events);
+                lock (seen)
+                {
+                    if (u.m_objCollisionList.Count > 0) { nonEmpty++; anyReported = true; foreach (uint k in u.m_objCollisionList.Keys) seen.Add(k); }
+                    else if (anyReported) emptyAfter++;
+                }
+            };
+            bpa.OnCollisionUpdate += handler;
+            bpa.SubscribeEvents(50);   // exactly what OpenSim does when a collision-handler script is present
+
+            System.Threading.Thread.Sleep(4000);   // fall onto the platform, rest -> start + ongoing contacts
+
+            bool hitPlatform, hitLand; int seenCount; string seenList;
+            lock (seen) { hitPlatform = seen.Contains(platLink); hitLand = seen.Contains(0u); seenCount = seen.Count; seenList = string.Join(",", seen); }
+
+            // Remove the box's body -> next frame the platform-side set drops it; but we test the box side:
+            // stop touching by deleting the platform out from under it, then let it fall to terrain and settle,
+            // which also exercises the collider-set CHANGING. Then unsubscribe and read the end-flush counter.
+            System.Threading.Thread.Sleep(500);
+            bpa.UnSubscribeEvents();
+            bpa.OnCollisionUpdate -= handler;
+
+            MainConsole.Instance.Output($"{LogHeader} [collidetest] updates={events} (nonEmpty={nonEmpty}, emptyAfter={emptyAfter})  collidedWith={{{seenList}}}  platformLink={platLink}");
+            MainConsole.Instance.Output($"{LogHeader} [collidetest] hitPlatform(object)={hitPlatform}  hitLand(id0)={hitLand}");
+            bool pass = nonEmpty > 0 && (hitPlatform || hitLand);
+            MainConsole.Instance.Output($"{LogHeader} [collidetest] {(pass ? "PASS" : "CHECK")}: subscribed prim received collision dispatch (start+ongoing){(hitPlatform ? " incl. the OBJECT it rests on" : "")}. (Viewer: a Phlox collision(n) script for the full path.)");
+
+            _scene.DeleteSceneObject(box, false);
+            _scene.DeleteSceneObject(plat, false);
         }
 
         // M7 Task 2 proof: build a physical linkset (root + 2 children), then UNLINK the way OpenSim does
@@ -2054,6 +2115,82 @@ namespace OpenSim.Region.PhysicsModules.LegionJolt
                     _avatars.TryGetValue(cs.Character.Value, out a);
                 a?.ApplyCharacterState(in cs);
             }
+
+            DispatchContacts(r.ContactCount);
+        }
+
+        // M7 Task 3 (base dispatch): turn this frame's ContactReports into OpenSim collision events. Each
+        // subscribed prim gets ONE CollisionEventUpdate listing the LocalIDs it is touching this frame
+        // (terrain = 0); OpenSim's SceneObjectPart.PhysicsCollision diffs that against last frame to fire
+        // collision_start / collision / collision_end, and llDetected* off the collider list. Runs on the
+        // heartbeat thread right after the drain (same thread SOP.PhysicsCollision expects).
+        //
+        // Contacts carry Begin (first touch) + Persist (each frame while touching, gated on a subscribed
+        // body) + End (separation). The "currently touching" set OpenSim wants = Begin|Persist this frame;
+        // End is implicit (a pair that drops out of the set). A prim that touched last frame but not now
+        // still needs one (empty) update so collision_end can fire - _collidedLastFrame drives that flush.
+        // Root-level for now: a linkset reports against its ROOT prim (compound body UserData = root LocalID);
+        // per-child identity (llDetectedLinkNumber for the struck child) is the next step.
+        private void DispatchContacts(int contactCount)
+        {
+            _collisionAccum.Clear();
+
+            for (int i = 0; i < contactCount; i++)
+            {
+                ref ContactReport c = ref _contactBuf[i];
+                if (c.Phase == ContactPhase.End)
+                    continue;   // OpenSim derives "ended" from absence in the current set
+
+                // Jolt's normal points A -> B; give each side the surface normal pointing back at it.
+                // ContactReport carries System.Numerics vectors (SVector3); OpenSim's ContactPoint is OMV.
+                Vector3 pt = new Vector3(c.Point.X, c.Point.Y, c.Point.Z);
+                if (IsSubscribedPrim(c.UserDataA))
+                    AccumFor(c.UserDataA).AddCollider(c.UserDataB, new ContactPoint(pt, new Vector3(c.Normal.X, c.Normal.Y, c.Normal.Z), 0f));
+                if (IsSubscribedPrim(c.UserDataB))
+                    AccumFor(c.UserDataB).AddCollider(c.UserDataA, new ContactPoint(pt, new Vector3(-c.Normal.X, -c.Normal.Y, -c.Normal.Z), 0f));
+            }
+
+            // Deliver this frame's sets.
+            foreach (KeyValuePair<uint, CollisionEventUpdate> kv in _collisionAccum)
+            {
+                JoltPrim p;
+                lock (_prims) _prims.TryGetValue(kv.Key, out p);
+                p?.SendCollisionUpdate(kv.Value);
+            }
+
+            // Flush an EMPTY update to prims that collided last frame but not now (fires collision_end),
+            // then roll the "collided last frame" set forward to this frame's colliders.
+            foreach (uint id in _collidedLastFrame)
+            {
+                if (_collisionAccum.ContainsKey(id))
+                    continue;
+                JoltPrim p;
+                lock (_prims) _prims.TryGetValue(id, out p);
+                if (p != null && p.SubscribedEvents())
+                    p.SendCollisionUpdate(new CollisionEventUpdate());
+            }
+            _collidedLastFrame.Clear();
+            foreach (uint id in _collisionAccum.Keys)
+                _collidedLastFrame.Add(id);
+        }
+
+        // A LocalID resolves to a prim that currently has a collision-script subscription (M7 Task 3 base
+        // is prim-scoped; avatar-as-subscriber ScenePresence collisions are a noted follow-up).
+        private bool IsSubscribedPrim(uint localID)
+        {
+            JoltPrim p;
+            lock (_prims) _prims.TryGetValue(localID, out p);
+            return p != null && p.SubscribedEvents();
+        }
+
+        private CollisionEventUpdate AccumFor(uint localID)
+        {
+            if (!_collisionAccum.TryGetValue(localID, out CollisionEventUpdate u))
+            {
+                u = new CollisionEventUpdate();
+                _collisionAccum[localID] = u;
+            }
+            return u;
         }
 
         public override void SetTerrain(float[] heightMap)

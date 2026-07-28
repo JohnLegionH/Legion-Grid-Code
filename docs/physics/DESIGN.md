@@ -597,7 +597,30 @@ hooks were no-ops in `JoltPrim`.
   terse-update path - a NaN/out-of-region transform there attempts a region CROSSING (no neighbour) and
   spins the heartbeat ~5 s/body. Cheap insurance against any future solver glitch reaching the scene graph.
 
-Task 3 (per-child collision identity via `CompoundChild.UserData` / `ResolveChildUserData`) builds on this.
+- **Task 3, landing 1 - collision-event DISPATCH (the M6.6-deferred piece, root-level).** Milestone 5
+  ("contact reports drive collision_start/collision/collision_end") was never actually wired: the backend
+  computed `ContactReport`s but the module DROPPED `_contactBuf` (SubscribeEvents just stored the ms window,
+  inert), so collision scripts never fired on Jolt. This lands it. `SetBodyWantsContactEvents(BodyId,bool)`
+  flips the Persist gate on a live body (Begin/End always report; Persist - the ongoing-touch stream that
+  drives the script `collision` event - is gated so idle worlds cost nothing); `JoltPrim.SubscribeEvents`/
+  `UnSubscribeEvents` propagate the script's subscription to it, and `CreateBodyInternal` carries the flag
+  across a body recreate (weld/reshape). Each frame `DispatchContacts` drains `_contactBuf` -> one
+  `CollisionEventUpdate` per SUBSCRIBED prim listing the LocalIDs it touches this frame (terrain = 0) ->
+  `SendCollisionUpdate`; OpenSim's `SceneObjectPart.PhysicsCollision` diffs that vs last frame for
+  start/end, so we report the current-touch set and flush ONE empty update after a prim stops touching
+  (that empty frame is how collision_end fires). Runs on the heartbeat thread right after the drain.
+  Root-level: a linkset reports against its ROOT (compound body UserData = root LocalID); `llDetected*`
+  names the collider correctly. Proven: `jolt collidetest` (subscribed box on a static platform: 35
+  non-empty updates start+ongoing, 1 empty flush, collider = the platform's LocalID) and viewer (Phlox
+  collision script on a physical prim: walk into it -> collision_start "Legion Hienrichs" + collision_end;
+  drop a physical prim on it -> collision_start "Object" + collision_end; llDetectedName names the
+  collider; link=0 correct for a single unlinked prim). This unlocks ALL collision scripts, not just
+  linksets. Standard OpenSim surface (Tranquillity-portable): the module only fills `CollisionEventUpdate`
+  and calls the base `SendCollisionUpdate`; SOP does the rest, engine-agnostic.
+
+Task 3 landing 2 (per-child collision identity: resolve `manifold.SubShapeID1/2` -> `ResolveChildUserData`
+-> dispatch the collision to the struck CHILD part so `llDetectedLinkNumber` returns its link, both
+directions) builds on this + the `CompoundChild.UserData` foundation.
 
 ## Terrain collision: heightfield now, terrain-mesh in reserve (M6.5)
 

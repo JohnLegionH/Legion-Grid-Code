@@ -101,6 +101,7 @@ namespace OpenSim.Region.PhysicsModules.LegionJolt
             desc.LinearVelocity = ToS(_velocity);
             desc.AngularVelocity = ToS(_rotationalVelocity);
             desc.UserData = LocalID;                   // echoed back in every RayHit/contact/update - no lookup
+            desc.WantsContactEvents = _subscribedMs > 0;   // keep the Persist gate across a body recreate (weld/reshape)
             if (_isPhysical)
             {
                 desc.Layer = PhysicsLayer.Dynamic;
@@ -447,8 +448,18 @@ namespace OpenSim.Region.PhysicsModules.LegionJolt
         public override void SetVolumeDetect(int param) { }   // VolumeDetect / phantom-events: M6.6
 
         // Collision-event subscription: stored so M6.6 can gate Persist forwarding; inert now.
-        public override void SubscribeEvents(int ms) { _subscribedMs = ms; }
-        public override void UnSubscribeEvents() { _subscribedMs = 0; }
+        // A script with a collision handler -> OpenSim calls SubscribeEvents(50). Flip the LIVE body's
+        // Persist gate so the ongoing-touch stream (the script `collision` event) reaches the module drain.
+        public override void SubscribeEvents(int ms)
+        {
+            _subscribedMs = ms;
+            if (_body.IsValid) _backend.SetBodyWantsContactEvents(_body, ms > 0);
+        }
+        public override void UnSubscribeEvents()
+        {
+            _subscribedMs = 0;
+            if (_body.IsValid) _backend.SetBodyWantsContactEvents(_body, false);
+        }
         public override bool SubscribedEvents() => _subscribedMs > 0;
 
         // Vehicles - not applicable to a static prim (M7).

@@ -1121,6 +1121,15 @@ namespace Legion.Physics.Jolt
                 _bodyInterface.DeactivateBody(jid);
         }
 
+        // Toggle the Persist gate for a LIVE body (subscription happens after CreateBody). Begin/End always
+        // report; Persist (the ongoing-touch stream that drives the script `collision` event) is forwarded
+        // only when a body in the pair wants events. A prim's collision-script subscription flips this.
+        public void SetBodyWantsContactEvents(BodyId body, bool wants)
+        {
+            if (_bodies.TryGet(body.Value, out JoltBodyRecord rec))
+                rec.WantsContactEvents = wants;
+        }
+
         public bool TryGetBodyState(BodyId body, out BodyState state)
         {
             if (!_bodies.TryGet(body.Value, out JoltBodyRecord rec))

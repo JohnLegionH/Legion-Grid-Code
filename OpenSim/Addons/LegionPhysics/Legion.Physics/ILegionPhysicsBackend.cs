@@ -544,6 +544,10 @@ namespace Legion.Physics
         void ActivateBody(BodyId body);
         void DeactivateBody(BodyId body);
 
+        /// <summary>Toggle the Persist (ongoing-contact) gate for a live body - a prim's collision-script
+        /// subscription flips this so the script `collision` event streams while touching.</summary>
+        void SetBodyWantsContactEvents(BodyId body, bool wants);
+
         bool TryGetBodyState(BodyId body, out BodyState state);
 
         // -- characters ---------------------------------------------------
