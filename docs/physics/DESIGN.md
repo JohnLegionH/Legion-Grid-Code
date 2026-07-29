@@ -669,14 +669,36 @@ feel reference (the M6.8/M7 parity pattern).
   attractor via new `GetBodyInertiaDiagonal`). Params re-assert after every body recreate (weld/reshape).
 - **Inputs**: region water plane cached at `SetWaterLevel`; terrain height bilinear from the SAME (N+1)
   field the collision heightfield was cooked from (`TerrainHeightAt`).
-- **Proven (slice a — linear motor)**: `jolt boattest` rezzes a physical box over water (this scratch
-  region is a flat 25 m plateau above 20 m water, so the test cooks a temporary physics-only basin),
-  makes it `VEHICLE_TYPE_BOAT`, holds `LINEAR_MOTOR_DIRECTION=<4,0,0>` re-set every 0.5 s: forward speed
-  ramps 0.11→0.39→0.88→1.63→2.28→2.90→3.32→3.57→**3.75 m/s** asymptoting to the 4 m/s target (the
-  Halcyon exponential ramp), **z holds water+0.45** the whole run (hover already balancing gravity) and
-  **tilt stays 0.0°** (attractor holding level). PASS.
-- Next slices (prove in order, viewer + console): (b) hover at water, (c) vertical attractor self-right,
-  (d) angular motor steering; then the deferred terms; then BulletSim A/B feel comparison.
+- **Test harness**: `jolt boattest [linear|hover|attract|steer]`. This scratch region is a flat 25 m
+  plateau above the 20 m water plane (no open water), so each scenario cooks a temporary **physics-only**
+  48 m basin (lowers the collision terrain to water−6, scene heightmap untouched so the terrain tick
+  won't re-push it) and restores it after.
+- **Slice (a) — linear motor (LIVE-confirmed, John)**: held `LINEAR_MOTOR_DIRECTION=<4,0,0>` → forward
+  speed ramps 0.11→…→**3.75 m/s** asymptoting to the 4 m/s target (Halcyon exponential ramp), z holds
+  water+0.45, tilt 0.0°. John drove it fwd/back seated. (Earlier "didn't move" was a missing
+  `llSitTarget` in the test script, not the controller.)
+- **Slice (b) — hover (console PASS)**: no motor, three drops. From +3.0 m it settles DOWN to water+0.449;
+  from −3.0 m (pushed under) it rises UP to water+0.449; at rest it holds (steady-band 0.000 m over the
+  last 2 s). `HoverWaterOnly` confirmed relative to the water plane. Target = water + `HOVER_HEIGHT` 0.5.
+- **Slice (c) — vertical attractor (console PASS)**: rezzed rolled 30°, reaches <8° in **0.5 s** and holds
+  (last-2 s mean 8.8°, max 13.7°) — a little residual bob from the boat preset's stiff
+  `VERTICAL_ATTRACTION_TIMESCALE=0.2`, faithful to the math (A/B will confirm BulletSim bobs the same).
+  z stays water+0.449 through the recovery. Yaw-free check: heading moves 29° while **tilt stays 0.0°** —
+  the attractor holds roll/pitch level without fighting yaw. (Note the boat's heavy `ANGULAR_FRICTION`
+  Z-timescale 0.1 damps an *imposed* yaw spin down; the motor overcomes it — see slice d.)
+- **Slice (d) — angular motor / steering (console PASS)**: held `ANGULAR_MOTOR_DIRECTION` yaw=1.0 → boat
+  yaws smoothly 2.7°→53.6° at ~8°/s, **tilt stays 0.0°** (composes with the attractor — yaw turns, roll/
+  pitch held); on release the yaw rate drops to 0.0°/s within one frame (angular friction stops it — no
+  spin-forever) and holds heading. Steering boat script for John: `/d/jolt-boot-test/boat-steer.lsl`
+  (adds `CONTROL_LEFT|RIGHT` → `VEHICLE_ANGULAR_MOTOR_DIRECTION`, plus the `llSitTarget` that enables
+  sit-driving).
+- **Seam faithfulness note (attractor)**: `AddTorqueImpulse` (restoring torque, pre-multiplied by the
+  body inertia) routes to Jolt `AddTorque` — a continuous torque integrated as ΔΩ = I⁻¹·τ·dt, so the
+  inertia cancels identically to BulletSim's `AddAngularForce`→`ApplyTorque`. Same math, same dt² scaling,
+  same 20 %/frame velocity damping → any bob is shared with BulletSim, not a Jolt artifact.
+- **Next**: John viewer-confirms hover/attractor/steering (drive + steer + float + upright together), then
+  the BulletSim A/B feel check for the boat core (motors/friction/hover/attractor — deflection/banking
+  still deferred). Then the deferred terms (deflection, sled, banking, mouselook, wind).
 
 ## Terrain collision: heightfield now, terrain-mesh in reserve (M6.5)
 
