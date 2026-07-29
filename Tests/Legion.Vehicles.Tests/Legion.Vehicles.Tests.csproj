@@ -1,0 +1,55 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    Legion.Vehicles.Tests - xunit tests for the backend-agnostic Halcyon vehicle controller (M8).
+
+    PURE MATH, NO NATIVE: references Legion.Vehicles ONLY (which links just OpenMetaverseTypes).
+    No Jolt, no OpenSim scene, no native DLL - so these run on any CI agent in milliseconds. The
+    controller is driven through the IVehicleBody seam by a hand-written deterministic integrator
+    (_fakes/FakeVehicleBody.cs), mirroring what JoltVehicleBody does in-world.
+
+    Hand-maintained csproj (Legion convention): EnableDefaultItems OFF, explicit <Compile Include>.
+    Do NOT run runprebuild against this tree. Whether this project is registered in prebuild.xml for
+    NGC/develop CI vs kept hand-maintained is a COORDINATION ITEM with Mike (deferred) - see the
+    assessment report; on scratch it is hand-maintained.
+
+    OpenMetaverseTypes is referenced with Private=True (unlike Legion.Vehicles' Private=False) so the
+    math types are copied into the test output for the runner to load at test time.
+  -->
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <EnableDefaultItems>false</EnableDefaultItems>
+    <Deterministic>true</Deterministic>
+    <IsPackable>false</IsPackable>
+    <GenerateDocumentationFile>false</GenerateDocumentationFile>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Include="_fakes\FakeVehicleBody.cs" />
+    <Compile Include="BoatScenario.cs" />
+    <Compile Include="BoatMotorTests.cs" />
+    <Compile Include="HoverTests.cs" />
+    <Compile Include="AttractorTests.cs" />
+    <Compile Include="SteeringTests.cs" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\OpenSim\Addons\LegionPhysics\Legion.Vehicles\Legion.Vehicles.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Reference Include="OpenMetaverseTypes">
+      <HintPath>..\..\bin\OpenMetaverseTypes.dll</HintPath>
+      <Private>True</Private>
+    </Reference>
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="18.5.1" />
+    <PackageReference Include="xunit" Version="2.9.3" />
+    <PackageReference Include="xunit.runner.visualstudio" Version="3.1.5" />
+  </ItemGroup>
+
+</Project>

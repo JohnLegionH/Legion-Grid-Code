@@ -700,6 +700,42 @@ feel reference (the M6.8/M7 parity pattern).
   the BulletSim A/B feel check for the boat core (motors/friction/hover/attractor — deflection/banking
   still deferred). Then the deferred terms (deflection, sled, banking, mouselook, wind).
 
+### M8 unit tests — pure-math xunit (the going-forward habit)
+
+`Tests/Legion.Vehicles.Tests/` (net8.0 xunit, references `Legion.Vehicles` ONLY — no OpenSim, no engine,
+no native DLL, so it runs in ~25 ms on any CI agent). **The pattern, and the M8 habit: each new vehicle
+slice gets a matching xunit test written alongside it** — not a retroactive project.
+
+- **How it works**: `FakeVehicleBody` (a ~90-line deterministic `IVehicleBody`) drives the *real*
+  `LegionVehicleController` through the neutral seam. It integrates trivially — `AddForce`→ΔV=f/m·dt,
+  `AddTorque`→ΔΩ=I⁻¹·τ·dt, set-velocity read-back, semi-implicit Euler pose — and the host loop is
+  `controller.Step(dt); body.Integrate(dt)`. No engine, no scene. This is the point of the `IVehicleBody`
+  extraction: the FEEL math is unit-testable in pure managed code. The controller code under test is the
+  same assembly that ships; only the physics body is faked.
+- **What it locks in** (the objective, machine-verifiable numbers — masses, ramps, hover heights, angles;
+  John smoke-tests feel, Balpien tunes, these guard the arithmetic): the four boat slices reproduce their
+  in-world numbers in the fake — linear motor ramps 0.04→3.89 m/s (crossing 0.117 @0.55 s and 3.75 @4.64 s,
+  matching slice a's "0.11→3.75"); hover settles to water+0.43 from both sides; attractor 30°→<1° by
+  0.64 s, yaw-free; steering held-motor ~17°/s level turn, arrested on release.
+- **Finding 1 — wall-clock coupling (deferred fix)**: `LegionVehicleController.CheckResetMotors` reads
+  `DateTime.Now`, and its return (elapsed) is the divisor feeding `MitigateVelocitySpiking`. In a tight
+  test loop elapsed ≈ microseconds → spike mitigation fires spuriously. Tests set the existing
+  `LegionVehicleLimits.DoSpikeDetection = false` for determinism (no controller change). **Candidate: an
+  injectable-clock refactor** of the controller — it would remove the wall-clock dependence *and* make
+  spike-mitigation itself unit-testable.
+- **Finding 2 — fake angular-coast caveat**: the trivial fake carries ~1 frame of angular coast on
+  steering release (start-of-frame read + torque integration); the real Jolt inertia remap arrests the
+  imposed spin faster. So the steering test asserts the spin is **"arrested within a few frames"**, not
+  "within one frame". True angular fidelity (the one-frame stop) is verified **in-world / by the future
+  Jolt-backed tests**, not by the pure-math fake — the fake proves the controller math and the seam, not
+  the engine's integrator.
+- **Deferred**: `Legion.Physics.Tests` — the 38 console-harness backend scenarios → xunit plus a
+  `JoltFoundationFixture` (one-time native `Foundation` init + `joltc.dll` runtime asset for CI). Later
+  batch; the console harness still covers these for iteration.
+- **Pending coordination (Mike / NGC fork)**: whether these `Tests/` projects get registered in OpenSim's
+  `prebuild.xml` generator vs stay hand-maintained csprojs (Legion convention, "do NOT run runprebuild").
+  Undecided until John forks NGC/develop; on scratch they are hand-maintained.
+
 ## Terrain collision: heightfield now, terrain-mesh in reserve (M6.5)
 
 We collide against the region terrain with a Jolt **`HeightFieldShape`** (cooked from the region
