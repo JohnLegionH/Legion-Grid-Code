@@ -410,8 +410,9 @@ namespace Legion.Vehicles
                 bool inverted;
 
                 SimulateVerticalAttractor(timeStep, m_frameNum, out attractionForces, out angle, out inverted);
-                // SimulateBankingToYaw(timeStep, angle, inverted): DEFERRED slice. Until it lands,
-                // Dynamics.BankingDirection stays 0 and the banking-turn motor below is inert.
+                // Banking runs AFTER the attractor (uses its angle/inverted) and BEFORE the motors: it sets
+                // Dynamics.BankingDirection, which the banking-turn block inside SimulateMotors consumes.
+                SimulateBankingToYaw(timeStep, angle, inverted);
             }
 
             // -------------------------------------------------------
@@ -1056,6 +1057,65 @@ namespace Legion.Vehicles
                         AddTorqueVelocityChange(-remvel);
                     }
                     _props.Dynamics.LastVerticalAngle = angle;
+                }
+            }
+        }
+
+        #endregion
+
+        #region Banking (roll -> yaw driver; the consumer is the banking-turn block in SimulateMotors)
+
+        /// <summary>
+        /// Converts roll to yaw rotation. Ported VERBATIM from the BulletSim reference
+        /// (LegionVehicleDynamics.SimulateBankingToYaw). Runs AFTER the vertical attractor (whose angle/
+        /// inverted it takes) and BEFORE SimulateMotors: it sets Dynamics.BankingDirection, which the
+        /// already-present banking-turn block inside SimulateMotors consumes and blends into the angular-Z
+        /// torque. Seam table: _localLinearVel/_rotation, the limits, Utils.Clamp and _props.Dynamics are
+        /// the same names here, so the body is unchanged.
+        /// </summary>
+        private void SimulateBankingToYaw(float timeStep, float angle, bool inverted)
+        {
+            float timescale = Math.Max(_props.GetFloat(VehFloatParam.BankingTimescale, 1000f), timeStep);
+
+            if (timescale < LegionVehicleLimits.MaxAttractTimescale)
+            {
+                float efficiency = _props.GetFloat(VehFloatParam.BankingEfficiency, 0f);
+                float bmodifier = _props.GetFloat(VehFloatParam.InvertedBankingModifier, 1f);
+
+                if (LegionVehicleLimits.DoBanking && timescale < LegionVehicleLimits.MaxTimescale)
+                {
+                    float bankingmix = _props.GetFloat(VehFloatParam.BankingMix, 0.5f);
+                    float xspeed = 0.0f;
+
+                    // Legacy support: use velocity as an on/off switch, proportional and capped
+                    if (Math.Abs(_localLinearVel.X) > LegionVehicleLimits.ThresholdAngularMotorDeltaV)
+                        xspeed = Utils.Clamp(Math.Abs(_localLinearVel.X), 0, LegionVehicleLimits.MaxLegacyLinearVelocity);
+                    float xspeedpct = xspeed / LegionVehicleLimits.MaxLegacyLinearVelocity;
+
+                    // Compute percentage of roll
+                    Vector3 erot = new Vector3(0f, 1f, 0f);
+                    erot *= _rotation;
+                    float xangle = erot.Z;
+                    float attitude = (angle > Math.PI / 2.0) ? -1 : 1;
+
+                    // Clamp to current banking range
+                    float xmax = _props.GetFloat(VehFloatParam.BankingAzimuth, (float)Math.PI / 2f);
+                    xangle = Utils.Clamp(xangle * (float)Math.PI * 0.5f / xmax, -1, 1);
+
+                    // Apply inverted banking modifier
+                    if (inverted)
+                        efficiency = efficiency * bmodifier;
+
+                    // Apply torque only when above threshold
+                    if (Math.Abs(xangle) > LegionVehicleLimits.ThresholdBankAngle)
+                    {
+                        _props.Dynamics.BankingDirection = -xangle * attitude * efficiency * (1.0f - bankingmix) * (float)Math.PI; // static
+                        _props.Dynamics.BankingDirection += -xangle * attitude * efficiency * bankingmix * xspeedpct * (float)Math.PI; // dynamic
+                    }
+                    else
+                    {
+                        _props.Dynamics.BankingDirection = 0;
+                    }
                 }
             }
         }
