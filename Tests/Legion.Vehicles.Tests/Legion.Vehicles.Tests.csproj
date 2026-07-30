@@ -33,6 +33,7 @@
     <Compile Include="HoverTests.cs" />
     <Compile Include="AttractorTests.cs" />
     <Compile Include="SteeringTests.cs" />
+    <Compile Include="LinearDeflectionTests.cs" />
   </ItemGroup>
 
   <ItemGroup>

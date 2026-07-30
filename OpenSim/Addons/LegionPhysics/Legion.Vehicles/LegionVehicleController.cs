@@ -379,9 +379,21 @@ namespace Legion.Vehicles
             }
 
             // -------------------------------------------------------
-            // Angular deflection / linear deflection / sled movement: DEFERRED slices
-            // (SimulateAngularDeflection, SimulateLinearDeflection, SimulateSledMovement land here,
-            // in this order, exactly as in the BulletSim reference Step()).
+            // Deflection + sled run in the reference order Angular -> Linear -> Sled, BEFORE hover.
+            // Angular deflection — turning toward direction of movement. LATER SLICE (term 3):
+            // if (LegionVehicleLimits.DoAngularDeflection)
+            //     SimulateAngularDeflection(timeStep);
+
+            // Linear deflection — changing velocity toward the forward axis (the "tracking" bite).
+            if (LegionVehicleLimits.DoLinearDeflection)
+            {
+                SimulateLinearDeflection(timeStep);
+            }
+
+            // Sled movement — gravity-assisted slope force, gated on Type == Sled (never a boat).
+            // LATER SLICE (term 4):
+            // if (_props.Type == LegionVehicleType.Sled)
+            //     SimulateSledMovement(timeStep);
 
             // -------------------------------------------------------
             // Hover — maintain target height above terrain/water/global
@@ -740,6 +752,64 @@ namespace Legion.Vehicles
                 remvel.Y *= 0.5f;
                 remvel *= _rotation;
                 ApplyLinearVelocityChange(-remvel);
+            }
+        }
+
+        #endregion
+
+        #region Deflection — Linear (Angular + Sled are later slices)
+
+        /// <summary>
+        /// Changes velocity toward forward axis.
+        /// Ported VERBATIM from the BulletSim reference (LegionVehicleDynamics.SimulateLinearDeflection),
+        /// itself the Halcyon port. Seam table: reference symbols map 1:1 here - _worldLinearVel, _rotation,
+        /// _props, the limits, and ApplyLinearVelocityChange are the same names on this controller, so no
+        /// substitution is needed inside the body (ApplyLinearVelocityChange already writes _body.LinearVelocity).
+        /// </summary>
+        private void SimulateLinearDeflection(float timeStep)
+        {
+            if (Math.Abs(_worldLinearVel.X) >= LegionVehicleLimits.ThresholdLinearMotorDeltaV ||
+                Math.Abs(_worldLinearVel.Y) >= LegionVehicleLimits.ThresholdLinearMotorDeltaV ||
+                Math.Abs(_worldLinearVel.Z) >= LegionVehicleLimits.ThresholdLinearMotorDeltaV)
+            {
+                float timescale = Math.Max(_props.GetFloat(VehFloatParam.LinearDeflectionTimescale, 1000f), timeStep);
+
+                if (timescale < LegionVehicleLimits.MaxTimescale)
+                {
+                    float timePct = timeStep / timescale;
+                    float efficiency = _props.GetFloat(VehFloatParam.LinearDeflectionEfficiency, 0f);
+
+                    // Determine the amount of velocity to shift
+                  // SL behavior: linear deflection rotates the velocity vector toward
+                    // the forward axis, preserving speed. This is what generates lift —
+                    // when pitched up, horizontal velocity is redirected upward along
+                    // the forward axis.
+                    float speed = Vector3.Mag(_worldLinearVel);
+                    if (speed < LegionVehicleLimits.ThresholdDeflectionSpeed) return;
+
+                    Vector3 currentDir = Vector3.Normalize(_worldLinearVel);
+                    Vector3 forwardDir = new Vector3(1, 0, 0) * _rotation;
+
+                    // Blend current direction toward forward direction
+                    float blend = Math.Min(timePct * efficiency, 1.0f);
+                    Vector3 newDir = Vector3.Normalize(currentDir * (1.0f - blend) + forwardDir * blend);
+
+                    // New velocity = same speed, redirected direction
+                    Vector3 worldvel = newDir * speed - _worldLinearVel;
+
+                    // Stop any upward deflection
+                    if ((_props.Flags & LegionVehicleFlags.NoDeflectionUp) != 0)
+                    {
+                        if (worldvel.Z > 0) worldvel.Z = 0;
+                    }
+
+                    if (Math.Abs(worldvel.X) > LegionVehicleLimits.ThresholdLinearMotorDeltaV ||
+                        Math.Abs(worldvel.Y) > LegionVehicleLimits.ThresholdLinearMotorDeltaV ||
+                        Math.Abs(worldvel.Z) > LegionVehicleLimits.ThresholdLinearMotorDeltaV)
+                    {
+                        ApplyLinearVelocityChange(worldvel);
+                    }
+                }
             }
         }
 
