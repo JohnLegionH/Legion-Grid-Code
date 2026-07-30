@@ -392,10 +392,12 @@ namespace Legion.Vehicles
                 SimulateLinearDeflection(timeStep);
             }
 
-            // Sled movement — gravity-assisted slope force, gated on Type == Sled (never a boat).
-            // LATER SLICE (term 4):
-            // if (_props.Type == LegionVehicleType.Sled)
-            //     SimulateSledMovement(timeStep);
+            // Sled movement — gravity-assisted slope force, gated on Type == Sled (NEVER a boat). Wired
+            // for A/B parity completeness; inert for every non-sled vehicle.
+            if (_props.Type == LegionVehicleType.Sled)
+            {
+                SimulateSledMovement(timeStep);
+            }
 
             // -------------------------------------------------------
             // Hover — maintain target height above terrain/water/global
@@ -760,7 +762,7 @@ namespace Legion.Vehicles
 
         #endregion
 
-        #region Deflection — Angular + Linear (Sled is a later slice, gated Type==Sled)
+        #region Deflection (Angular + Linear) + Sled movement (gated Type==Sled)
 
         /// <summary>
         /// Rotates vehicle toward direction of movement (weathervane: swings the NOSE toward the velocity,
@@ -873,6 +875,47 @@ namespace Legion.Vehicles
                         Math.Abs(worldvel.Z) > LegionVehicleLimits.ThresholdLinearMotorDeltaV)
                     {
                         ApplyLinearVelocityChange(worldvel);
+                    }
+                }
+            }
+        }
+
+        /// <summary>
+        /// Gravity-assisted force on slopes for the SLED vehicle type. Ported VERBATIM from the BulletSim
+        /// reference (LegionVehicleDynamics.SimulateSledMovement). Wired here for A/B PARITY COMPLETENESS
+        /// only - it is gated Type==Sled in Step, so it NEVER runs for a boat (or any non-sled). Seam table:
+        /// BSParam.Gravity -> _body.Gravity.Z, ApplyLinearForce(f) -> _body.AddForce(f); everything else
+        /// (_rotation, the limits, IsLinearMotorStalled, m_vehicleMass) maps 1:1.
+        /// </summary>
+        private void SimulateSledMovement(float timeStep)
+        {
+            Vector3 force = Vector3.Zero;
+
+            // Compute the percentage of declination -1 (down) to +1 (up)
+            Vector3 probe = new Vector3(1f, 0f, 0f);
+            probe *= _rotation;
+
+            // If the nose (z-axis) points downward, add some force along the X-axis
+            if (Math.Abs(probe.Z) > LegionVehicleLimits.ThresholdDeflectionAngle)
+            {
+                force = new Vector3(-_body.Gravity.Z * 3.0f, 0f, 0f);   // seam: BSParam.Gravity -> _body.Gravity.Z
+
+                // The sled has a lower force assist going backwards
+                if (probe.Z > 0)
+                    force *= -0.1f;
+
+                if (!IsLinearMotorStalled())
+                {
+                    // Modulate the force based on the amount of declination
+                    force = force * timeStep * (float)Math.Sqrt(Math.Abs(probe.Z));
+
+                    if (Math.Abs(force.X) >= LegionVehicleLimits.ThresholdLinearMotorDeltaV ||
+                        Math.Abs(force.Y) >= LegionVehicleLimits.ThresholdLinearMotorDeltaV ||
+                        Math.Abs(force.Z) >= LegionVehicleLimits.ThresholdLinearMotorDeltaV)
+                    {
+                        force *= _rotation;
+                        force *= m_vehicleMass;
+                        _body.AddForce(force);   // seam: ApplyLinearForce(f) -> _body.AddForce(f)
                     }
                 }
             }

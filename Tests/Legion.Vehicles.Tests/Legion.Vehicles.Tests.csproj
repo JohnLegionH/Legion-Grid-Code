@@ -36,6 +36,7 @@
     <Compile Include="LinearDeflectionTests.cs" />
     <Compile Include="AngularDeflectionTests.cs" />
     <Compile Include="BankingTests.cs" />
+    <Compile Include="SledMovementTests.cs" />
   </ItemGroup>
 
   <ItemGroup>
