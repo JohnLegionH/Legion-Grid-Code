@@ -762,7 +762,17 @@ for the current (gravity-driven) workload.
 
 ## Known issues (scoped for a focused fix, not part of M7)
 
-- **Raising terrain under a standing avatar BURIES it (does not lift it).** Editing terrain UP (terrain
+- **✅ RESOLVED — Raising terrain under a standing avatar no longer buries it.** Fix: `SetTerrain` now runs
+  a re-ground pass (`ReGroundAvatarsOnTerrainChange`) after the heightfield swap — any avatar left below
+  the new surface (`z < terrainZ + StandHalf + FeetOffset`, via the pure `TryComputeUnbury` decision) is
+  snapped onto the surface and its velocity zeroed, through the gated backend call `ReGroundCharacter`
+  (atomic vs the per-step `CharacterVirtual` update). Lowered terrain and already-above avatars are left
+  alone; flying avatars are lifted too. Confirmed in-world: fill 20/25 with the avatar above/flying →
+  `buried=False`, no lift; fill 35 with the avatar below → lifted to seatZ=35.987 (terrain + StandHalf).
+  Diagnostic split confirmed: a rising PRIM platform DID lift the avatar (harness [20]) but rising terrain
+  did not — the bug was specifically the heightfield-swap path not re-grounding, as predicted below.
+
+- ~~**Raising terrain under a standing avatar BURIES it (does not lift it).** Editing terrain UP (terrain
   fill/raise) beneath a standing physical avatar leaves the avatar UNDER the new surface at its old Z,
   instead of pushing it up to ride the raised ground. Observed live: the character could not fly out
   (terrain now above it) nor escape (no TP); a viewer restart recovered. Likely cause: the Jolt
@@ -773,7 +783,7 @@ for the current (gravity-driven) workload.
   heightfield-update path not re-grounding the character (not general character-vs-moving-surface). (2)
   does the character re-detect ground when the terrain shape changes mid-session? (3) safety net: after a
   `SetTerrain`, if a character ends up below the new surface at its XY, lift it to ground (un-bury) rather
-  than trapping it. Scope: `LegionJoltScene.SetTerrain` + `JoltCharacter` grounding; no M7 dependency.
+  than trapping it. Scope: `LegionJoltScene.SetTerrain` + `JoltCharacter` grounding; no M7 dependency.~~
 
 ## Build notes
 

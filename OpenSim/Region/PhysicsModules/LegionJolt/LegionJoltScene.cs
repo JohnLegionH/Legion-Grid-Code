@@ -2709,11 +2709,60 @@ namespace OpenSim.Region.PhysicsModules.LegionJolt
                 _backend.ReleaseShape(_terrainShape);
             _terrainShape = newShape;
 
+            // Un-bury any avatar the raise left below the new surface (the terrain body was swapped out
+            // from under its CharacterVirtual, which keeps its old Z). Runs only here, on a real terrain
+            // edit (~5 s tainted cadence), and only lifts avatars now below the surface - a lowered terrain
+            // leaves them above, to settle by normal gravity.
+            ReGroundAvatarsOnTerrainChange();
+
             // Step-stamp + a couple of height samples so a [charframe] session can see whether SetTerrain
             // is re-firing during a walk (it should NOT - TerrainModule only ticks it every ~5 s when the
             // heightmap is tainted) and whether the heights it re-cooks are drifting downward.
             m_log.Info($"{LogHeader} terrain set: step={_stepCount} {sx}x{sy} region -> {m}x{m} heightfield " +
                        $"(spans {m - 1} m/side; sample[centre]={heightMap[(sy / 2) * sx + (sx / 2)]:0.000} sample[0]={heightMap[0]:0.000}).");
+        }
+
+        // Distance (m) a capsule centre must be below its seat before we treat it as buried and lift it.
+        // Small enough that any real raise lifts, large enough to ignore float noise / a normal grounded
+        // avatar sitting exactly at seatZ. Only ever lifts UP, so a modest value is safe either way.
+        private const float TerrainUnburyEps = 0.05f;
+
+        /// <summary>
+        /// Pure un-bury decision (no physics state), isolated so it is unit-testable and shared by the
+        /// live pass and the `jolt terrain-unbury` console assert. Given a capsule centre Z, the new terrain
+        /// surface at its XY, and its seat geometry, returns true + the seat Z it should snap to when the
+        /// avatar is below the new surface (buried); false (leave it) when it is at or above the surface -
+        /// so a LOWERED terrain never triggers a snap (avatar settles by gravity), and a prim-stander high
+        /// above ground is never yanked down.
+        /// </summary>
+        internal static bool TryComputeUnbury(float currentCentreZ, float terrainZ, float standHalf, float feetOffset, float buriedEps, out float seatZ)
+        {
+            seatZ = terrainZ + standHalf + feetOffset;   // capsule centre that seats the feet ON the surface
+            return currentCentreZ < seatZ - buriedEps;
+        }
+
+        // After a live terrain edit, lift any avatar now below the new surface onto it (see SetTerrain).
+        // Flying avatars are lifted too - a buried flyer can't rise through the solid heightfield above it
+        // (John's exact case). Uses the same seat formula as spawn (groundZ + StandHalf + FeetOffset) and
+        // the just-cooked _terrainField (via TerrainHeightAt), so the avatar lands exactly on the contact
+        // surface. The reposition is gated in the backend, so it cannot race the per-step character update.
+        private void ReGroundAvatarsOnTerrainChange()
+        {
+            List<JoltCharacter> avs;
+            lock (_avatars)
+                avs = new List<JoltCharacter>(_avatars.Values);
+
+            foreach (JoltCharacter a in avs)
+            {
+                Vector3 p = a.Position;
+                float terrainZ = TerrainHeightAt(p.X, p.Y);
+                if (TryComputeUnbury(p.Z, terrainZ, a.StandHalf, a.FeetOffset, TerrainUnburyEps, out float seatZ))
+                {
+                    a.ReGround(new Vector3(p.X, p.Y, seatZ));
+                    m_log.Info($"{LogHeader} terrain-unbury: avatar {a.LocalID} lifted z={p.Z:0.000} -> seatZ={seatZ:0.000} " +
+                               $"(terrain now {terrainZ:0.000}, flying={a.Flying}).");
+                }
+            }
         }
 
         public override void SetWaterLevel(float baseheight)

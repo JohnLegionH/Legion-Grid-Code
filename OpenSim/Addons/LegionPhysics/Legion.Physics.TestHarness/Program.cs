@@ -1063,6 +1063,49 @@ internal static class Program
             Console.WriteLine("      => #35 RESOLVED: avatars are query-visible (Avatar filter only). Movement/contacts unchanged (marker collides with nothing).");
             backend.RemoveCharacter(avatarQ);
 
+            // ---- [39] TERRAIN UN-BURY: raising terrain under a standing avatar must lift it, not bury it. ----
+            // The live papercut: SetTerrain swaps the heightfield body (remove old + add higher); the
+            // CharacterVirtual keeps its old Z and ends below the new surface. Prove the burial (control),
+            // then that ReGroundCharacter snaps it onto the raised surface and it RESTS (velocity zeroed).
+            Console.WriteLine("\n[39] Terrain un-bury (raise terrain under a standing avatar)");
+            {
+                var ubB = new BodyState[8]; var ubC = new CharacterState[2]; var ubCt = new ContactReport[16];
+                ShapeId ub_flat = backend.CreateHeightFieldShape(FlatField(), N, N, new Vector3(S, S, S));
+                backend.SetTerrain(ub_flat, Vector3.Zero);
+                var ubDesc = CharacterDesc.Default;                       // capsule 0.45/0.30 -> rests ~0.75 on z=0
+                ubDesc.Position = new Vector3(40f, 40f, 0.75f);
+                CharacterId ub = backend.CreateCharacter(ubDesc);
+                for (int i = 0; i < 30; i++) { backend.SetCharacterMovement(ub, Vector3.Zero, false, false); backend.Step(1f / 60f, ubB, ubC, ubCt); }
+                backend.TryGetCharacterState(ub, out CharacterState ubRest);
+                float restZ = ubRest.Position.Z;                          // seat offset above the surface (standHalf+feet)
+                Check(ubRest.IsSupported && restZ > 0.4f && restZ < 1.2f, $"character rests on flat terrain (z={restZ:0.000}, supported)");
+
+                // Raise terrain to Z=25 under it (the SetTerrain swap the live edit triggers).
+                const float RAISE = 25f;
+                float[] highField = new float[N * N];
+                for (int i = 0; i < highField.Length; i++) highField[i] = RAISE;
+                ShapeId ub_high = backend.CreateHeightFieldShape(highField, N, N, new Vector3(S, S, S));
+                backend.SetTerrain(ub_high, Vector3.Zero);
+
+                // CONTROL: step WITHOUT re-grounding -> buried, far below the raised surface (can't climb 24 m).
+                for (int i = 0; i < 10; i++) { backend.SetCharacterMovement(ub, Vector3.Zero, false, false); backend.Step(1f / 60f, ubB, ubC, ubCt); }
+                backend.TryGetCharacterState(ub, out CharacterState ubBuried);
+                Check(ubBuried.Position.Z < RAISE - 1f, $"CONTROL: without un-bury the avatar is BURIED below the raised surface (z={ubBuried.Position.Z:0.000} << {RAISE})");
+
+                // FIX: re-ground onto the raised surface (seatZ = raise + measured seat offset), velocity zeroed.
+                float seatZ = RAISE + restZ;
+                backend.ReGroundCharacter(ub, new Vector3(ubBuried.Position.X, ubBuried.Position.Y, seatZ));
+                for (int i = 0; i < 40; i++) { backend.SetCharacterMovement(ub, Vector3.Zero, false, false); backend.Step(1f / 60f, ubB, ubC, ubCt); }
+                backend.TryGetCharacterState(ub, out CharacterState ubLifted);
+                Check(Math.Abs(ubLifted.Position.Z - seatZ) < 0.5f, $"FIX: avatar lifted onto the raised surface and RESTS there (z={ubLifted.Position.Z:0.000} ~ seatZ {seatZ:0.000})");
+                Check(ubLifted.IsSupported, "FIX: lifted avatar is supported (standing on new terrain, not falling)");
+                Check(ubLifted.Position.Z > RAISE, $"FIX: avatar is ABOVE the raised surface Z={RAISE} (not buried), z={ubLifted.Position.Z:0.000}");
+
+                backend.RemoveCharacter(ub);
+                backend.ReleaseShape(ub_flat);
+                backend.ReleaseShape(ub_high);
+            }
+
             backend.ReleaseShape(sphere); backend.ReleaseShape(qbox);
 
             // cleanup
