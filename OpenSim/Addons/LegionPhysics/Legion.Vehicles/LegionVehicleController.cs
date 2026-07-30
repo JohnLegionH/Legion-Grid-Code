@@ -380,9 +380,11 @@ namespace Legion.Vehicles
 
             // -------------------------------------------------------
             // Deflection + sled run in the reference order Angular -> Linear -> Sled, BEFORE hover.
-            // Angular deflection — turning toward direction of movement. LATER SLICE (term 3):
-            // if (LegionVehicleLimits.DoAngularDeflection)
-            //     SimulateAngularDeflection(timeStep);
+            // Angular deflection — swings the nose toward the velocity direction (weathervane).
+            if (LegionVehicleLimits.DoAngularDeflection)
+            {
+                SimulateAngularDeflection(timeStep);
+            }
 
             // Linear deflection — changing velocity toward the forward axis (the "tracking" bite).
             if (LegionVehicleLimits.DoLinearDeflection)
@@ -757,7 +759,69 @@ namespace Legion.Vehicles
 
         #endregion
 
-        #region Deflection — Linear (Angular + Sled are later slices)
+        #region Deflection — Angular + Linear (Sled is a later slice, gated Type==Sled)
+
+        /// <summary>
+        /// Rotates vehicle toward direction of movement (weathervane: swings the NOSE toward the velocity,
+        /// complementary to linear deflection which rotates the velocity toward the nose).
+        /// Ported VERBATIM from the BulletSim reference (LegionVehicleDynamics.SimulateAngularDeflection).
+        /// Seam table: all symbols map 1:1 here - _worldLinearVel/_localLinearVel/_worldAngularVel/_rotation,
+        /// the limits, the QuatToEuler/RotBetween/AngleBetween utilities, and AddTorqueVelocityChange (the
+        /// reference's torque-as-velocity-change seam) already exist on this controller.
+        /// </summary>
+        private void SimulateAngularDeflection(float timeStep)
+        {
+            if (Math.Abs(_worldLinearVel.X) >= LegionVehicleLimits.ThresholdDeflectionSpeed ||
+                Math.Abs(_worldLinearVel.Y) >= LegionVehicleLimits.ThresholdDeflectionSpeed ||
+                Math.Abs(_worldLinearVel.Z) >= LegionVehicleLimits.ThresholdDeflectionSpeed)
+            {
+                float timescale = Math.Max(_props.GetFloat(VehFloatParam.AngularDeflectionTimescale, 1000f), timeStep);
+
+                if (timescale < LegionVehicleLimits.MaxTimescale)
+                {
+                    float timepct = timeStep / timescale;
+                    float efficiency = _props.GetFloat(VehFloatParam.AngularDeflectionEfficiency, 0f);
+                    float speed = Utils.Clamp(Vector3.Mag(_localLinearVel), 0, LegionVehicleLimits.MaxLegacyLinearVelocity);
+                    float speedpct = speed / LegionVehicleLimits.MaxLegacyLinearVelocity;
+
+                    // Compute the rotation between the x axis pointing vector and the linear direction
+                    Vector3 ahead = new Vector3(1, 0, 0) * _rotation;
+                    Quaternion tween = RotBetween(ahead, Vector3.Normalize(_worldLinearVel));
+                    float angle = AngleBetween(tween, Quaternion.Identity);
+                    Vector3 vtwix = QuatToEuler(tween);
+
+                    // Cheat: if the local X movement is negative, flip the angle
+                    if (_localLinearVel.X < 0)
+                    {
+                        angle = (float)Math.PI - angle;
+                    }
+
+                    // Scale the force
+                    vtwix = Vector3.Normalize(vtwix) * speedpct * (float)Math.PI * timepct * efficiency * (float)Math.Log(1.0 + angle);
+
+                    // Compute damping
+                    Vector3 remvel = Vector3.Zero;
+                    if (angle < LegionVehicleLimits.ThresholdDeflectionAngle)
+                    {
+                        remvel = _worldAngularVel * timepct * efficiency * (float)(Math.Log(1.0 + Math.PI - angle) / Math.Log(1.0 + Math.PI));
+                    }
+
+                    vtwix -= remvel;
+
+                    if (IsLinearMotorStalled())
+                    {
+                        vtwix = Vector3.Zero;
+                    }
+
+                    if (Math.Abs(vtwix.X) >= LegionVehicleLimits.ThresholdAngularMotorDeltaV ||
+                        Math.Abs(vtwix.Y) >= LegionVehicleLimits.ThresholdAngularMotorDeltaV ||
+                        Math.Abs(vtwix.Z) >= LegionVehicleLimits.ThresholdAngularMotorDeltaV)
+                    {
+                        AddTorqueVelocityChange(vtwix);
+                    }
+                }
+            }
+        }
 
         /// <summary>
         /// Changes velocity toward forward axis.
