@@ -116,6 +116,10 @@ namespace Legion.Vehicles
             get { return (_props.Type == LegionVehicleType.Car || _props.Type == LegionVehicleType.Sled); }
         }
 
+        /// <summary>Read a current float vehicle param (preset default + any llSetVehicleFloatParam override).
+        /// Introspection for the host / tests - e.g. asserting the boat preset's buoyancy.</summary>
+        public float GetFloatParam(VehFloatParam key) => _props.GetFloat(key, 0f);
+
         #region Vehicle Parameter Setting — routes from LSL Vehicle wire codes to internal enums
 
         // =================================================================
@@ -1978,7 +1982,12 @@ namespace Legion.Vehicles
                     _props.ParamsFloat[VehFloatParam.HoverHeight]                   = 0.5f;
                     _props.ParamsFloat[VehFloatParam.HoverEfficiency]               = 0.8f;
                     _props.ParamsFloat[VehFloatParam.HoverTimescale]                = 0.2f;
-                    _props.ParamsFloat[VehFloatParam.Buoyancy]                      = 0f;
+                    // Cause-B: buoyancy 1.0 (matches BulletSim's TYPE_BOAT, BSDynamics buoyancy=1.0). Gravity
+                    // is fully cancelled (ApplyGravity = gravity*(1-buoyancy) = 0), so a boat CANNOT sink even
+                    // on a frame where hover has not run yet - e.g. right after a region reload, before the
+                    // controller re-activates. Hover still trims it to the water surface (HoverWaterOnly,
+                    // height 0.5); buoyancy holds the baseline, hover positions - the same compose BulletSim uses.
+                    _props.ParamsFloat[VehFloatParam.Buoyancy]                      = 1f;
                     _props.ParamsFloat[VehFloatParam.LinearDeflectionEfficiency]    = 0.5f;
                     _props.ParamsFloat[VehFloatParam.LinearDeflectionTimescale]     = 3f;
                     _props.ParamsFloat[VehFloatParam.AngularDeflectionEfficiency]   = 0.5f;
