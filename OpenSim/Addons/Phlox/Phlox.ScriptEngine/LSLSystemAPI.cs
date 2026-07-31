@@ -933,52 +933,48 @@ namespace Phlox.ScriptEngine
                     return 0;
             }
         }
+        // ROOT-CAUSE FIX: route vehicle sets through the SceneObjectPart setters (as the stock LSL_Api does),
+        // NOT straight to the live PhysicsActor. The SOP setters populate SceneObjectPart.VehicleParams - the
+        // field the serializer persists - and mark the group dirty, THEN apply to physics. The old code set
+        // pa.VehicleType/pa.Vehicle*Param directly, so the vehicle existed ONLY in the live physics body and
+        // NEVER in VehicleParams: it was never serialized, so a set-and-left boat reloaded as a PLAIN prim
+        // (no buoyancy) and sank - the whole reload-sink bug. It also skipped physical prims entirely (early
+        // `pa == null` return); the SOP setter records the vehicle on a non-physical prim too, and it's applied
+        // when the prim goes physical. Matches the stock engine (LSL_Api.cs) exactly.
         public void llSetVehicleType(int type)
         {
             if (m_host?.ParentGroup == null || m_host.ParentGroup.IsDeleted) return;
-            PhysicsActor pa = m_host.ParentGroup.RootPart.PhysActor;
-            if (pa == null) return;
-            pa.VehicleType = type;
+            m_host.ParentGroup.RootPart.SetVehicleType(type);
         }
 
         public void llSetVehicleFloatParam(int param, float value)
         {
             if (m_host?.ParentGroup == null || m_host.ParentGroup.IsDeleted) return;
-            PhysicsActor pa = m_host.ParentGroup.RootPart.PhysActor;
-            if (pa == null) return;
-            pa.VehicleFloatParam(param, value);
+            m_host.ParentGroup.RootPart.SetVehicleFloatParam(param, value);
         }
 
         public void llSetVehicleVectorParam(int param, Vector3 vec)
         {
             if (m_host?.ParentGroup == null || m_host.ParentGroup.IsDeleted) return;
-            PhysicsActor pa = m_host.ParentGroup.RootPart.PhysActor;
-            if (pa == null) return;
-            pa.VehicleVectorParam(param, vec);
+            m_host.ParentGroup.RootPart.SetVehicleVectorParam(param, vec);
         }
 
         public void llSetVehicleRotationParam(int param, Quaternion rot)
         {
             if (m_host?.ParentGroup == null || m_host.ParentGroup.IsDeleted) return;
-            PhysicsActor pa = m_host.ParentGroup.RootPart.PhysActor;
-            if (pa == null) return;
-            pa.VehicleRotationParam(param, rot);
+            m_host.ParentGroup.RootPart.SetVehicleRotationParam(param, rot);
         }
 
         public void llSetVehicleFlags(int flags)
         {
             if (m_host?.ParentGroup == null || m_host.ParentGroup.IsDeleted) return;
-            PhysicsActor pa = m_host.ParentGroup.RootPart.PhysActor;
-            if (pa == null) return;
-            pa.VehicleFlags(flags, false);
+            m_host.ParentGroup.RootPart.SetVehicleFlags(flags, false);
         }
 
         public void llRemoveVehicleFlags(int flags)
         {
             if (m_host?.ParentGroup == null || m_host.ParentGroup.IsDeleted) return;
-            PhysicsActor pa = m_host.ParentGroup.RootPart.PhysActor;
-            if (pa == null) return;
-            pa.VehicleFlags(flags, true);
+            m_host.ParentGroup.RootPart.SetVehicleFlags(flags, true);
         }
         public LSLList llGetPhysicsMaterial()
         {
