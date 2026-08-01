@@ -292,7 +292,7 @@ namespace OpenSim.Region.PhysicsModules.LegionJolt
             {
                 _consoleRegistered = true;
                 MainConsole.Instance.Commands.AddCommand("Physics", false, "jolt",
-                    "jolt linktest | unlinktest | collidetest | boattest [linear|hover|attract|steer] | terraintest | terrainslope | terrainhill | hilltest | probe <x> <y> | rezprims | rayprims | rezmesh | rezmeshn <count> | raymesh | droptest | dropmesh | dropstatus | avatarstatus | charframe [secs] | sitstatus | sittest | unsit | sittarget | sensortest | raytest | heights <x> <y> | reloadcheck | vehiclestatus | clearprims",
+                    "jolt linktest | unlinktest | collidetest | boattest [linear|hover|attract|steer] | cartest [linear|steer|attract] | terraintest | terrainslope | terrainhill | hilltest | probe <x> <y> | rezprims | rayprims | rezmesh | rezmeshn <count> | raymesh | droptest | dropmesh | dropstatus | avatarstatus | charframe [secs] | sitstatus | sittest | unsit | sittarget | sensortest | raytest | heights <x> <y> | reloadcheck | vehiclestatus | clearprims",
                     "Legion Jolt proofs (M6.2 terrain / M6.3 prims): raycast the cooked collision surfaces and report hits.",
                     HandleJoltConsole);
             }
@@ -312,6 +312,7 @@ namespace OpenSim.Region.PhysicsModules.LegionJolt
             if (cmd.Length >= 2 && cmd[1] == "collidetest") { JoltCollideTest(); return; }
             if (cmd.Length >= 2 && cmd[1] == "collidelinktest") { JoltCollideLinkTest(); return; }
             if (cmd.Length >= 2 && cmd[1] == "boattest") { JoltBoatTest(cmd.Length >= 3 ? cmd[2] : "linear"); return; }
+            if (cmd.Length >= 2 && cmd[1] == "cartest") { JoltCarTest(cmd.Length >= 3 ? cmd[2] : "linear"); return; }
 
             if (cmd.Length >= 2 && cmd[1] == "terraintest")
             {
@@ -615,7 +616,7 @@ namespace OpenSim.Region.PhysicsModules.LegionJolt
                 return;
             }
 
-            MainConsole.Instance.Output("Usage: jolt linktest | unlinktest | collidetest | boattest [linear|hover|attract|steer] | terraintest | terrainslope | terrainhill | hilltest | probe <x> <y> | rezprims | rayprims | rezmesh | rezmeshn <count> | raymesh | droptest | dropmesh | dropstatus | avatarstatus | charframe [secs] | sitstatus | sittest | unsit | sittarget | sensortest | raytest | heights <x> <y> | reloadcheck | vehiclestatus | clearprims");
+            MainConsole.Instance.Output("Usage: jolt linktest | unlinktest | collidetest | boattest [linear|hover|attract|steer] | cartest [linear|steer|attract] | terraintest | terrainslope | terrainhill | hilltest | probe <x> <y> | rezprims | rayprims | rezmesh | rezmeshn <count> | raymesh | droptest | dropmesh | dropstatus | avatarstatus | charframe [secs] | sitstatus | sittest | unsit | sittarget | sensortest | raytest | heights <x> <y> | reloadcheck | vehiclestatus | clearprims");
         }
 
         // M7 Task 1 proof: rez a root + 2 children at offsets, make the root physical, then run the OpenSim
@@ -728,6 +729,165 @@ namespace OpenSim.Region.PhysicsModules.LegionJolt
                 case "steer":   BoatSteerTest();   break;
                 default:        BoatLinearTest();  break;
             }
+        }
+
+        // M8 CAR proofs. `jolt cartest [linear|steer|attract]` (default linear). Rezzes a physical
+        // VEHICLE_TYPE_CAR on the terrain (no water needed - a car rides the ground) and drives ONE
+        // aspect of the extracted controller, asserting it:
+        //   linear  : held linear motor -> forward speed ramps; car stays on the ground (no sink, no hover)
+        //   steer   : angular motor -> heading yaws; car stays upright
+        //   attract : born tilted -> vertical attractor self-rights it while it sits on the ground
+        private void JoltCarTest(string scenario)
+        {
+            if (_scene == null) { MainConsole.Instance.Output($"{LogHeader} no scene."); return; }
+            switch (scenario)
+            {
+                case "steer":   CarSteerTest();   break;
+                case "attract": CarAttractTest(); break;
+                default:        CarLinearTest();  break;
+            }
+        }
+
+        // Rez a physical VEHICLE_TYPE_CAR box at (x,y,z). Returns the SOG + PhysActor + JoltPrim + id,
+        // or (null,...) on failure (caller checks pa).
+        private (SceneObjectGroup sog, PhysicsActor pa, JoltPrim jp, uint id) RezCar(float x, float y, float z, Quaternion rot)
+        {
+            SceneObjectGroup car = RezTestPrim("box", new Vector3(x, y, z), new Vector3(2f, 1f, 0.5f));
+            if (rot != Quaternion.Identity)
+                car.UpdateGroupRotationR(rot);   // born tilted: ApplyPhysics below cooks the body at this rot
+            car.ScriptSetPhysicsStatus(true);
+            PhysicsActor pa = car.RootPart.PhysActor;
+            if (pa == null) { _scene.DeleteSceneObject(car, false); return (null, null, null, 0); }
+            if (rot != Quaternion.Identity) pa.Orientation = rot;
+            uint id = car.RootPart.LocalId;
+            pa.VehicleType = (int)Vehicle.TYPE_CAR;
+            JoltPrim jp;
+            lock (_prims) _prims.TryGetValue(id, out jp);
+            return (car, pa, jp, id);
+        }
+
+        // Full live body state for a car (position incl. X/Y so we can measure height above the terrain
+        // it is driving over). Mirrors BoatState but returns the whole position vector.
+        private bool CarState(JoltPrim jp, out float tiltDeg, out SVector3 pos, out SVector3 linVel, out SQuaternion orient)
+        {
+            tiltDeg = 0f; pos = default; linVel = default; orient = SQuaternion.Identity;
+            if (jp == null || !_backend.TryGetBodyState(jp.BodyHandle, out BodyState st))
+                return false;
+            var up = SVector3.Transform(new SVector3(0f, 0f, 1f), st.Orientation);
+            tiltDeg = (float)(Math.Acos(Math.Clamp(up.Z, -1f, 1f)) * 180.0 / Math.PI);
+            pos = st.Position; linVel = st.LinearVelocity; orient = st.Orientation;
+            return true;
+        }
+
+        // Heading (deg) of the body's local +X (nose) about world Z.
+        private static float HeadingDeg(SQuaternion o)
+        {
+            var fwd = SVector3.Transform(new SVector3(1f, 0f, 0f), o);
+            return (float)(Math.Atan2(fwd.Y, fwd.X) * 180.0 / Math.PI);
+        }
+
+        // ---- car (linear): held motor -> forward ramp, stays on the ground -------------------------
+        private void CarLinearTest()
+        {
+            float cx = 128f, cy = 128f;
+            float ground = TerrainHeightAt(cx, cy);
+            var (car, pa, jp, id) = RezCar(cx, cy, ground + 1.0f, Quaternion.Identity);
+            if (pa == null) { MainConsole.Instance.Output($"{LogHeader} cartest: car has no PhysActor."); return; }
+
+            MainConsole.Instance.Output($"{LogHeader} [cartest:linear] car id={id} at ({cx:0},{cy:0}) ground={ground:0.00} mass={pa.Mass:0.00} type={pa.VehicleType} (expect 2)");
+            System.Threading.Thread.Sleep(1000);   // let it drop and settle on the ground first
+            var motor = new Vector3(6f, 0f, 0f);   // hold forward at 6 m/s (local +X)
+            MainConsole.Instance.Output($"{LogHeader} [cartest:linear] holding LINEAR_MOTOR_DIRECTION={motor} (re-set every 0.5 s)");
+            MainConsole.Instance.Output($"     t   |  fwdSpeed |   speedXY | z-ground |  tiltDeg");
+
+            float first = float.NaN, last = float.NaN, maxClear = float.MinValue, minClear = float.MaxValue;
+            for (int i = 0; i <= 8; i++)
+            {
+                pa.VehicleVectorParam((int)Vehicle.LINEAR_MOTOR_DIRECTION, motor);
+                System.Threading.Thread.Sleep(500);
+                if (!CarState(jp, out float tilt, out SVector3 p, out SVector3 lv, out SQuaternion o))
+                { MainConsole.Instance.Output($"  {i * 0.5f,4:0.0}s | (no body state)"); continue; }
+                var fwd = SVector3.Transform(new SVector3(1f, 0f, 0f), o);
+                float fwdSpeed = lv.X * fwd.X + lv.Y * fwd.Y + lv.Z * fwd.Z;
+                float speedXY = (float)Math.Sqrt(lv.X * lv.X + lv.Y * lv.Y);
+                float clear = p.Z - TerrainHeightAt(p.X, p.Y);
+                if (i >= 1) { if (clear > maxClear) maxClear = clear; if (clear < minClear) minClear = clear; }
+                if (i == 1) first = fwdSpeed;
+                last = fwdSpeed;
+                MainConsole.Instance.Output($"  {i * 0.5f,4:0.0}s | {fwdSpeed,9:0.000} | {speedXY,9:0.000} | {clear,8:0.000} | {tilt,8:0.0}");
+            }
+
+            // moved forward, and stayed on the ground the whole time (didn't sink through, didn't hover up).
+            bool ramped = last > 2f && (float.IsNaN(first) || last >= first - 0.25f);
+            bool onGround = minClear > -0.5f && maxClear < 1.5f;
+            bool pass = ramped && onGround;
+            MainConsole.Instance.Output($"{LogHeader} [cartest:linear] {(pass ? "PASS" : "FAIL")}: reached {last:0.00} m/s forward (target 6), ground clearance {minClear:0.00}..{maxClear:0.00} m (stayed grounded={onGround}).");
+            _scene.DeleteSceneObject(car, false);
+        }
+
+        // ---- car (steer): angular motor -> heading yaws, stays upright -----------------------------
+        private void CarSteerTest()
+        {
+            float cx = 128f, cy = 128f;
+            float ground = TerrainHeightAt(cx, cy);
+            var (car, pa, jp, id) = RezCar(cx, cy, ground + 1.0f, Quaternion.Identity);
+            if (pa == null) { MainConsole.Instance.Output($"{LogHeader} cartest: car has no PhysActor."); return; }
+
+            MainConsole.Instance.Output($"{LogHeader} [cartest:steer] car id={id} type={pa.VehicleType} (expect 2)");
+            System.Threading.Thread.Sleep(1000);
+            pa.VehicleVectorParam((int)Vehicle.LINEAR_MOTOR_DIRECTION, new Vector3(4f, 0f, 0f));   // rolling forward
+            var yaw = new Vector3(0f, 0f, 0.6f);   // hold a left yaw
+            MainConsole.Instance.Output($"{LogHeader} [cartest:steer] holding ANGULAR_MOTOR_DIRECTION={yaw}");
+            MainConsole.Instance.Output($"     t   |  heading  |  tiltDeg");
+
+            float startHeading = float.NaN, lastHeading = float.NaN, maxTilt = 0f;
+            for (int i = 0; i <= 8; i++)
+            {
+                pa.VehicleVectorParam((int)Vehicle.LINEAR_MOTOR_DIRECTION, new Vector3(4f, 0f, 0f));
+                pa.VehicleVectorParam((int)Vehicle.ANGULAR_MOTOR_DIRECTION, yaw);
+                System.Threading.Thread.Sleep(500);
+                if (!CarState(jp, out float tilt, out _, out _, out SQuaternion o))
+                { MainConsole.Instance.Output($"  {i * 0.5f,4:0.0}s | (no body state)"); continue; }
+                float h = HeadingDeg(o);
+                if (float.IsNaN(startHeading)) startHeading = h;
+                lastHeading = h;
+                if (tilt > maxTilt) maxTilt = tilt;
+                MainConsole.Instance.Output($"  {i * 0.5f,4:0.0}s | {h,8:0.0} | {tilt,8:0.0}");
+            }
+
+            float netYaw = Math.Abs(lastHeading - startHeading);
+            if (netYaw > 180f) netYaw = 360f - netYaw;
+            bool pass = netYaw > 20f && maxTilt < 30f;
+            MainConsole.Instance.Output($"{LogHeader} [cartest:steer] {(pass ? "PASS" : "FAIL")}: turned {netYaw:0.0} deg, stayed upright (maxTilt {maxTilt:0.0}).");
+            _scene.DeleteSceneObject(car, false);
+        }
+
+        // ---- car (attract): born tilted -> self-rights on the ground -------------------------------
+        private void CarAttractTest()
+        {
+            float cx = 128f, cy = 128f;
+            float ground = TerrainHeightAt(cx, cy);
+            Quaternion roll = Quaternion.CreateFromAxisAngle(Vector3.UnitX, 30f * (float)(Math.PI / 180.0));
+            var (car, pa, jp, id) = RezCar(cx, cy, ground + 1.5f, roll);
+            if (pa == null) { MainConsole.Instance.Output($"{LogHeader} cartest: car has no PhysActor."); return; }
+
+            MainConsole.Instance.Output($"{LogHeader} [cartest:attract] car id={id} born rolled ~30 deg, type={pa.VehicleType} (expect 2)");
+            MainConsole.Instance.Output($"     t   |  tiltDeg | z-ground");
+
+            float startTilt = float.NaN, lastTilt = float.NaN;
+            for (int i = 0; i <= 10; i++)
+            {
+                System.Threading.Thread.Sleep(500);
+                if (!CarState(jp, out float tilt, out SVector3 p, out _, out _))
+                { MainConsole.Instance.Output($"  {i * 0.5f,4:0.0}s | (no body state)"); continue; }
+                if (float.IsNaN(startTilt)) startTilt = tilt;
+                lastTilt = tilt;
+                MainConsole.Instance.Output($"  {i * 0.5f,4:0.0}s | {tilt,8:0.0} | {p.Z - TerrainHeightAt(p.X, p.Y),8:0.000}");
+            }
+
+            bool pass = lastTilt < startTilt - 10f && lastTilt < 15f;
+            MainConsole.Instance.Output($"{LogHeader} [cartest:attract] {(pass ? "PASS" : "FAIL")}: righted from {startTilt:0.0} to {lastTilt:0.0} deg.");
+            _scene.DeleteSceneObject(car, false);
         }
 
         // Ensure there is deep water at the test spot. Grid-scans the terrain field for the deepest
