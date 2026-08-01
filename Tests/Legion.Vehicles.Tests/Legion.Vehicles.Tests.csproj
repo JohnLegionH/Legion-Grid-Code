@@ -43,6 +43,8 @@
     <Compile Include="SledTests.cs" />
     <Compile Include="PlaneScenario.cs" />
     <Compile Include="PlaneTests.cs" />
+    <Compile Include="BalloonScenario.cs" />
+    <Compile Include="BalloonTests.cs" />
   </ItemGroup>
 
   <ItemGroup>

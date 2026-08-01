@@ -292,7 +292,7 @@ namespace OpenSim.Region.PhysicsModules.LegionJolt
             {
                 _consoleRegistered = true;
                 MainConsole.Instance.Commands.AddCommand("Physics", false, "jolt",
-                    "jolt linktest | unlinktest | collidetest | boattest [linear|hover|attract|steer] | cartest [linear|steer|attract] | sledtest [slide|nosteer|grip] | planetest [thrust|bank|climb] | terraintest | terrainslope | terrainhill | hilltest | probe <x> <y> | rezprims | rayprims | rezmesh | rezmeshn <count> | raymesh | droptest | dropmesh | dropstatus | avatarstatus | charframe [secs] | sitstatus | sittest | unsit | sittarget | sensortest | raytest | heights <x> <y> | reloadcheck | vehiclestatus | clearprims",
+                    "jolt linktest | unlinktest | collidetest | boattest [linear|hover|attract|steer] | cartest [linear|steer|attract] | sledtest [slide|nosteer|grip] | planetest [thrust|bank|climb] | balloontest [hover|lift|drift] | terraintest | terrainslope | terrainhill | hilltest | probe <x> <y> | rezprims | rayprims | rezmesh | rezmeshn <count> | raymesh | droptest | dropmesh | dropstatus | avatarstatus | charframe [secs] | sitstatus | sittest | unsit | sittarget | sensortest | raytest | heights <x> <y> | reloadcheck | vehiclestatus | clearprims",
                     "Legion Jolt proofs (M6.2 terrain / M6.3 prims): raycast the cooked collision surfaces and report hits.",
                     HandleJoltConsole);
             }
@@ -315,6 +315,7 @@ namespace OpenSim.Region.PhysicsModules.LegionJolt
             if (cmd.Length >= 2 && cmd[1] == "cartest") { JoltCarTest(cmd.Length >= 3 ? cmd[2] : "linear"); return; }
             if (cmd.Length >= 2 && cmd[1] == "sledtest") { JoltSledTest(cmd.Length >= 3 ? cmd[2] : "slide"); return; }
             if (cmd.Length >= 2 && cmd[1] == "planetest") { JoltPlaneTest(cmd.Length >= 3 ? cmd[2] : "thrust"); return; }
+            if (cmd.Length >= 2 && cmd[1] == "balloontest") { JoltBalloonTest(cmd.Length >= 3 ? cmd[2] : "hover"); return; }
 
             if (cmd.Length >= 2 && cmd[1] == "terraintest")
             {
@@ -618,7 +619,7 @@ namespace OpenSim.Region.PhysicsModules.LegionJolt
                 return;
             }
 
-            MainConsole.Instance.Output("Usage: jolt linktest | unlinktest | collidetest | boattest [linear|hover|attract|steer] | cartest [linear|steer|attract] | sledtest [slide|nosteer|grip] | planetest [thrust|bank|climb] | terraintest | terrainslope | terrainhill | hilltest | probe <x> <y> | rezprims | rayprims | rezmesh | rezmeshn <count> | raymesh | droptest | dropmesh | dropstatus | avatarstatus | charframe [secs] | sitstatus | sittest | unsit | sittarget | sensortest | raytest | heights <x> <y> | reloadcheck | vehiclestatus | clearprims");
+            MainConsole.Instance.Output("Usage: jolt linktest | unlinktest | collidetest | boattest [linear|hover|attract|steer] | cartest [linear|steer|attract] | sledtest [slide|nosteer|grip] | planetest [thrust|bank|climb] | balloontest [hover|lift|drift] | terraintest | terrainslope | terrainhill | hilltest | probe <x> <y> | rezprims | rayprims | rezmesh | rezmeshn <count> | raymesh | droptest | dropmesh | dropstatus | avatarstatus | charframe [secs] | sitstatus | sittest | unsit | sittarget | sensortest | raytest | heights <x> <y> | reloadcheck | vehiclestatus | clearprims");
         }
 
         // M7 Task 1 proof: rez a root + 2 children at offsets, make the root physical, then run the OpenSim
@@ -1175,6 +1176,136 @@ namespace OpenSim.Region.PhysicsModules.LegionJolt
             bool pass = netYaw > 15f;
             MainConsole.Instance.Output($"{LogHeader} [planetest:bank] {(pass ? "PASS" : "FAIL")}: banked plane turned {netYaw:0.0} deg (banks to turn).");
             _scene.DeleteSceneObject(plane, false);
+        }
+
+        // M8 BALLOON proofs. `jolt balloontest [hover|lift|drift]` (default hover). Rezzes a physical
+        // VEHICLE_TYPE_BALLOON in the air; buoyancy 1.0 cancels gravity so it HANGS (hover trims to ~5 m above
+        // ground). The 5th and final SL type:
+        //   hover : no input -> hangs in mid-air (doesn't fall to the ground like a car)
+        //   lift  : Z-up motor -> climbs (live vertical motor, no airspeed needed - hover clamps most of it)
+        //   drift : horizontal motor -> drifts gently
+        private void JoltBalloonTest(string scenario)
+        {
+            if (_scene == null) { MainConsole.Instance.Output($"{LogHeader} no scene."); return; }
+            switch (scenario)
+            {
+                case "lift":  BalloonLiftTest();  break;
+                case "drift": BalloonDriftTest(); break;
+                default:      BalloonHoverTest(); break;
+            }
+        }
+
+        // Rez a physical VEHICLE_TYPE_BALLOON box at (x,y,z). Returns the SOG + PhysActor + JoltPrim + id.
+        private (SceneObjectGroup sog, PhysicsActor pa, JoltPrim jp, uint id) RezBalloon(float x, float y, float z, Quaternion rot)
+        {
+            SceneObjectGroup balloon = RezTestPrim("box", new Vector3(x, y, z), new Vector3(2f, 2f, 2f));
+            if (rot != Quaternion.Identity)
+                balloon.UpdateGroupRotationR(rot);
+            balloon.ScriptSetPhysicsStatus(true);
+            PhysicsActor pa = balloon.RootPart.PhysActor;
+            if (pa == null) { _scene.DeleteSceneObject(balloon, false); return (null, null, null, 0); }
+            if (rot != Quaternion.Identity) pa.Orientation = rot;
+            uint id = balloon.RootPart.LocalId;
+            pa.VehicleType = (int)Vehicle.TYPE_BALLOON;
+            JoltPrim jp;
+            lock (_prims) _prims.TryGetValue(id, out jp);
+            return (balloon, pa, jp, id);
+        }
+
+        // ---- balloon (hover): no input -> hangs in mid-air (buoyancy 1.0 cancels gravity) ----------
+        private void BalloonHoverTest()
+        {
+            float cx = 128f, cy = 128f;
+            float ground = TerrainHeightAt(cx, cy);
+            float z0 = ground + 10f;   // rez in the air
+            var (balloon, pa, jp, id) = RezBalloon(cx, cy, z0, Quaternion.Identity);
+            if (pa == null) { MainConsole.Instance.Output($"{LogHeader} balloontest: balloon has no PhysActor."); return; }
+
+            MainConsole.Instance.Output($"{LogHeader} [balloontest:hover] balloon id={id} at z-ground={z0 - ground:0.0}, type={pa.VehicleType} (expect 5), NO input");
+            MainConsole.Instance.Output($"     t   |  z-ground |    vZ");
+
+            float minClear = float.MaxValue;
+            for (int i = 0; i <= 10; i++)
+            {
+                System.Threading.Thread.Sleep(500);
+                if (!CarState(jp, out float tilt, out SVector3 p, out SVector3 lv, out SQuaternion o))
+                { MainConsole.Instance.Output($"  {i * 0.5f,4:0.0}s | (no body state)"); continue; }
+                float clear = p.Z - TerrainHeightAt(p.X, p.Y);
+                if (i >= 1 && clear < minClear) minClear = clear;
+                MainConsole.Instance.Output($"  {i * 0.5f,4:0.0}s | {clear,8:0.00} | {lv.Z,7:0.000}");
+            }
+
+            bool pass = minClear > 2f;   // stayed airborne (hung) - a car would fall to the ground (0)
+            MainConsole.Instance.Output($"{LogHeader} [balloontest:hover] {(pass ? "PASS" : "FAIL")}: balloon HUNG in mid-air (min clearance {minClear:0.00} m; a car falls to 0).");
+            _scene.DeleteSceneObject(balloon, false);
+        }
+
+        // ---- balloon (lift): Z-up motor -> climbs (live vertical motor, no airspeed) ---------------
+        private void BalloonLiftTest()
+        {
+            float cx = 128f, cy = 128f;
+            float ground = TerrainHeightAt(cx, cy);
+            // Rez AT the hover height (~5 m) so there is almost no descent to drain - the old harness rezzed
+            // at +10 m and measured the baseline mid-descent (hover TS 10 is slow), so the slow Z-motor spent
+            // seconds fighting the ongoing sink and showed no net gain. Settle first, THEN measure the climb
+            // from the settled hover point (the same measure-from-equilibrium the unit test uses).
+            var (balloon, pa, jp, id) = RezBalloon(cx, cy, ground + 5f, Quaternion.Identity);
+            if (pa == null) { MainConsole.Instance.Output($"{LogHeader} balloontest: balloon has no PhysActor."); return; }
+
+            MainConsole.Instance.Output($"{LogHeader} [balloontest:lift] balloon id={id} type={pa.VehicleType} (expect 5)");
+            System.Threading.Thread.Sleep(3500);   // settle to a steady hover (drain the spawn transient) FIRST
+            float baseClear = 0f;
+            if (CarState(jp, out _, out SVector3 pb, out _, out _)) baseClear = pb.Z - TerrainHeightAt(pb.X, pb.Y);
+            var up = new Vector3(0f, 0f, 15f);   // Z linear motor - straight up, no airspeed
+            MainConsole.Instance.Output($"{LogHeader} [balloontest:lift] settled at z-ground={baseClear:0.00}; holding Z-up motor {up} (slow climb - give it time)");
+            MainConsole.Instance.Output($"     t   |  z-ground |    vZ");
+
+            float maxClear = baseClear;
+            for (int i = 0; i <= 16; i++)   // longer window: the Z motor is deliberately slow (TS 5, decay 60)
+            {
+                pa.VehicleVectorParam((int)Vehicle.LINEAR_MOTOR_DIRECTION, up);
+                System.Threading.Thread.Sleep(500);
+                if (!CarState(jp, out float tilt, out SVector3 p, out SVector3 lv, out SQuaternion o))
+                { MainConsole.Instance.Output($"  {i * 0.5f,4:0.0}s | (no body state)"); continue; }
+                float clear = p.Z - TerrainHeightAt(p.X, p.Y);
+                if (clear > maxClear) maxClear = clear;
+                MainConsole.Instance.Output($"  {i * 0.5f,4:0.0}s | {clear,8:0.00} | {lv.Z,7:0.000}");
+            }
+
+            bool pass = maxClear > baseClear + 0.5f;   // the live Z-motor lifted it above its settled hover hold
+            MainConsole.Instance.Output($"{LogHeader} [balloontest:lift] {(pass ? "PASS" : "FAIL")}: Z-motor lifted balloon {maxClear - baseClear:0.00} m above settled hover (live vertical motor).");
+            _scene.DeleteSceneObject(balloon, false);
+        }
+
+        // ---- balloon (drift): horizontal motor -> gentle drift -------------------------------------
+        private void BalloonDriftTest()
+        {
+            float cx = 128f, cy = 128f;
+            float ground = TerrainHeightAt(cx, cy);
+            var (balloon, pa, jp, id) = RezBalloon(cx, cy, ground + 10f, Quaternion.Identity);
+            if (pa == null) { MainConsole.Instance.Output($"{LogHeader} balloontest: balloon has no PhysActor."); return; }
+
+            MainConsole.Instance.Output($"{LogHeader} [balloontest:drift] balloon id={id} type={pa.VehicleType} (expect 5)");
+            System.Threading.Thread.Sleep(1000);   // settle to hover height
+            var motor = new Vector3(5f, 0f, 0f);   // gentle horizontal motor
+            MainConsole.Instance.Output($"{LogHeader} [balloontest:drift] holding horizontal motor {motor} (gentle drift)");
+            MainConsole.Instance.Output($"     t   |  speedXY | z-ground");
+
+            float maxSpeed = 0f;
+            for (int i = 0; i <= 8; i++)
+            {
+                pa.VehicleVectorParam((int)Vehicle.LINEAR_MOTOR_DIRECTION, motor);
+                System.Threading.Thread.Sleep(500);
+                if (!CarState(jp, out float tilt, out SVector3 p, out SVector3 lv, out SQuaternion o))
+                { MainConsole.Instance.Output($"  {i * 0.5f,4:0.0}s | (no body state)"); continue; }
+                float speedXY = (float)Math.Sqrt(lv.X * lv.X + lv.Y * lv.Y);
+                if (speedXY > maxSpeed) maxSpeed = speedXY;
+                MainConsole.Instance.Output($"  {i * 0.5f,4:0.0}s | {speedXY,8:0.000} | {p.Z - TerrainHeightAt(p.X, p.Y),8:0.00}");
+            }
+
+            bool pass = maxSpeed > 0.3f;   // drifted horizontally under the gentle motor
+            MainConsole.Instance.Output($"{LogHeader} [balloontest:drift] {(pass ? "PASS" : "FAIL")}: balloon drifted (max XY speed {maxSpeed:0.00} m/s).");
+            _scene.DeleteSceneObject(balloon, false);
         }
 
         // Ensure there is deep water at the test spot. Grid-scans the terrain field for the deepest
