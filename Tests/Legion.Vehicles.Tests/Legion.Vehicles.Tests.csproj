@@ -39,6 +39,8 @@
     <Compile Include="SledMovementTests.cs" />
     <Compile Include="CarScenario.cs" />
     <Compile Include="CarTests.cs" />
+    <Compile Include="SledScenario.cs" />
+    <Compile Include="SledTests.cs" />
   </ItemGroup>
 
   <ItemGroup>

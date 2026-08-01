@@ -292,7 +292,7 @@ namespace OpenSim.Region.PhysicsModules.LegionJolt
             {
                 _consoleRegistered = true;
                 MainConsole.Instance.Commands.AddCommand("Physics", false, "jolt",
-                    "jolt linktest | unlinktest | collidetest | boattest [linear|hover|attract|steer] | cartest [linear|steer|attract] | terraintest | terrainslope | terrainhill | hilltest | probe <x> <y> | rezprims | rayprims | rezmesh | rezmeshn <count> | raymesh | droptest | dropmesh | dropstatus | avatarstatus | charframe [secs] | sitstatus | sittest | unsit | sittarget | sensortest | raytest | heights <x> <y> | reloadcheck | vehiclestatus | clearprims",
+                    "jolt linktest | unlinktest | collidetest | boattest [linear|hover|attract|steer] | cartest [linear|steer|attract] | sledtest [slide|nosteer|grip] | terraintest | terrainslope | terrainhill | hilltest | probe <x> <y> | rezprims | rayprims | rezmesh | rezmeshn <count> | raymesh | droptest | dropmesh | dropstatus | avatarstatus | charframe [secs] | sitstatus | sittest | unsit | sittarget | sensortest | raytest | heights <x> <y> | reloadcheck | vehiclestatus | clearprims",
                     "Legion Jolt proofs (M6.2 terrain / M6.3 prims): raycast the cooked collision surfaces and report hits.",
                     HandleJoltConsole);
             }
@@ -313,6 +313,7 @@ namespace OpenSim.Region.PhysicsModules.LegionJolt
             if (cmd.Length >= 2 && cmd[1] == "collidelinktest") { JoltCollideLinkTest(); return; }
             if (cmd.Length >= 2 && cmd[1] == "boattest") { JoltBoatTest(cmd.Length >= 3 ? cmd[2] : "linear"); return; }
             if (cmd.Length >= 2 && cmd[1] == "cartest") { JoltCarTest(cmd.Length >= 3 ? cmd[2] : "linear"); return; }
+            if (cmd.Length >= 2 && cmd[1] == "sledtest") { JoltSledTest(cmd.Length >= 3 ? cmd[2] : "slide"); return; }
 
             if (cmd.Length >= 2 && cmd[1] == "terraintest")
             {
@@ -616,7 +617,7 @@ namespace OpenSim.Region.PhysicsModules.LegionJolt
                 return;
             }
 
-            MainConsole.Instance.Output("Usage: jolt linktest | unlinktest | collidetest | boattest [linear|hover|attract|steer] | cartest [linear|steer|attract] | terraintest | terrainslope | terrainhill | hilltest | probe <x> <y> | rezprims | rayprims | rezmesh | rezmeshn <count> | raymesh | droptest | dropmesh | dropstatus | avatarstatus | charframe [secs] | sitstatus | sittest | unsit | sittarget | sensortest | raytest | heights <x> <y> | reloadcheck | vehiclestatus | clearprims");
+            MainConsole.Instance.Output("Usage: jolt linktest | unlinktest | collidetest | boattest [linear|hover|attract|steer] | cartest [linear|steer|attract] | sledtest [slide|nosteer|grip] | terraintest | terrainslope | terrainhill | hilltest | probe <x> <y> | rezprims | rayprims | rezmesh | rezmeshn <count> | raymesh | droptest | dropmesh | dropstatus | avatarstatus | charframe [secs] | sitstatus | sittest | unsit | sittarget | sensortest | raytest | heights <x> <y> | reloadcheck | vehiclestatus | clearprims");
         }
 
         // M7 Task 1 proof: rez a root + 2 children at offsets, make the root physical, then run the OpenSim
@@ -888,6 +889,135 @@ namespace OpenSim.Region.PhysicsModules.LegionJolt
             bool pass = lastTilt < startTilt - 10f && lastTilt < 15f;
             MainConsole.Instance.Output($"{LogHeader} [cartest:attract] {(pass ? "PASS" : "FAIL")}: righted from {startTilt:0.0} to {lastTilt:0.0} deg.");
             _scene.DeleteSceneObject(car, false);
+        }
+
+        // M8 SLED proofs. `jolt sledtest [slide|nosteer|grip]` (default slide). Rezzes a physical
+        // VEHICLE_TYPE_SLED on the terrain and drives ONE aspect of the extracted controller:
+        //   slide   : born nose-down -> glides forward down its nose (SimulateSledMovement gravity engine)
+        //   nosteer : angular motor -> the sled does NOT turn (motor TS 1000 inert) - the car/sled contrast
+        //   grip    : nose-down glide -> forward speed builds while lateral slip stays gripped
+        private void JoltSledTest(string scenario)
+        {
+            if (_scene == null) { MainConsole.Instance.Output($"{LogHeader} no scene."); return; }
+            switch (scenario)
+            {
+                case "nosteer": SledNoSteerTest(); break;
+                case "grip":    SledGripTest();    break;
+                default:        SledSlideTest();   break;
+            }
+        }
+
+        // Rez a physical VEHICLE_TYPE_SLED box at (x,y,z). Returns the SOG + PhysActor + JoltPrim + id.
+        private (SceneObjectGroup sog, PhysicsActor pa, JoltPrim jp, uint id) RezSled(float x, float y, float z, Quaternion rot)
+        {
+            SceneObjectGroup sled = RezTestPrim("box", new Vector3(x, y, z), new Vector3(2f, 1f, 0.5f));
+            if (rot != Quaternion.Identity)
+                sled.UpdateGroupRotationR(rot);
+            sled.ScriptSetPhysicsStatus(true);
+            PhysicsActor pa = sled.RootPart.PhysActor;
+            if (pa == null) { _scene.DeleteSceneObject(sled, false); return (null, null, null, 0); }
+            if (rot != Quaternion.Identity) pa.Orientation = rot;
+            uint id = sled.RootPart.LocalId;
+            pa.VehicleType = (int)Vehicle.TYPE_SLED;
+            JoltPrim jp;
+            lock (_prims) _prims.TryGetValue(id, out jp);
+            return (sled, pa, jp, id);
+        }
+
+        // ---- sled (slide): born nose-down -> glides forward down its nose --------------------------
+        private void SledSlideTest()
+        {
+            float cx = 128f, cy = 128f;
+            float ground = TerrainHeightAt(cx, cy);
+            Quaternion pitch = Quaternion.CreateFromAxisAngle(Vector3.UnitY, 20f * (float)(Math.PI / 180.0)); // nose down
+            var (sled, pa, jp, id) = RezSled(cx, cy, ground + 1.0f, pitch);
+            if (pa == null) { MainConsole.Instance.Output($"{LogHeader} sledtest: sled has no PhysActor."); return; }
+
+            MainConsole.Instance.Output($"{LogHeader} [sledtest:slide] sled id={id} born nose-down ~20deg, type={pa.VehicleType} (expect 1)");
+            MainConsole.Instance.Output($"     t   |  fwdSpeed |   speedXY | z-ground |  tiltDeg");
+
+            float maxSpeed = 0f;
+            for (int i = 0; i <= 8; i++)
+            {
+                System.Threading.Thread.Sleep(500);
+                if (!CarState(jp, out float tilt, out SVector3 p, out SVector3 lv, out SQuaternion o))
+                { MainConsole.Instance.Output($"  {i * 0.5f,4:0.0}s | (no body state)"); continue; }
+                var fwd = SVector3.Transform(new SVector3(1f, 0f, 0f), o);
+                float fwdSpeed = lv.X * fwd.X + lv.Y * fwd.Y + lv.Z * fwd.Z;
+                float speedXY = (float)Math.Sqrt(lv.X * lv.X + lv.Y * lv.Y);
+                if (speedXY > maxSpeed) maxSpeed = speedXY;
+                MainConsole.Instance.Output($"  {i * 0.5f,4:0.0}s | {fwdSpeed,9:0.000} | {speedXY,9:0.000} | {p.Z - TerrainHeightAt(p.X, p.Y),8:0.000} | {tilt,8:0.0}");
+            }
+
+            bool pass = maxSpeed > 0.5f;
+            MainConsole.Instance.Output($"{LogHeader} [sledtest:slide] {(pass ? "PASS" : "FAIL")}: sled glided down its nose (max XY speed {maxSpeed:0.00} m/s).");
+            _scene.DeleteSceneObject(sled, false);
+        }
+
+        // ---- sled (nosteer): angular motor -> the sled does NOT turn (the car/sled contrast) -------
+        private void SledNoSteerTest()
+        {
+            float cx = 128f, cy = 128f;
+            float ground = TerrainHeightAt(cx, cy);
+            var (sled, pa, jp, id) = RezSled(cx, cy, ground + 1.0f, Quaternion.Identity);
+            if (pa == null) { MainConsole.Instance.Output($"{LogHeader} sledtest: sled has no PhysActor."); return; }
+
+            MainConsole.Instance.Output($"{LogHeader} [sledtest:nosteer] sled id={id} type={pa.VehicleType} (expect 1)");
+            System.Threading.Thread.Sleep(1000);
+            var yaw = new Vector3(0f, 0f, 0.6f);   // the same yaw command a car steers hard under
+            MainConsole.Instance.Output($"{LogHeader} [sledtest:nosteer] holding ANGULAR_MOTOR_DIRECTION={yaw} - a sled should NOT turn");
+            MainConsole.Instance.Output($"     t   |  heading  |  tiltDeg");
+
+            float startHeading = float.NaN, lastHeading = float.NaN;
+            for (int i = 0; i <= 8; i++)
+            {
+                pa.VehicleVectorParam((int)Vehicle.ANGULAR_MOTOR_DIRECTION, yaw);
+                System.Threading.Thread.Sleep(500);
+                if (!CarState(jp, out float tilt, out _, out _, out SQuaternion o))
+                { MainConsole.Instance.Output($"  {i * 0.5f,4:0.0}s | (no body state)"); continue; }
+                float h = HeadingDeg(o);
+                if (float.IsNaN(startHeading)) startHeading = h;
+                lastHeading = h;
+                MainConsole.Instance.Output($"  {i * 0.5f,4:0.0}s | {h,8:0.0} | {tilt,8:0.0}");
+            }
+
+            float netYaw = Math.Abs(lastHeading - startHeading);
+            if (netYaw > 180f) netYaw = 360f - netYaw;
+            bool pass = netYaw < 15f;   // a car turns >20 deg under the same command; a sled must not
+            MainConsole.Instance.Output($"{LogHeader} [sledtest:nosteer] {(pass ? "PASS" : "FAIL")}: sled turned only {netYaw:0.0} deg (a car would turn hard).");
+            _scene.DeleteSceneObject(sled, false);
+        }
+
+        // ---- sled (grip): nose-down glide, forward builds while lateral slip stays gripped ---------
+        private void SledGripTest()
+        {
+            float cx = 128f, cy = 128f;
+            float ground = TerrainHeightAt(cx, cy);
+            Quaternion pitch = Quaternion.CreateFromAxisAngle(Vector3.UnitY, 15f * (float)(Math.PI / 180.0)); // slight nose-down to glide
+            var (sled, pa, jp, id) = RezSled(cx, cy, ground + 1.0f, pitch);
+            if (pa == null) { MainConsole.Instance.Output($"{LogHeader} sledtest: sled has no PhysActor."); return; }
+
+            MainConsole.Instance.Output($"{LogHeader} [sledtest:grip] sled id={id} type={pa.VehicleType} (expect 1) - glides forward, lateral slip gripped");
+            MainConsole.Instance.Output($"     t   |  fwdSpeed | sideSpeed | z-ground");
+
+            float lastFwd = 0f, maxSide = 0f;
+            for (int i = 0; i <= 8; i++)
+            {
+                System.Threading.Thread.Sleep(500);
+                if (!CarState(jp, out float tilt, out SVector3 p, out SVector3 lv, out SQuaternion o))
+                { MainConsole.Instance.Output($"  {i * 0.5f,4:0.0}s | (no body state)"); continue; }
+                var fwd = SVector3.Transform(new SVector3(1f, 0f, 0f), o);
+                var side = SVector3.Transform(new SVector3(0f, 1f, 0f), o);
+                float fwdSpeed = lv.X * fwd.X + lv.Y * fwd.Y + lv.Z * fwd.Z;
+                float sideSpeed = Math.Abs(lv.X * side.X + lv.Y * side.Y + lv.Z * side.Z);
+                if (sideSpeed > maxSide) maxSide = sideSpeed;
+                lastFwd = fwdSpeed;
+                MainConsole.Instance.Output($"  {i * 0.5f,4:0.0}s | {fwdSpeed,9:0.000} | {sideSpeed,9:0.000} | {p.Z - TerrainHeightAt(p.X, p.Y),8:0.000}");
+            }
+
+            bool pass = lastFwd > 0.5f && maxSide < 1.0f;
+            MainConsole.Instance.Output($"{LogHeader} [sledtest:grip] {(pass ? "PASS" : "FAIL")}: forward glide {lastFwd:0.00} m/s, max lateral slip {maxSide:0.00} m/s.");
+            _scene.DeleteSceneObject(sled, false);
         }
 
         // Ensure there is deep water at the test spot. Grid-scans the terrain field for the deepest
