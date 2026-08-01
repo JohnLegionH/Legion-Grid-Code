@@ -292,7 +292,7 @@ namespace OpenSim.Region.PhysicsModules.LegionJolt
             {
                 _consoleRegistered = true;
                 MainConsole.Instance.Commands.AddCommand("Physics", false, "jolt",
-                    "jolt linktest | unlinktest | collidetest | boattest [linear|hover|attract|steer] | cartest [linear|steer|attract] | sledtest [slide|nosteer|grip] | terraintest | terrainslope | terrainhill | hilltest | probe <x> <y> | rezprims | rayprims | rezmesh | rezmeshn <count> | raymesh | droptest | dropmesh | dropstatus | avatarstatus | charframe [secs] | sitstatus | sittest | unsit | sittarget | sensortest | raytest | heights <x> <y> | reloadcheck | vehiclestatus | clearprims",
+                    "jolt linktest | unlinktest | collidetest | boattest [linear|hover|attract|steer] | cartest [linear|steer|attract] | sledtest [slide|nosteer|grip] | planetest [thrust|bank|climb] | terraintest | terrainslope | terrainhill | hilltest | probe <x> <y> | rezprims | rayprims | rezmesh | rezmeshn <count> | raymesh | droptest | dropmesh | dropstatus | avatarstatus | charframe [secs] | sitstatus | sittest | unsit | sittarget | sensortest | raytest | heights <x> <y> | reloadcheck | vehiclestatus | clearprims",
                     "Legion Jolt proofs (M6.2 terrain / M6.3 prims): raycast the cooked collision surfaces and report hits.",
                     HandleJoltConsole);
             }
@@ -314,6 +314,7 @@ namespace OpenSim.Region.PhysicsModules.LegionJolt
             if (cmd.Length >= 2 && cmd[1] == "boattest") { JoltBoatTest(cmd.Length >= 3 ? cmd[2] : "linear"); return; }
             if (cmd.Length >= 2 && cmd[1] == "cartest") { JoltCarTest(cmd.Length >= 3 ? cmd[2] : "linear"); return; }
             if (cmd.Length >= 2 && cmd[1] == "sledtest") { JoltSledTest(cmd.Length >= 3 ? cmd[2] : "slide"); return; }
+            if (cmd.Length >= 2 && cmd[1] == "planetest") { JoltPlaneTest(cmd.Length >= 3 ? cmd[2] : "thrust"); return; }
 
             if (cmd.Length >= 2 && cmd[1] == "terraintest")
             {
@@ -617,7 +618,7 @@ namespace OpenSim.Region.PhysicsModules.LegionJolt
                 return;
             }
 
-            MainConsole.Instance.Output("Usage: jolt linktest | unlinktest | collidetest | boattest [linear|hover|attract|steer] | cartest [linear|steer|attract] | sledtest [slide|nosteer|grip] | terraintest | terrainslope | terrainhill | hilltest | probe <x> <y> | rezprims | rayprims | rezmesh | rezmeshn <count> | raymesh | droptest | dropmesh | dropstatus | avatarstatus | charframe [secs] | sitstatus | sittest | unsit | sittarget | sensortest | raytest | heights <x> <y> | reloadcheck | vehiclestatus | clearprims");
+            MainConsole.Instance.Output("Usage: jolt linktest | unlinktest | collidetest | boattest [linear|hover|attract|steer] | cartest [linear|steer|attract] | sledtest [slide|nosteer|grip] | planetest [thrust|bank|climb] | terraintest | terrainslope | terrainhill | hilltest | probe <x> <y> | rezprims | rayprims | rezmesh | rezmeshn <count> | raymesh | droptest | dropmesh | dropstatus | avatarstatus | charframe [secs] | sitstatus | sittest | unsit | sittarget | sensortest | raytest | heights <x> <y> | reloadcheck | vehiclestatus | clearprims");
         }
 
         // M7 Task 1 proof: rez a root + 2 children at offsets, make the root physical, then run the OpenSim
@@ -1018,6 +1019,162 @@ namespace OpenSim.Region.PhysicsModules.LegionJolt
             bool pass = lastFwd > 0.5f && maxSide < 1.0f;
             MainConsole.Instance.Output($"{LogHeader} [sledtest:grip] {(pass ? "PASS" : "FAIL")}: forward glide {lastFwd:0.00} m/s, max lateral slip {maxSide:0.00} m/s.");
             _scene.DeleteSceneObject(sled, false);
+        }
+
+        // M8 AIRPLANE proofs. `jolt planetest [thrust|bank|climb]` (default thrust). Rezzes a physical
+        // VEHICLE_TYPE_AIRPLANE HIGH in the air and holds thrust each tick (a plane has buoyancy 0 - it
+        // FALLS without continuous thrust, which is correct). Drives ONE aspect of the controller:
+        //   thrust : held forward motor -> airspeed builds
+        //   climb  : nose-up + thrust -> gains altitude (lift from linear deflection)
+        //   bank   : rolled + thrust -> heading turns (banking->yaw; a plane turns by banking)
+        private void JoltPlaneTest(string scenario)
+        {
+            if (_scene == null) { MainConsole.Instance.Output($"{LogHeader} no scene."); return; }
+            switch (scenario)
+            {
+                case "bank":  PlaneBankTest();  break;
+                case "climb": PlaneClimbTest(); break;
+                default:      PlaneThrustTest(); break;
+            }
+        }
+
+        // Rez a physical VEHICLE_TYPE_AIRPLANE box at (x,y,z). Returns the SOG + PhysActor + JoltPrim + id.
+        private (SceneObjectGroup sog, PhysicsActor pa, JoltPrim jp, uint id) RezPlane(float x, float y, float z, Quaternion rot)
+        {
+            SceneObjectGroup plane = RezTestPrim("box", new Vector3(x, y, z), new Vector3(3f, 2f, 0.5f));
+            if (rot != Quaternion.Identity)
+                plane.UpdateGroupRotationR(rot);
+            plane.ScriptSetPhysicsStatus(true);
+            PhysicsActor pa = plane.RootPart.PhysActor;
+            if (pa == null) { _scene.DeleteSceneObject(plane, false); return (null, null, null, 0); }
+            if (rot != Quaternion.Identity) pa.Orientation = rot;
+            uint id = plane.RootPart.LocalId;
+            pa.VehicleType = (int)Vehicle.TYPE_AIRPLANE;
+            JoltPrim jp;
+            lock (_prims) _prims.TryGetValue(id, out jp);
+            return (plane, pa, jp, id);
+        }
+
+        // ---- plane (thrust): held forward motor -> airspeed builds ---------------------------------
+        private void PlaneThrustTest()
+        {
+            float cx = 128f, cy = 128f;
+            float z0 = TerrainHeightAt(cx, cy) + 100f;   // high in the air
+            var (plane, pa, jp, id) = RezPlane(cx, cy, z0, Quaternion.Identity);
+            if (pa == null) { MainConsole.Instance.Output($"{LogHeader} planetest: plane has no PhysActor."); return; }
+
+            MainConsole.Instance.Output($"{LogHeader} [planetest:thrust] plane id={id} at z={z0:0.0} (high), type={pa.VehicleType} (expect 4)");
+            var motor = new Vector3(15f, 0f, 0f);   // hold forward thrust (a plane needs continuous thrust)
+            MainConsole.Instance.Output($"{LogHeader} [planetest:thrust] holding LINEAR_MOTOR_DIRECTION={motor}");
+            MainConsole.Instance.Output($"     t   |  fwdSpeed |   speedXY | z-drop");
+
+            float last = 0f;
+            for (int i = 0; i <= 8; i++)
+            {
+                pa.VehicleVectorParam((int)Vehicle.LINEAR_MOTOR_DIRECTION, motor);
+                System.Threading.Thread.Sleep(500);
+                if (!CarState(jp, out float tilt, out SVector3 p, out SVector3 lv, out SQuaternion o))
+                { MainConsole.Instance.Output($"  {i * 0.5f,4:0.0}s | (no body state)"); continue; }
+                var fwd = SVector3.Transform(new SVector3(1f, 0f, 0f), o);
+                float fwdSpeed = lv.X * fwd.X + lv.Y * fwd.Y + lv.Z * fwd.Z;
+                float speedXY = (float)Math.Sqrt(lv.X * lv.X + lv.Y * lv.Y);
+                last = fwdSpeed;
+                MainConsole.Instance.Output($"  {i * 0.5f,4:0.0}s | {fwdSpeed,9:0.000} | {speedXY,9:0.000} | {z0 - p.Z,7:0.00}");
+            }
+
+            bool pass = last > 3f;
+            MainConsole.Instance.Output($"{LogHeader} [planetest:thrust] {(pass ? "PASS" : "FAIL")}: plane accelerated to {last:0.00} m/s forward under thrust.");
+            _scene.DeleteSceneObject(plane, false);
+        }
+
+        // ---- plane (climb): nose-up + thrust -> gains altitude (lift) ------------------------------
+        private void PlaneClimbTest()
+        {
+            // Start back from the +X edge so the fast climb-run (~40 m/s forward) stays inside the region.
+            float cx = 64f, cy = 128f;
+            float zRez = TerrainHeightAt(cx, cy) + 100f;
+            // Pitch >= 23deg: the lift model is a velocity-preserving deflection, so per frame lift ~
+            // airspeed * blend * sin(pitch); to beat gravity you need airspeed*sin(pitch) > 9.81. At 25deg
+            // the stall airspeed is 9.81/sin(25) = 23.2 m/s, so cruising at 40 clears it with margin.
+            Quaternion noseUp = Quaternion.CreateFromAxisAngle(Vector3.UnitY, -25f * (float)(Math.PI / 180.0));
+            var (plane, pa, jp, id) = RezPlane(cx, cy, zRez, noseUp);
+            if (pa == null) { MainConsole.Instance.Output($"{LogHeader} planetest: plane has no PhysActor."); return; }
+
+            // The body is created INERT (deferred activation); a velocity set BEFORE it wakes is dropped -
+            // Jolt keeps the creation-time velocity (0), so the earlier harness launched at ~0 airspeed
+            // (below stall) and sank (fwdSpeed ramped 0->29 instead of starting at 40). Let one Simulate wake
+            // the body (DrainPendingActivation), THEN inject cruise airspeed on the now-ACTIVE body so it is
+            // present at t=0. The linear motor keeps a body already moving faster than its ramping target (it
+            // never drags it down, see the adjvel guard), so the injected 40 persists and lift beats gravity.
+            System.Threading.Thread.Sleep(600);              // wake the deferred body
+            pa.Velocity = new Vector3(40f, 0f, 0f);          // inject cruise airspeed on the ACTIVE body
+            var motor = new Vector3(40f, 0f, 0f);            // sustain ~40 m/s along the nose
+            // Re-baseline altitude at cruise-injection (ignore the tiny fall during the ~0.6 s spin-up).
+            float z0 = zRez;
+            if (CarState(jp, out _, out SVector3 pz0, out _, out _)) z0 = pz0.Z;
+            MainConsole.Instance.Output($"{LogHeader} [planetest:climb] plane id={id} nose-up ~25deg, cruise 40 m/s at z={z0:0.0}, type={pa.VehicleType} (expect 4)");
+            MainConsole.Instance.Output($"{LogHeader} [planetest:climb] holding thrust={motor} (cruise airspeed injected on active body; fwdSpeed should read ~40 at t=0)");
+            MainConsole.Instance.Output($"     t   |  altitude | z-gain | fwdSpeed");
+
+            float maxGain = float.MinValue;
+            for (int i = 0; i <= 7; i++)
+            {
+                pa.VehicleVectorParam((int)Vehicle.LINEAR_MOTOR_DIRECTION, motor);
+                System.Threading.Thread.Sleep(500);
+                if (!CarState(jp, out float tilt, out SVector3 p, out SVector3 lv, out SQuaternion o))
+                { MainConsole.Instance.Output($"  {i * 0.5f,4:0.0}s | (no body state)"); continue; }
+                var fwd = SVector3.Transform(new SVector3(1f, 0f, 0f), o);
+                float fwdSpeed = lv.X * fwd.X + lv.Y * fwd.Y + lv.Z * fwd.Z;
+                float gain = p.Z - z0;
+                if (gain > maxGain) maxGain = gain;
+                MainConsole.Instance.Output($"  {i * 0.5f,4:0.0}s | {p.Z,9:0.00} | {gain,6:0.00} | {fwdSpeed,8:0.00}");
+            }
+
+            bool pass = maxGain > 1f;   // climbed clearly above the start altitude (lift beat gravity)
+            MainConsole.Instance.Output($"{LogHeader} [planetest:climb] {(pass ? "PASS" : "FAIL")}: max altitude gain {maxGain:0.00} m above cruise-start (lift).");
+            _scene.DeleteSceneObject(plane, false);
+        }
+
+        // ---- plane (bank): rolled + thrust -> heading turns (banks to turn) ------------------------
+        private void PlaneBankTest()
+        {
+            float cx = 128f, cy = 128f;
+            float z0 = TerrainHeightAt(cx, cy) + 100f;
+            Quaternion roll = Quaternion.CreateFromAxisAngle(Vector3.UnitX, 25f * (float)(Math.PI / 180.0));
+            var (plane, pa, jp, id) = RezPlane(cx, cy, z0, roll);
+            if (pa == null) { MainConsole.Instance.Output($"{LogHeader} planetest: plane has no PhysActor."); return; }
+
+            // A plane turns by BANKING (roll->yaw), and the bank must be HELD or the vertical attractor
+            // levels the wings and the turn washes out (the old harness applied only thrust, so a born-25deg
+            // bank self-leveled and it turned just 11.6deg). Hold a roll input each tick (ANGULAR_MOTOR.X) so
+            // the bank is sustained; the weak airplane attractor lets a modest held roll settle at a steady
+            // bank -> a steady banking turn. Forward airspeed feeds the dynamic half of banking->yaw.
+            pa.Velocity = new Vector3(15f, 0f, 0f);      // forward airspeed (nose is +X; roll is about the nose)
+            var thrust = new Vector3(20f, 0f, 0f);
+            var heldRoll = new Vector3(0.15f, 0f, 0f);   // sustain the bank at a gentler steady angle (roll rate, body X)
+            MainConsole.Instance.Output($"{LogHeader} [planetest:bank] plane id={id} rolled ~25deg at z={z0:0.0}, type={pa.VehicleType} (expect 4)");
+            MainConsole.Instance.Output($"{LogHeader} [planetest:bank] holding thrust + HELD roll {heldRoll} (sustain the bank -> banking turn)");
+            MainConsole.Instance.Output($"     t   |  heading  | tiltDeg");
+
+            float startHeading = float.NaN, lastHeading = float.NaN;
+            for (int i = 0; i <= 10; i++)
+            {
+                pa.VehicleVectorParam((int)Vehicle.LINEAR_MOTOR_DIRECTION, thrust);
+                pa.VehicleVectorParam((int)Vehicle.ANGULAR_MOTOR_DIRECTION, heldRoll);
+                System.Threading.Thread.Sleep(500);
+                if (!CarState(jp, out float tilt, out _, out _, out SQuaternion o))
+                { MainConsole.Instance.Output($"  {i * 0.5f,4:0.0}s | (no body state)"); continue; }
+                float h = HeadingDeg(o);
+                if (float.IsNaN(startHeading)) startHeading = h;
+                lastHeading = h;
+                MainConsole.Instance.Output($"  {i * 0.5f,4:0.0}s | {h,8:0.0} | {tilt,8:0.0}");
+            }
+
+            float netYaw = Math.Abs(lastHeading - startHeading);
+            if (netYaw > 180f) netYaw = 360f - netYaw;
+            bool pass = netYaw > 15f;
+            MainConsole.Instance.Output($"{LogHeader} [planetest:bank] {(pass ? "PASS" : "FAIL")}: banked plane turned {netYaw:0.0} deg (banks to turn).");
+            _scene.DeleteSceneObject(plane, false);
         }
 
         // Ensure there is deep water at the test spot. Grid-scans the terrain field for the deepest
