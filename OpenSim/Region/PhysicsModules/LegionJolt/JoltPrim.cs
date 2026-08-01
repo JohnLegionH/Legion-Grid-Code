@@ -325,6 +325,26 @@ namespace OpenSim.Region.PhysicsModules.LegionJolt
         private void RepositionBody()
         {
             if (!_body.IsValid) { Build(); return; }
+
+            // Load-time un-bury (restores what the old remove+recreate path did for free). The pre-Fix#1
+            // RepositionBody re-ran CreateBodyInternal, so a load-time Position push carrying a saved
+            // BELOW-terrain position was lifted (TryUnburyPhysicalLoad) before the body went active. In-place
+            // SetBodyTransform skips CreateBodyInternal, so without this a penetrating load position would be
+            // pushed straight into the terrain -> the CollisionSteps=6 solver churns resolving the deep
+            // penetration -> the ~5.8s boot-stall. Re-apply the SAME un-bury here, reusing the shared helper.
+            //
+            // GATED on IsRegionLoading ONLY: a LIVE vehicle repositioning (e.g. a car dipping below terrain on
+            // a bump mid-drive) must NOT be snapped up - that is real runtime motion, not a bad load position.
+            if (_isPhysical && _module.IsRegionLoading
+                && _module.TryUnburyPhysicalLoad(_position, _size, out Vector3 lifted))
+            {
+                _position = lifted;
+                _velocity = Vector3.Zero;              // no post-lift slide (matches CreateBodyInternal's un-bury)
+                _rotationalVelocity = Vector3.Zero;
+                _backend.SetBodyLinearVelocity(_body, ToS(_velocity));
+                _backend.SetBodyAngularVelocity(_body, ToS(_rotationalVelocity));
+            }
+
             _backend.SetBodyTransform(_body, ToS(_position), BodyOrientationOf(_orientation), activate: false);
         }
 
