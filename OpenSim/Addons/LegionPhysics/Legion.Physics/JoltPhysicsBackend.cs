@@ -95,10 +95,39 @@ namespace Legion.Physics.Jolt
         private readonly ConcurrentDictionary<QueryFilter, LayerQueryFilter> _queryFilters =
             new ConcurrentDictionary<QueryFilter, LayerQueryFilter>();
 
+        // =====================================================================
+        // _simLock - the ONE gate serialising native Jolt calls that share the
+        // PhysicsSystem's INTERNAL TempAllocator.
+        //
+        // WHY THIS EXISTS (a process-killer, found on Legion 2026-08-01):
+        // PhysicsSystem.Update and CharacterVirtual.ExtendedUpdate both allocate
+        // from an internal TempAllocatorImpl. That allocator is a LIFO STACK and is
+        // NOT thread-safe: if two threads allocate/free against it concurrently the
+        // frees come back out of order, Jolt prints
+        //     "TempAllocator: Freeing in the wrong order"
+        // and calls std::abort() - the whole simulator dies, no managed exception.
+        // JoltPhysicsSharp does not expose the allocator, so we cannot size or
+        // replace it; the only fix is to never let two threads inside Jolt at once.
+        //
+        // The old code assumed "NarrowPhaseQuery is safe concurrent with Step".
+        // It is not - queries also walk the broadphase Update is mutating. Two
+        // off-heartbeat callers proved it: the avatar spawn probe (login/teleport
+        // thread) and llCastRay (script threads).
+        //
+        // LOCK ORDER - always _simLock FIRST, then _characterGate. Never the
+        // reverse, or Step and an avatar operation can deadlock each other. C#
+        // Monitor is re-entrant per thread, so a nested take of _simLock on the
+        // same thread is harmless; only ORDER inversion between the two locks is
+        // fatal. _gate (HandleTable) is a leaf lock - it calls nothing - so it can
+        // be taken under either without risk.
+        // =====================================================================
+        private readonly object _simLock = new object();
+
         // Characters (CharacterVirtual) are NOT lock-free like BodyInterface, and they are stepped on
         // the Step thread OUTSIDE _system.Update. So all character create/remove/set/step operations are
         // serialised through this gate and the step-thread-owned list. (Abstraction friction vs the
         // taint-free body path - see the M3 notes.)
+        // Always taken INSIDE _simLock when both are needed (see the lock-order note above).
         private readonly object _characterGate = new object();
         private readonly List<JoltCharacterRecord> _characterList = new List<JoltCharacterRecord>();
 
@@ -1254,6 +1283,10 @@ namespace Legion.Physics.Jolt
                 // which is preferable to hover+hop. Do not raise the look-ahead without a slope walk-test.
             };
 
+            // _simLock: AddCharacter runs on the LOGIN/TELEPORT thread and adds the query-marker body,
+            // which mutates the broadphase Update is walking. Taken outside _characterGate per the
+            // lock-order rule. (This is the avatar half of the teleport-crash path.)
+            lock (_simLock)
             lock (_characterGate)
             {
                 var character = new CharacterVirtual(settings, desc.Position, desc.Orientation, desc.UserData, system);
@@ -1407,6 +1440,9 @@ namespace Legion.Physics.Jolt
 
         public void RemoveCharacter(CharacterId character)
         {
+            // _simLock: logout/teleport-out destroys the marker body (broadphase mutation) off the
+            // heartbeat thread. Same ordering rule as AddCharacter.
+            lock (_simLock)
             lock (_characterGate)
             {
                 if (!_characters.TryGet(character.Value, out JoltCharacterRecord rec))
@@ -1687,7 +1723,21 @@ namespace Legion.Physics.Jolt
         public void SetWaterHeight(float height) => _waterHeight = height;
 
         // =====================================================================
-        // Queries  (safe concurrent with Step - use the NarrowPhaseQuery)
+        // Queries
+        //
+        // EVERY query below MUST hold _simLock for the whole call. They are NOT
+        // safe concurrent with Step: NarrowPhaseQuery walks the same broadphase
+        // Update mutates, and both draw on the PhysicsSystem's internal LIFO
+        // TempAllocator, whose out-of-order free aborts the process (see the
+        // _simLock note at the top of this file).
+        //
+        // Cost: a query issued while the step is running blocks for the remainder
+        // of that step (single-digit ms). That is the same trade BulletSim makes,
+        // and it is strictly better than a hard crash.
+        //
+        // Callers are off-thread by nature - llCastRay runs on script threads and
+        // avatar setup on the login/teleport thread - so this lock is load-bearing,
+        // not defensive.
         // =====================================================================
 
         public bool RayCast(Vector3 origin, Vector3 direction, float maxDistance, QueryFilter filter, out RayHit hit)
@@ -1705,21 +1755,26 @@ namespace Legion.Physics.Jolt
             var ray = new Ray(origin, rayDir);
 
             // QueryFilter is now honoured via a per-layer ObjectLayerFilter (cached per filter value).
-            if (!_system.NarrowPhaseQuery.CastRay(ray, out RayCastResult result, null, FilterFor(filter), null))
-                return false;
-
-            Vector3 point = origin + rayDir * result.Fraction;
-            _joltToRecord.TryGetValue(result.BodyID.ID, out JoltBodyRecord? rec);
-            hit = new RayHit
+            // _simLock spans SurfaceNormalOf too - that takes a body lock and reads shape geometry,
+            // which is equally unsafe against a concurrent Update.
+            lock (_simLock)
             {
-                Body = rec != null ? new BodyId(rec.Handle) : BodyId.Invalid,
-                UserData = rec != null ? rec.UserData : 0u,
-                ChildUserData = ResolveChildUserData(rec, result.subShapeID2),
-                Point = point,
-                Normal = SurfaceNormalOf(result.BodyID, result.subShapeID2, point),
-                Distance = maxDistance * result.Fraction,
-            };
-            return true;
+                if (!_system.NarrowPhaseQuery.CastRay(ray, out RayCastResult result, null, FilterFor(filter), null))
+                    return false;
+
+                Vector3 point = origin + rayDir * result.Fraction;
+                _joltToRecord.TryGetValue(result.BodyID.ID, out JoltBodyRecord? rec);
+                hit = new RayHit
+                {
+                    Body = rec != null ? new BodyId(rec.Handle) : BodyId.Invalid,
+                    UserData = rec != null ? rec.UserData : 0u,
+                    ChildUserData = ResolveChildUserData(rec, result.subShapeID2),
+                    Point = point,
+                    Normal = SurfaceNormalOf(result.BodyID, result.subShapeID2, point),
+                    Distance = maxDistance * result.Fraction,
+                };
+                return true;
+            }
         }
 
         public int RayCastAll(Vector3 origin, Vector3 direction, float maxDistance, QueryFilter filter, Span<RayHit> hits)
@@ -1736,6 +1791,8 @@ namespace Legion.Physics.Jolt
             // needs an ICollection; this List is the one query-path allocation (queries run at script
             // rate, not per frame - a thread-local pool is a later optimisation, noted).
             var results = new List<RayCastResult>();
+            lock (_simLock)
+            {
             _system.NarrowPhaseQuery.CastRay(
                 ray, new RayCastSettings(), CollisionCollectorType.AllHitSorted, results, null, FilterFor(filter), null, null);
 
@@ -1770,6 +1827,7 @@ namespace Legion.Physics.Jolt
                 havePrev = true;
             }
             return n;
+            }   // _simLock (spans SurfaceNormalOf in the loop above - also unsafe vs a live Update)
         }
 
         // JoltPhysicsSharp 2.19.x query adaptation (two changes vs 2.18.6; RayCast unaffected):
@@ -1810,9 +1868,12 @@ namespace Legion.Physics.Jolt
             using var sphere = new SphereShape(MathF.Max(0.001f, radius));
             var found = new List<CollideShapeResult>();
             var cs = DefaultCollideSettings();
-            _system.NarrowPhaseQuery.CollideShape(
-                sphere, Vector3.One, Matrix4x4.Transpose(Matrix4x4.CreateTranslation(center)), cs, Vector3.Zero,
-                CollisionCollectorType.AllHit, found, null, FilterFor(filter), null, null);
+            lock (_simLock)
+            {
+                _system.NarrowPhaseQuery.CollideShape(
+                    sphere, Vector3.One, Matrix4x4.Transpose(Matrix4x4.CreateTranslation(center)), cs, Vector3.Zero,
+                    CollisionCollectorType.AllHit, found, null, FilterFor(filter), null, null);
+            }
             return CollectUniqueBodies(found, results);
         }
 
@@ -1828,9 +1889,12 @@ namespace Legion.Physics.Jolt
             com.Translation = center;
             var found = new List<CollideShapeResult>();
             var cs = DefaultCollideSettings();
-            _system.NarrowPhaseQuery.CollideShape(
-                box, Vector3.One, Matrix4x4.Transpose(com), cs, Vector3.Zero,
-                CollisionCollectorType.AllHit, found, null, FilterFor(filter), null, null);
+            lock (_simLock)
+            {
+                _system.NarrowPhaseQuery.CollideShape(
+                    box, Vector3.One, Matrix4x4.Transpose(com), cs, Vector3.Zero,
+                    CollisionCollectorType.AllHit, found, null, FilterFor(filter), null, null);
+            }
             return CollectUniqueBodies(found, results);
         }
 
@@ -1850,9 +1914,12 @@ namespace Legion.Physics.Jolt
             com.Translation = origin;
             var results = new List<ShapeCastResult>();
             var scs = DefaultCastSettings();
-            _system.NarrowPhaseQuery.CastShape(
-                shapeRec.NativeShape, Matrix4x4.Transpose(com), castVec, scs, Vector3.Zero,
-                CollisionCollectorType.ClosestHit, results, null, FilterFor(filter), null, null);
+            lock (_simLock)
+            {
+                _system.NarrowPhaseQuery.CastShape(
+                    shapeRec.NativeShape, Matrix4x4.Transpose(com), castVec, scs, Vector3.Zero,
+                    CollisionCollectorType.ClosestHit, results, null, FilterFor(filter), null, null);
+            }
             if (results.Count == 0)
                 return false;
 
@@ -1953,6 +2020,13 @@ namespace Legion.Physics.Jolt
         {
             _stepTimer.Restart();
 
+            // _simLock spans the WHOLE step, not just _system.Update: CharacterVirtual.ExtendedUpdate
+            // (phase 1 below) draws on the SAME internal TempAllocator as Update, so a query landing
+            // between the two would corrupt it just as surely. Held here, released on exit - every
+            // off-thread query blocks for the step duration (single-digit ms) and then proceeds.
+            // Order is _simLock -> _characterGate, matching the rule at the top of this file.
+            lock (_simLock)
+            {
             // 1. Step every CharacterVirtual BEFORE the physics update. They are not part of the
             //    solve, so they must see the world as it was at the start of the frame or avatars
             //    jitter against moving prims. (DESIGN.md step ordering - confirmed done here.)
@@ -2079,6 +2153,7 @@ namespace Legion.Physics.Jolt
                 contactOverflow,
                 activeBodyCount: _activeBodies.Count,
                 physicsMs: (float)_stepTimer.Elapsed.TotalMilliseconds);
+            }   // _simLock
         }
     }
 
