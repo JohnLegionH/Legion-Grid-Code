@@ -123,6 +123,21 @@ namespace Legion.Physics.Jolt
         // =====================================================================
         private readonly object _simLock = new object();
 
+        // Set true (under _simLock) by Dispose. Step and every native query check it under _simLock and
+        // bail out, so a heartbeat Step that races region shutdown does NOTHING rather than touching a
+        // freed PhysicsSystem / CharacterVirtual. Found on Legion 2026-08-02: Scene.Close only Sleep(500)s
+        // to signal the heartbeat (no Join), so Dispose could free native memory mid-Step -> AccessViolation
+        // -> process death -> every region AFTER the first lost its clean-shutdown Backup(true) flush.
+        private volatile bool _disposed;
+
+        // Foundation.Init / Foundation.Shutdown are PROCESS-GLOBAL Jolt lifecycle calls, but there is one
+        // backend per region (INonSharedRegionModule). The FIRST region to dispose used to call
+        // Foundation.Shutdown() and tear down the global allocator/registry out from under every OTHER
+        // region's still-running heartbeat -> use-after-free in their ExtendedUpdate/Update. Ref-count it:
+        // Init only on the 0->1 transition, Shutdown only on the 1->0 transition (the LAST region out).
+        private static readonly object s_foundationGate = new object();
+        private static int s_foundationRefCount;
+
         // Characters (CharacterVirtual) are NOT lock-free like BodyInterface, and they are stepped on
         // the Step thread OUTSIDE _system.Update. So all character create/remove/set/step operations are
         // serialised through this gate and the step-thread-owned list. (Abstraction friction vs the
@@ -277,9 +292,19 @@ namespace Legion.Physics.Jolt
                 threads = 1;
 
             // Native boot. false => single precision (joltc.dll), decision #2 closed.
-            // Foundation.Init is idempotent-safe to pair with Foundation.Shutdown in Dispose.
-            if (!Foundation.Init(false))
-                throw new InvalidOperationException("Jolt Foundation.Init(false) failed (native joltc.dll not loaded).");
+            // PROCESS-GLOBAL and REF-COUNTED: only the first region to come up actually calls
+            // Foundation.Init; Dispose only calls Foundation.Shutdown when the last region goes down (see
+            // s_foundationRefCount). This stops one region's shutdown from tearing down Jolt under the
+            // others (the 2026-08-02 multi-region AccessViolation).
+            lock (s_foundationGate)
+            {
+                if (s_foundationRefCount == 0)
+                {
+                    if (!Foundation.Init(false))
+                        throw new InvalidOperationException("Jolt Foundation.Init(false) failed (native joltc.dll not loaded).");
+                }
+                s_foundationRefCount++;
+            }
 
             // --- Object-layer collision matrix (delta #3) ---
             // ObjectLayerPairFilterTable starts with EVERY pair disabled; we turn on
@@ -370,6 +395,35 @@ namespace Legion.Physics.Jolt
 
         public void Dispose()
         {
+            // Take _simLock for the WHOLE teardown so Dispose can never overlap an in-flight Step (Step
+            // holds _simLock for its whole duration). Either Step runs to completion and THEN Dispose
+            // proceeds, or Dispose gets in first, sets _disposed, and the next Step early-returns before
+            // touching any now-freed native object. _disposed is set BEFORE any native free.
+            // Deadlock-free: Step never blocks on anything Dispose holds, so a Dispose waiting on _simLock
+            // waits at most one step, then proceeds. Lock order _simLock -> _characterGate is preserved.
+            lock (_simLock)
+            {
+                if (_disposed)
+                    return;        // idempotent
+                _disposed = true;  // from here on Step + queries no-op
+
+                DisposeNative();
+            }
+
+            // Foundation teardown is PROCESS-GLOBAL and ref-counted: only the LAST region out actually
+            // shuts Jolt down. Done outside _simLock (different scope) but _disposed is already set, so this
+            // instance's Step can't re-enter Jolt in the meantime. Other regions still up keep the count > 0.
+            lock (s_foundationGate)
+            {
+                if (s_foundationRefCount > 0 && --s_foundationRefCount == 0)
+                    Foundation.Shutdown();
+            }
+        }
+
+        // The native + managed teardown, run under _simLock (see Dispose). Everything that frees a native
+        // Jolt object lives here so it is serialised against Step by the caller's lock.
+        private void DisposeNative()
+        {
             // Characters own native CharacterVirtual objects + shapes and hold a ref to _system, so
             // dispose them BEFORE the system teardown below.
             lock (_characterGate)
@@ -429,7 +483,7 @@ namespace Legion.Physics.Jolt
             _objectLayerPairFilter?.Dispose();
             _objectLayerPairFilter = null;
 
-            Foundation.Shutdown();
+            // Foundation.Shutdown() is NOT here anymore - it is process-global + ref-counted in Dispose().
         }
 
         // =====================================================================
@@ -1759,6 +1813,7 @@ namespace Legion.Physics.Jolt
             // which is equally unsafe against a concurrent Update.
             lock (_simLock)
             {
+                if (_disposed) return false;   // backend torn down (shutdown race) - no native call
                 if (!_system.NarrowPhaseQuery.CastRay(ray, out RayCastResult result, null, FilterFor(filter), null))
                     return false;
 
@@ -1793,6 +1848,7 @@ namespace Legion.Physics.Jolt
             var results = new List<RayCastResult>();
             lock (_simLock)
             {
+            if (_disposed) return 0;   // backend torn down (shutdown race) - no native call
             _system.NarrowPhaseQuery.CastRay(
                 ray, new RayCastSettings(), CollisionCollectorType.AllHitSorted, results, null, FilterFor(filter), null, null);
 
@@ -1870,6 +1926,7 @@ namespace Legion.Physics.Jolt
             var cs = DefaultCollideSettings();
             lock (_simLock)
             {
+                if (_disposed) return 0;   // backend torn down (shutdown race) - no native call
                 _system.NarrowPhaseQuery.CollideShape(
                     sphere, Vector3.One, Matrix4x4.Transpose(Matrix4x4.CreateTranslation(center)), cs, Vector3.Zero,
                     CollisionCollectorType.AllHit, found, null, FilterFor(filter), null, null);
@@ -1891,6 +1948,7 @@ namespace Legion.Physics.Jolt
             var cs = DefaultCollideSettings();
             lock (_simLock)
             {
+                if (_disposed) return 0;   // backend torn down (shutdown race) - no native call
                 _system.NarrowPhaseQuery.CollideShape(
                     box, Vector3.One, Matrix4x4.Transpose(com), cs, Vector3.Zero,
                     CollisionCollectorType.AllHit, found, null, FilterFor(filter), null, null);
@@ -1916,6 +1974,7 @@ namespace Legion.Physics.Jolt
             var scs = DefaultCastSettings();
             lock (_simLock)
             {
+                if (_disposed) return false;   // backend torn down (shutdown race) - no native call
                 _system.NarrowPhaseQuery.CastShape(
                     shapeRec.NativeShape, Matrix4x4.Transpose(com), castVec, scs, Vector3.Zero,
                     CollisionCollectorType.ClosestHit, results, null, FilterFor(filter), null, null);
@@ -2027,6 +2086,14 @@ namespace Legion.Physics.Jolt
             // Order is _simLock -> _characterGate, matching the rule at the top of this file.
             lock (_simLock)
             {
+            // Shutdown guard: if Dispose has run (or is mid-teardown having already set _disposed under
+            // this same lock), do NOTHing - the PhysicsSystem / CharacterVirtuals are freed or about to be.
+            // This is the heartbeat-vs-Dispose race fix: a Step that loses the race to Dispose returns an
+            // empty result instead of calling ExtendedUpdate/Update on freed native memory (the 2026-08-02
+            // shutdown AccessViolation). _system is also null after teardown, so this doubles as a null guard.
+            if (_disposed)
+                return default;
+
             // 1. Step every CharacterVirtual BEFORE the physics update. They are not part of the
             //    solve, so they must see the world as it was at the start of the frame or avatars
             //    jitter against moving prims. (DESIGN.md step ordering - confirmed done here.)
