@@ -2773,21 +2773,14 @@ namespace OpenSim.Region.PhysicsModules.LegionJolt
         // shapes. (Full query family - RaycastActor, Sphere/BoxProbe for llSensor - remains M6.7.)
         // ---------------------------------------------------------------------
 
-        // TEMPORARY MITIGATION (2026-08-01) - was `=> true`.
-        //
-        // llCastRay runs on SCRIPT threads. Routing it here put an unsynchronised native Jolt query
-        // on every script thread, concurrent with the heartbeat's _system.Update - one of the two
-        // proven paths into the TempAllocator abort that killed the simulator on Legion.
-        //
-        // The backend is now locked (_simLock serialises queries against Step), so this SHOULD be
-        // safe to re-enable. It is left false for now so the locking fix can be validated in-world
-        // on ONE variable at a time: confirm the region survives a teleport + normal load first,
-        // then flip this back to true and re-test specifically with llCastRay-heavy scripts.
-        //
-        // While false, llCastRay falls back to OpenSim's own geometry intersection (the pre-M6.3
-        // behaviour) - less accurate against Jolt's real shapes, but it cannot abort the process.
-        // RE-ENABLE once the lock is proven; this is a stopgap, not the intended end state.
-        public override bool SupportsRaycastWorldFiltered() => false;
+        // llCastRay runs on SCRIPT threads, so routing it here issues a native Jolt NarrowPhaseQuery off
+        // the heartbeat thread, concurrent with _system.Update. That is SAFE: the backend's RayCast/
+        // RayCastAll take _simLock, the same gate that wraps the whole Step (Update + ExtendedUpdate), so a
+        // script raycast and the physics step can never be inside Jolt's non-thread-safe LIFO TempAllocator
+        // at once. (This was briefly `=> false` on 2026-08-01 as a stopgap BEFORE the lock existed - that
+        // window is closed; the lock, not disabling the feature, is the fix.) Returning true keeps llCastRay
+        // testing Jolt's real cooked shapes rather than falling back to OpenSim's own geometry intersection.
+        public override bool SupportsRaycastWorldFiltered() => true;
 
         // TWO llCastRay entry points route here, and BOTH must be overridden or llCastRay returns 0:
         //  - the 5-arg (RayFilterFlags) overload is what OpenSim's XEngine/YEngine LSL_Api.llCastRay calls
