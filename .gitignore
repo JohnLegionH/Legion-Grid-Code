@@ -159,3 +159,9 @@ bin/config-include/StandaloneCommon*.ini
 # Local dev docs & test scripts — not part of the shipped repo
 /Build Documents/
 /LSL Test Scripts/
+
+# Vendored PATCHED joltc native + its source patch (see native/joltc/README.md).
+# The per-instance _simLock REQUIRES this DLL; *.dll / *.patch above would
+# silently drop both from the repo, so unignore them explicitly.
+!native/joltc/per-system-tempallocator.patch
+!native/joltc/win-x64/joltc.dll
