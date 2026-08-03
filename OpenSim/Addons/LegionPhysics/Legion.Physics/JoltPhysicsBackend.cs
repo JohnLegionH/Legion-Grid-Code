@@ -116,48 +116,55 @@ namespace Legion.Physics.Jolt
             new ConcurrentDictionary<QueryFilter, LayerQueryFilter>();
 
         // =====================================================================
-        // _simLock - the ONE gate serialising native Jolt calls that share joltc's
-        // TempAllocator. It is STATIC: one lock for EVERY backend / region.
+        // _simLock - the per-backend gate serialising this region's native Jolt
+        // calls. PER-INSTANCE: one lock per backend / region, so regions step in
+        // parallel across cores.
         //
-        // WHY STATIC (the root cause, found on Legion 2026-08-02 after three
-        // per-instance fixes failed to stop the crash):
-        // PhysicsSystem.Update / CharacterVirtual.ExtendedUpdate / NarrowPhaseQuery
-        // all allocate from a TempAllocatorImpl - a LIFO STACK that is NOT
-        // thread-safe. joltc does not create one PER PhysicsSystem; it supplies a
-        // SINGLE shared/internal allocator to every JPH_PhysicsSystem_Update call
-        // (JoltPhysicsSharp 2.19.1 exposes no TempAllocator type, no 4-arg Update,
-        // and joltc has no JPH_TempAllocator export - so we cannot give each system
-        // its own). Proof it is shared: three regions' heartbeats (three different
-        // tids) stepping concurrently produced "TempAllocator: Freeing in the wrong
-        // order" -> std::abort(); a per-system allocator physically cannot free
-        // out-of-order across threads. So the allocator is process-global and a
-        // PER-INSTANCE lock cannot protect it - two regions each holding their OWN
-        // _simLock still hammer the one allocator. It MUST be static.
+        // !!! CRITICAL DEPENDENCY: this is only safe with the PATCHED joltc.dll !!!
+        // Stock JoltPhysics.Native 1.0.4 joltc supplies ONE process-global
+        // TempAllocatorImpl (a LIFO stack, NOT thread-safe) to every
+        // JPH_PhysicsSystem_Update and all six JPH_CharacterVirtual_* scratch
+        // consumers. Proof it was shared: three regions' heartbeats stepping
+        // concurrently produced "TempAllocator: Freeing in the wrong order" ->
+        // std::abort() (Legion, 2026-08-02). With the STOCK DLL a per-instance
+        // lock CANNOT protect it - two regions each holding their own _simLock
+        // still hammer the one allocator. If anyone drops the stock
+        // JoltPhysics.Native joltc.dll back into bin (e.g. a NuGet restore /
+        // rebuild copying over the patched one), the shared allocator returns
+        // and the cross-region crashes come back. Verify the deployed joltc.dll
+        // is the patched build before touching this lock's scope.
         //
-        // History (all real, all needed - but all INTRA-region until #4):
+        // The patched joltc (source: D:\joltc-build, amerkoleci/joltc @
+        // 1715c5aab8 + per-system allocator patch; the exact source of shipped
+        // 1.0.4, exports verified identical 1086/1086) gives EACH
+        // JPH_PhysicsSystem its own TempAllocatorImplWithMallocFallback(8MB),
+        // wired through ALL SEVEN consuming sites: PhysicsSystem_Update and
+        // CharacterVirtual Update / ExtendedUpdate / RefreshContacts /
+        // WalkStairs / StickToFloor / SetShape. That matches BulletSim's
+        // per-world scratch and InWorldz PhysX's per-PxScene scratch model:
+        // regions share no native scratch, so cross-region native calls need no
+        // mutual exclusion, and _simLock only guards INTRA-region races (this
+        // region's scene thread vs its own heartbeat Step).
+        //
+        // History (all real, all still needed):
         //   1. NarrowPhaseQuery races Update   -> queries take _simLock
         //   2. Dispose races Step              -> Dispose takes _simLock + _disposed
         //   3. body Create/Remove races Update -> all body ops take _simLock
-        //   4. Update races Update ACROSS REGIONS on the shared allocator -> _simLock
-        //      made STATIC (this change). #1-3 fixed one-backend races; only a static
-        //      lock fixes the cross-backend race.
+        //   4. Update races Update ACROSS REGIONS on the stock shared allocator
+        //      -> _simLock was made STATIC (2026-08-02) as the stopgap, costing
+        //      all cross-region parallelism; reverted to per-instance
+        //      (2026-08-03) once the patched joltc gave every PhysicsSystem its
+        //      own allocator. #1-3 are the races this lock still guards.
         //
-        // COST / known limitation: a single static lock serialises ALL Jolt native
-        // work across ALL regions - physics no longer runs in parallel across cores.
-        // On a few regions each Step is a few ms vs the ~90ms (11fps) budget, so it
-        // fits with headroom; but it is a throughput ceiling as regions/load grow.
-        // The parallel fix (a TempAllocatorImpl per backend passed to Update) needs a
-        // binding capability we do not have on net8: revisit if JoltPhysicsSharp gains
-        // a per-system TempAllocator API (2.19.2+ is net9/net10-only today).
-        //
-        // LOCK ORDER - always _simLock FIRST, then _characterGate. _characterGate is
-        // still PER-INSTANCE and is only ever taken INSIDE _simLock, so the order holds
-        // globally: a region waiting on the static _simLock holds no other Jolt lock,
-        // so there is no cross-region inversion. Monitor is re-entrant per thread, so a
-        // nested take of _simLock on the same thread is harmless. _gate (HandleTable)
-        // is a leaf lock - it calls nothing - so it can be taken under either.
+        // LOCK ORDER - always _simLock FIRST, then _characterGate. Both are
+        // per-instance and _characterGate is only ever taken INSIDE _simLock, so
+        // the order holds per backend, and no thread ever holds two backends'
+        // locks at once - no cross-region inversion. Monitor is re-entrant per
+        // thread, so a nested take of _simLock on the same thread is harmless.
+        // _gate (HandleTable) is a leaf lock - it calls nothing - so it can be
+        // taken under either.
         // =====================================================================
-        private static readonly object _simLock = new object();
+        private readonly object _simLock = new object();
 
         // Set true (under _simLock) by Dispose. Step and every native query check it under _simLock and
         // bail out, so a heartbeat Step that races region shutdown does NOTHING rather than touching a
