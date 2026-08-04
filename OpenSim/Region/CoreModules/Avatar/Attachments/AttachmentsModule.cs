@@ -31,7 +31,6 @@ using System.Reflection;
 using System.IO;
 using System.Text;
 using System.Threading;
-using System.Threading.Tasks;
 using System.Xml;
 using log4net;
 using Mono.Addins;
@@ -340,83 +339,23 @@ namespace OpenSim.Region.CoreModules.Avatar.Attachments
                     ad.AttachmentObjectStates = new List<string>(attachments.Count);
                     sp.InTransitScriptStates.Clear();
 
-                    // Use enhanced script state preservation if available
-                    try
+                    foreach (SceneObjectGroup sog in attachments)
                     {
-                        // Capture enhanced script states asynchronously
-                        var enhancedTask = CaptureEnhancedScriptStatesAsync(sp);
-                        
-                        foreach (SceneObjectGroup sog in attachments)
-                        {
-                            // We need to make a copy and pass that copy
-                            // because of transfers with the same sim
-                            SceneObjectGroup clone = (SceneObjectGroup)sog.CloneForNewScene();
-                            // Attachment module assumes that GroupPosition holds the offsets...!
-                            clone.RootPart.GroupPosition = sog.RootPart.AttachedPos;
-                            clone.IsAttachment = false;
-                            ad.AttachmentObjects.Add(clone);
-                            string state = sog.GetStateSnapshot();
-                            ad.AttachmentObjectStates.Add(state);
-                            sp.InTransitScriptStates.Add(state);
+                        // We need to make a copy and pass that copy
+                        // because of transfers with the same sim
+                        SceneObjectGroup clone = (SceneObjectGroup)sog.CloneForNewScene();
+                        // Attachment module assumes that GroupPosition holds the offsets...!
+                        clone.RootPart.GroupPosition = sog.RootPart.AttachedPos;
+                        clone.IsAttachment = false;
+                        ad.AttachmentObjects.Add(clone);
+                        string state = sog.GetStateSnapshot();
+                        ad.AttachmentObjectStates.Add(state);
+                        sp.InTransitScriptStates.Add(state);
 
-                            // Scripts of the originals will be removed when the Agent is successfully removed.
-                            // sog.RemoveScriptInstances(true);
-                        }
-                        
-                        // Wait for enhanced script state capture to complete
-                        enhancedTask.Wait(5000); // 5 second timeout
-                        
-                        m_log.InfoFormat("[ATTACHMENTS]: Enhanced script state preservation completed for {0} attachments", attachments.Count);
-                    }
-                    catch (Exception ex)
-                    {
-                        m_log.WarnFormat("[ATTACHMENTS]: Enhanced script state preservation failed, using legacy method: {0}", ex.Message);
-                        
-                        // Fallback to legacy behavior is already in place above
+                        // Scripts of the originals will be removed when the Agent is successfully removed.
+                        // sog.RemoveScriptInstances(true);
                     }
                 }
-            }
-        }
-
-        /// <summary>
-        /// Capture enhanced script states using the new preservation system
-        /// </summary>
-        private async Task CaptureEnhancedScriptStatesAsync(IScenePresence sp)
-        {
-            try
-            {
-                if (sp is ScenePresence scenePresence)
-                {
-                    // Enhanced script state capture for region crossing
-                    // TODO: Implement enhanced attachment script state capture when ScriptEngine integration is available
-                    m_log.DebugFormat("[ATTACHMENTS]: Enhanced script state capture for {0}", scenePresence.Name);
-                }
-            }
-            catch (Exception ex)
-            {
-                m_log.ErrorFormat("[ATTACHMENTS]: Error in enhanced script state capture: {0}", ex.Message);
-                throw;
-            }
-        }
-
-        /// <summary>
-        /// Restore enhanced script states using the new preservation system
-        /// </summary>
-        private async Task RestoreEnhancedScriptStatesAsync(ScenePresence sp)
-        {
-            try
-            {
-                if (sp != null)
-                {
-                    // Enhanced script state restoration for region crossing
-                    // TODO: Implement enhanced attachment script state restoration when ScriptEngine integration is available
-                    m_log.InfoFormat("[ATTACHMENTS]: Enhanced script state restoration completed for {0}", sp.Name);
-                }
-            }
-            catch (Exception ex)
-            {
-                m_log.ErrorFormat("[ATTACHMENTS]: Error in enhanced script state restoration: {0}", ex.Message);
-                throw;
             }
         }
 
@@ -451,26 +390,7 @@ namespace OpenSim.Region.CoreModules.Avatar.Attachments
                 ad.AttachmentObjectStates = null;
 
                 if (attachments.Count > 0)
-                {
                     m_scene.IncomingAttechments(sp, attachments);
-                    
-                    // Schedule enhanced script state restoration after attachment processing
-                    Task.Run(async () =>
-                    {
-                        try
-                        {
-                            // Wait a moment for attachments to be fully processed
-                            await Task.Delay(1000);
-                            
-                            // Restore enhanced script states
-                            await RestoreEnhancedScriptStatesAsync(sp);
-                        }
-                        catch (Exception ex)
-                        {
-                            m_log.WarnFormat("[ATTACHMENTS]: Enhanced script state restoration failed: {0}", ex.Message);
-                        }
-                    });
-                }
                 else
                     sp.GotAttachmentsData = true;
             }
