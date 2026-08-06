@@ -56,18 +56,20 @@ namespace OpenSim.Server.Handlers.DirectDelivery
         private readonly IAssetService m_Assets;
         private readonly IInventoryService m_Inventory;
         private readonly UUID m_CreatorID;
+        private readonly IInstantMessage m_IM;   // optional; null => no live notification (still delivers)
 
         private const string PlaceholderDesc = "Legion Market placeholder";
 
         public DirectDeliveryPostHandler(
             IUserAccountService users, IAssetService assets, IInventoryService inventory,
-            UUID creatorID, IServiceAuth auth) :
+            UUID creatorID, IInstantMessage im, IServiceAuth auth) :
                 base("POST", "/delivery", auth)
         {
             m_Users = users;
             m_Assets = assets;
             m_Inventory = inventory;
             m_CreatorID = creatorID;
+            m_IM = im;
         }
 
         protected override byte[] ProcessRequest(string path, Stream requestData,
@@ -162,6 +164,9 @@ namespace OpenSim.Server.Handlers.DirectDelivery
                 m_log.InfoFormat("[DirectDelivery]: delivered notecard item {0} (asset {1}) to {2} {3} [{4}] in folder {5}",
                     item.ID, item.AssetID, first, last, buyer, folder.ID);
 
+                // Additive live notification — must never affect the delivery result (item is already filed).
+                NotifyOnline(buyer, item.ID, itemName);
+
                 string ok = "{\"status\":\"delivered\",\"principal_id\":\"" + buyer +
                     "\",\"inventory_item_id\":\"" + item.ID +
                     "\",\"asset_id\":\"" + item.AssetID + "\"}";
@@ -171,6 +176,58 @@ namespace OpenSim.Server.Handlers.DirectDelivery
             {
                 m_log.Error("[DirectDelivery]: delivery failed", e);
                 return Json(httpResponse, 500, "{\"status\":\"error\",\"reason\":\"internal error\"}");
+            }
+        }
+
+        // Live inventory notification (ADDITIVE). After the item is filed, hand an InventoryOffered IM
+        // to the in-process messaging service. For an ONLINE buyer the region's InventoryTransferModule
+        // fetches the item and calls SendBulkUpdateInventory (item appears live) and shows the
+        // keep/discard toast; an OFFLINE buyer's IM is queued by OfflineIM (delivered next login). Any
+        // failure here is swallowed — the item is already in inventory, so delivery still succeeds.
+        //
+        // LIMITATION (Option A — in-process HGInstantMessageService): this instance sends with an EMPTY
+        // messageKey, because HGInstantMessageService.m_messageKey is a PER-INSTANCE field set only in
+        // the first (InstantMessageServerConnector-owned) instance's ctor; the static m_Initialized guard
+        // makes our second instance skip that init. This is correct ONLY while [Messaging] MessageKey is
+        // empty (it is on this grid). If a MessageKey is ever configured, the region will reject this
+        // forward and live-notify silently degrades to "appears on relog" (item still filed, no crash).
+        // The fix then is Option C: read [Messaging] MessageKey from config and call the static
+        // InstantMessageServiceConnector.SendInstantMessage(regionURI, gim, key) — which adds an
+        // OpenSim.Services.Connectors assembly reference.
+        private void NotifyOnline(UUID buyer, UUID itemID, string itemName)
+        {
+            if (m_IM == null)
+                return;
+            try
+            {
+                // InventoryOffered bucket: [0] = asset type, [1..17] = item id (see
+                // InventoryTransferModule.OnGridInstantMessage, which reads exactly this).
+                byte[] bucket = new byte[17];
+                bucket[0] = (byte)AssetType.Notecard;
+                Array.Copy(itemID.GetBytes(), 0, bucket, 1, 16);
+
+                GridInstantMessage gim = new GridInstantMessage
+                {
+                    fromAgentID = m_CreatorID.Guid,
+                    fromAgentName = "Legion Market",
+                    toAgentID = buyer.Guid,
+                    dialog = (byte)InstantMessageDialog.InventoryOffered,
+                    fromGroup = false,
+                    message = itemName,
+                    imSessionID = UUID.Random().Guid,
+                    offline = 0,
+                    Position = Vector3.Zero,
+                    binaryBucket = bucket,
+                    ParentEstateID = 0,
+                    RegionID = Guid.Empty,
+                    timestamp = (uint)Util.UnixTimeSinceEpoch()
+                };
+                m_IM.IncomingInstantMessage(gim);
+            }
+            catch (Exception e)
+            {
+                // Non-fatal: item is already filed; it appears on relog even if this notification fails.
+                m_log.Warn("[DirectDelivery]: live-notify IM failed (item already delivered)", e);
             }
         }
 

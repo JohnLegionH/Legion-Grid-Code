@@ -91,6 +91,16 @@ namespace OpenSim.Server.Handlers.DirectDelivery
             if (inventory == null || asset == null || users == null)
                 throw new Exception("[DirectDelivery]: failed to load InventoryService / AssetService / UserAccountService");
 
+            // Optional live-notification service (Option A). Loaded by DLL-name at runtime (no compile-time
+            // reference to the Hypergrid assembly). Defensive: if it can't load, log and pass null — the
+            // handler then files the item silently (it appears on the buyer's relog, as before).
+            string imModule = cfg.GetString("NotifyIMService", "OpenSim.Services.HypergridService.dll:HGInstantMessageService");
+            IInstantMessage im = null;
+            try { im = ServerUtils.LoadPlugin<IInstantMessage>(imModule, new object[] { config }); }
+            catch (Exception e) { m_log.Warn("[DirectDelivery]: live-notify IM service failed to load; deliveries will file silently", e); }
+            if (im == null)
+                m_log.Warn("[DirectDelivery]: no IM service — online buyers see deliveries only after relog");
+
             // Fail-closed authentication. ServiceAuth.Create alone can return a non-null auth that
             // only blocks LL-viewer requests (DisallowLlHttpRequest) without requiring the secret,
             // so we explicitly require AuthType=BasicHttpAuthentication + credentials here.
@@ -105,7 +115,7 @@ namespace OpenSim.Server.Handlers.DirectDelivery
             if (!UUID.TryParse(cfg.GetString("CreatorID", DefaultCreatorID), out UUID creatorID) || creatorID.IsZero())
                 creatorID = new UUID(DefaultCreatorID);
 
-            server.AddStreamHandler(new DirectDeliveryPostHandler(users, asset, inventory, creatorID, auth));
+            server.AddStreamHandler(new DirectDeliveryPostHandler(users, asset, inventory, creatorID, im, auth));
 
             m_log.InfoFormat("[DirectDelivery]: enabled — POST /delivery (authenticated), CreatorID {0}", creatorID);
         }
