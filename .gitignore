@@ -153,6 +153,10 @@ bin/config-include/StandaloneCommon*.ini
 !bin/config-include/GridCommon.ini.example
 !bin/config-include/StandaloneCommon.ini.example
 
+# Email inbound IMAP credentials (T2) — real secret, never commit; keep the template.
+bin/config-include/EmailInbound-secret.ini
+!bin/config-include/EmailInbound-secret.ini.example
+
 # Windows "Copy" duplicates
 * - Copy.*
 
